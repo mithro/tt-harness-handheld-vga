@@ -101,6 +101,19 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
   mode, width, height, clock_hz, clocks_per_pixel, capture_after_clock, frames), then one
   hash per line, frame 0 first. Frame 0 starts at the first vsync-pulse end after
   `capture_after_clock`; clock 0 is the first clock of the reset sequence.
+- **Those hashes are not standard FNV-1a 64.** `ttvga/harness/tb.cpp:238` has the offset
+  basis as 1469598103934665603 (0x14650fb0739d0383); the standard one is
+  14695981039346656037 (0xcbf29ce484222325). A standard FNV-1a over the correct pixels
+  mismatches every line. Reported by the `tt-harness-fpga-vga` project on 2026-11-23,
+  which reproduced the published hashes exactly using the mistyped basis, so the pixels
+  agree. Whether the constant or the file header gets fixed is the videos project's
+  call; check which before comparing. The videos testbench's clock counter is the
+  per-clock sample index plus 1.
+- `tt-harness-fpga-vga`'s own reference files use standard FNV-1a 64. Its
+  `reference.json` schema is settling: id, clock_hz, clock_declared, reset_clocks, ui_in,
+  uio_in, clocks, dump (`uo_out.bin.gz`), dump_sha256 (of the uncompressed bytes),
+  uio_dump, uio_dump_sha256, mode, line_clocks, lines, sync polarities, width, height,
+  frames (index, start_clock, hash, png), frames_complete, partial_frames_dropped, tools.
 - This project's verdict is per clock and does not use these hashes. They are a second,
   independent check: frames cut from a recording can be hashed and compared with them.
 - Reset stimulus in the reference: `ena=1`, `rst_n=0` for 10 clocks with `ui_in` already
