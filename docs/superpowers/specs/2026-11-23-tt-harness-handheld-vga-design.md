@@ -67,6 +67,8 @@ remotely.
 
 ## Constraints
 
+- Languages: LiteX and Migen, or plain Verilog. No Chisel (owner's instruction). The
+  Game Bub's own framework is Chisel and is not used.
 - Game Bub: the MCU owns the SD card and FPGA configuration; the FPGA sees it only over
   QSPI. The panel is parallel RGB scanned as 480x800 portrait. Audio is I2S at a fixed
   48 kHz with MCLK = 256 x fs. One 50 MHz oscillator.
@@ -196,10 +198,16 @@ A Python package using LiteX/Migen, in three layers:
 
 ### Arty board layer
 
-- Recorder: `uo_out` per project clock from the first reset clock, run-length encoded,
-  into a DDR3 buffer, then sent to the Pi. Emitted as a vgacap stream: `VGCH` header in
-  external-clock mode, `RLE ` chunks, and a `TIME` chunk with the cumulative dropped
-  count and message `overrun` if the buffer ever overflows.
+- Recorder: `uo_out` per project clock from the first reset clock, stored as raw bytes
+  in the DDR3 (256 MB holds about ten seconds at 25 MHz, the length of the shortest
+  reference clip), then sent to the Pi. Raw storage is used because a busy design changes
+  most pixels, which makes run-length pairs larger than the samples themselves.
+- The host turns the buffer into a vgacap stream: `VGCH` header in external-clock mode,
+  `RAW ` or `RLE ` chunks, and a `TIME` chunk with the cumulative dropped count and
+  message `overrun` if samples were ever lost.
+- The sampler itself is plain Verilog with no vendor primitives. The capture project has
+  proposed that it live in `vgacap/rtl/` as a shared capture library with this project's
+  sampler as the first contribution; the LiteX wrapper stays here.
 - Transport to the Pi: Ethernet where it works on both toolchains, with the UART as the
   fallback for short captures. *(Builder's call.)*
 - A host-side script on the Pi loads the bitstream, collects the stream and hands it to
@@ -216,9 +224,8 @@ Kept to one code dependency and two data formats:
   overrides from a `tinytapeout-vga-videos` checkout) and the reference files
   (`reference/<shuttle>/<macro>.json` produced by `tt-harness-fpga-vga`). This project
   reads the files; it does not import either project's code.
-- **Duplicated here on purpose:** the vgacap stream *writer* used by the Arty recorder
-  (small, and it runs in gateware and firmware where the Python package cannot), the
-  reference file reader, and the verdict logic (exact, shifted, similar, inconclusive).
+- **Duplicated here on purpose:** the reference file reader and the verdict logic
+  (exact, shifted, similar, inconclusive).
 - Nothing is needed from any of them to build or run the Game Bub harness.
 
 ## Verification
