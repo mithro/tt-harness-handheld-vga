@@ -1,0 +1,44 @@
+# Arty A7 boards on fpgas.online
+
+## Survey of the Welland site, 2026-11-23: no Arty is live
+
+A read-only survey (nothing loaded, probed over JTAG or written remotely) found no Arty on
+any reachable Raspberry Pi. All 23 Pis with a DHCP lease on `tweed` were checked with
+`lsusb`; none shows the Arty's FTDI device (`0403:6010`). The fleet page
+(`https://welland.fpgas.online/fleet/`) lists six Arty A7-35 boards, all "missing" for 36
+to 39 days and "on no port".
+
+| Arty DNA | Host Pi serial | Last port | USB serial (from old docs) |
+|---|---|---|---|
+| 0x0004e4897221085c | 0000000080863963 (3B+) | sw2 p11 | unknown |
+| 0x00628502251ea85c | 10000000ce8e3593 (4B) | sw2 p24 | 210319B301DE |
+| 0x006cc522278a2854 | 100000008483b266 (4B) | sw2 p37 | unknown |
+| 0x0074c522278a2854 | 10000000302bb73d (4B) | sw2 p48 | unknown |
+| 0x0144cd2a47442854 | 10000000613a4524 (4B) | sw2 p48 | 210319B0C238 |
+| 0x002c8d02251ea854 | 10000000f77b8415 (4B) | sw2 p48 | 210319B3E5C5 |
+
+The ports in the October 2026 documents (sw2 p9, p10, p12, p15) now hold Tiny Tapeout
+boards (p9, p10), a Pi that does not finish booting (p12), or nothing (p15). One
+unregistered port, sw2 p30, has link and draws 5.0 W but did not answer SSH.
+
+Not verified: where the boards physically are and whether they are powered.
+
+## Using an Arty once one is back (from the documents; untested)
+
+`<s>.<p>` is the switch and port.
+
+```
+ssh -J tweed.welland.mithis.com pi@10.21.<s>.<p> 'cat > /home/pi/x.bit' < x.bit
+ssh -J tweed.welland.mithis.com pi@10.21.<s>.<p> 'sudo flock -n /run/fpgas-online/arty.lock openFPGALoader -b arty /home/pi/x.bit'
+ssh -t -J tweed.welland.mithis.com pi@10.21.<s>.<p> 'picocom -b 115200 /dev/serial/by-id/usb-Digilent_Digilent_USB_Device_<SN>-if01-port0'
+```
+
+- The UART is `/dev/ttyUSB1`; JTAG is interface 0.
+- The Pi image has openFPGALoader, picocom, tio, minicom and pyserial. Its root is a
+  tmpfs overlay, so uploads vanish on reboot.
+- `/run/fpgas-online/arty.lock` is taken with `flock` by `fpgas-verify` and
+  `fpgas-arty-debug`; take it for every load.
+- PMOD HAT wiring differs between boards (three boards: HAT JA to Arty JC, JB to JD, JC to
+  JB; one: JA to JC, JB to JB, JC to JD; one reads nothing). Arty JA is free on all.
+
+Raw logs of the survey are in `tmp/arty-survey/` (not committed).
