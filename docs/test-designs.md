@@ -114,6 +114,16 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
   uio_in, clocks, dump (`uo_out.bin.gz`), dump_sha256 (of the uncompressed bytes),
   uio_dump, uio_dump_sha256, mode, line_clocks, lines, sync polarities, width, height,
   frames (index, start_clock, hash, png), frames_complete, partial_frames_dropped, tools.
+- That schema (version 1) and `docs/frame-definition.md` were merged on local `main` of
+  `tt-harness-fpga-vga` at commit 34dbd75 on 2026-11-23. The fields this project relies
+  on: `dump` is `uo_out.bin.gz`, one byte per clock, byte *i* being `uo_out` after the
+  rising edge of clock *i*; clock 0 is the first reset clock; `rst_n` is low for the
+  rising edges of clocks 0 to 9; `dump_sha256` is of the uncompressed bytes; `uio_dump`
+  is `uio.bin.gz`, two bytes per clock (`uio_out` then `uio_oe`). Reference files are to
+  appear under `work/reference/<shuttle>/<macro>/` in that checkout.
+- For anyone cutting frames: a design using the VGA Playground's sync generator is cut
+  one line later than its own row 0, so row 479 is black porch. Per-clock comparison is
+  unaffected.
 - This project's verdict is per clock and does not use these hashes. They are a second,
   independent check: frames cut from a recording can be hashed and compared with them.
 - Reset stimulus in the reference: `ena=1`, `rst_n=0` for 10 clocks with `ui_in` already
