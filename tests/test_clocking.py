@@ -259,6 +259,11 @@ def test_project_clock_instantiates_solver_setting(clk_in_hz, clock_hz):
     assert ports["CLKIN1"] == "clk_in"
     assert ports["CLKFBIN"] == ports["CLKFBOUT"]
     assert ports["LOCKED"] == "locked"
+    # CLKFBOUT feeds CLKFBIN directly, so compensation is internal.
+    assert params["COMPENSATION"] == '"INTERNAL"'
+    # DRP inputs tied with their full widths, so no width-mismatch warnings.
+    assert ports["DADDR"] == "7'd0"
+    assert ports["DI"] == "16'd0"
 
 
 def test_project_clock_gates_through_bufgce_with_synchronised_enable():
@@ -274,14 +279,14 @@ def test_project_clock_gates_through_bufgce_with_synchronised_enable():
     assert bufgce["O"] == "clk"
 
     # CE comes from the second of two flops clocked by the free-running (BUFG) copy of the
-    # same clock, and the first flop samples `enable`.
+    # same clock, and the first flop samples `enable & locked`.
     free = bufg["O"]
     ce = bufgce["CE"]
     blocks = re.findall(r"always @\(posedge (\w+)\) begin(.*?)end", v, re.DOTALL)
     assigns = {}
     for clk, body in blocks:
-        for dst, src in re.findall(r"(\w+)\s*<=\s*(\w+);", body):
-            assigns[dst] = (clk, src)
+        for dst, src in re.findall(r"(\w+)\s*<=\s*([^;]+);", body):
+            assigns[dst] = (clk, src.strip())
     # Follow comb aliases (assign a = b;) from CE back to a register.
     aliases = dict(re.findall(r"assign (\w+) = (\w+);", v))
     while ce not in assigns and ce in aliases:
@@ -293,4 +298,6 @@ def test_project_clock_gates_through_bufgce_with_synchronised_enable():
     # The free-running domain clock is the BUFG output (possibly via an alias).
     free_names = {free} | {a for a, b in aliases.items() if b == free}
     assert clk1 in free_names and clk2 in free_names, (clk1, clk2, free_names)
-    assert src == "enable"
+    # Resolve a comb alias for the first stage's input, if Migen introduced one.
+    src = aliases.get(src, src)
+    assert re.fullmatch(r"\(?\s*enable\s*&\s*locked\s*\)?", src), src

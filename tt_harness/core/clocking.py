@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from math import ceil, floor
 
-from migen import ClockDomain, Instance, Module, Signal
+from migen import ClockDomain, Constant, Instance, Module, Signal
 from migen.genlib.cdc import MultiReg
 
 FIN_MIN_HZ = 10_000_000
@@ -184,10 +184,15 @@ class ProjectClock(Module):
     Outputs: `clk` (the gated project clock), `locked` (MMCM LOCKED, asynchronous).
     Attribute: `setting`, the `MmcmSetting` instantiated.
 
+    Lock. CE is driven by `enable & locked`, synchronised, so `clk` only runs while the
+    MMCM is locked and stops (two output clocks later) if lock is lost. The harness must
+    still hold the project's reset until the clock is running.
+
     Gating. A 7-series BUFGCE is a BUFGCTRL whose CE is a synchronous input: it is
     sampled against the buffer's own input clock and the output stops or restarts without
     a runt pulse only if CE meets its setup and hold time to that clock (UG472, "BUFGCE
-    and BUFGCE_1"; DS181 T_BCCCK_CE / T_BCCKC_CE). So `enable` is synchronised by two flops
+    and BUFGCE_1"; DS181 Table 32 T_BCCCK_CE / T_BCCKC_CE, note 1). So `enable & locked`
+    is synchronised by two flops
     (a MultiReg, which LiteX's Xilinx overrides mark ASYNC_REG) clocked by the un-gated
     MMCM output through its own BUFG, and the second flop drives CE. Those flops must not
     be clocked by the gated output, which stops while CE is low and could never re-enable
@@ -217,6 +222,8 @@ class ProjectClock(Module):
         self.specials += Instance(
             "MMCME2_ADV",
             p_BANDWIDTH="OPTIMIZED",
+            # CLKFBOUT feeds CLKFBIN directly (no feedback buffer): internal compensation.
+            p_COMPENSATION="INTERNAL",
             p_CLKIN1_PERIOD=s.clkin_period_ns,
             p_DIVCLK_DIVIDE=s.divclk,
             p_CLKFBOUT_MULT_F=s.mult,
@@ -234,8 +241,8 @@ class ProjectClock(Module):
             i_DCLK=0,
             i_DEN=0,
             i_DWE=0,
-            i_DADDR=0,
-            i_DI=0,
+            i_DADDR=Constant(0, 7),
+            i_DI=Constant(0, 16),
             i_PSCLK=0,
             i_PSEN=0,
             i_PSINCDEC=0,
@@ -243,5 +250,5 @@ class ProjectClock(Module):
             o_LOCKED=self.locked,
         )
         self.specials += Instance("BUFG", i_I=clkout_raw, o_O=cd_free.clk)
-        self.specials += MultiReg(self.enable, ce, odomain=cd_free.name, n=2)
+        self.specials += MultiReg(self.enable & self.locked, ce, odomain=cd_free.name, n=2)
         self.specials += Instance("BUFGCE", i_I=clkout_raw, i_CE=ce, o_O=self.clk)
