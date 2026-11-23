@@ -57,6 +57,16 @@ their per-project inputs from the same files rather than fetching independently:
   `data/overrides-compiled/<shuttle>/<macro>.{json,inputs,gamepad}`: per-project sources,
   top module, clock, `ui_in`, patches, QSPI map, flash contents and input scripts. Times
   are in clocks from the first reset clock.
+- **`data/overrides-compiled/` is gitignored**, so a clean clone does not have it. From a
+  clone, read instead: each project's override dict in
+  `data/results/<shuttle>/<macro>/result.json` (key `override`), and the tracked
+  `overrides/<shuttle>/<macro>.yaml` for input events (interpreted as
+  `ttvga/overrides.py` does). Reported by the `tt-harness-fpga-vga` project, 2026-11-23.
+- Ten designs have a non-zero fixed `ui_in` in the reference run, for example
+  `tt_um_toivoh_retro_console` on tt06 and ttihp0p2 (0x30) and, on ttsky26c,
+  `tt_um_moein_maleki_arm16` and `tt_um_nobleg30_uart_vga_scroller` (0x08). The
+  `reference.json` files from `tt-harness-fpga-vga` will carry `ui_in` and `uio_in` per
+  design once they exist.
 - Fetch logic: `ttvga/harness/job.py` (shallow fetch of the commit, then apply the patch).
 
 ## Shared frame code (working arrangement, 2026-11-23)
