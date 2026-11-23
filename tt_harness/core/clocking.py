@@ -28,6 +28,9 @@ from dataclasses import dataclass
 from fractions import Fraction
 from math import ceil, floor
 
+from migen import ClockDomain, Instance, Module, Signal
+from migen.genlib.cdc import MultiReg
+
 FIN_MIN_HZ = 10_000_000
 FIN_MAX_HZ = 800_000_000
 VCO_MIN_HZ = 600_000_000
@@ -146,3 +149,73 @@ def solve(clk_in_hz: int, clock_hz: int, tolerance: float = 0.001) -> MmcmSettin
             f"CLKOUT0_DIVIDE_F={setting.div:.3f})"
         )
     return setting
+
+
+class ProjectClock(Module):
+    """The project clock: an MMCME2_ADV at `solve(clk_in_hz, clock_hz)`, gated by a BUFGCE.
+
+    Inputs: `enable` (any domain), `reset` (MMCM reset, active high; tie low or leave).
+    Outputs: `clk` (the gated project clock), `locked` (MMCM LOCKED, asynchronous).
+    Attribute: `setting`, the `MmcmSetting` instantiated.
+
+    Gating. A 7-series BUFGCE is a BUFGCTRL whose CE is a synchronous input: it is
+    sampled against the buffer's own input clock and the output stops or restarts without
+    a runt pulse only if CE meets its setup and hold time to that clock (UG472, "BUFGCE
+    and BUFGCE_1"; DS181 T_BCCCK_CE / T_BCCKC_CE). So `enable` is synchronised by two flops
+    (a MultiReg, which LiteX's Xilinx overrides mark ASYNC_REG) clocked by the un-gated
+    MMCM output through its own BUFG, and the second flop drives CE. Those flops must not
+    be clocked by the gated output, which stops while CE is low and could never re-enable
+    it. The flop-to-CE path is then an ordinary same-clock path that static timing checks.
+
+    `platform` is accepted for the later build task (constraints); it is not used here and
+    may be None when the module is only converted to Verilog.
+    """
+
+    def __init__(self, platform, clk_in, clk_in_hz: int, clock_hz: int, name: str = "project"):
+        self.platform = platform
+        self.setting = s = solve(clk_in_hz, clock_hz)
+
+        self.enable = Signal()
+        self.reset = Signal()
+        self.clk = Signal()
+        self.locked = Signal()
+
+        clkfb = Signal()
+        clkout_raw = Signal()
+        ce = Signal()
+
+        # The free-running copy of the project clock, only for the CE synchroniser.
+        cd_free = ClockDomain(f"{name}_free", reset_less=True)
+        self.clock_domains += cd_free
+
+        self.specials += Instance(
+            "MMCME2_ADV",
+            p_BANDWIDTH="OPTIMIZED",
+            p_CLKIN1_PERIOD=s.clkin_period_ns,
+            p_DIVCLK_DIVIDE=s.divclk,
+            p_CLKFBOUT_MULT_F=s.mult,
+            p_CLKFBOUT_PHASE=0.0,
+            p_CLKOUT0_DIVIDE_F=s.div,
+            p_CLKOUT0_PHASE=0.0,
+            p_CLKOUT0_DUTY_CYCLE=0.5,
+            i_CLKIN1=clk_in,
+            i_CLKIN2=0,
+            i_CLKINSEL=1,
+            i_CLKFBIN=clkfb,
+            o_CLKFBOUT=clkfb,
+            i_RST=self.reset,
+            i_PWRDWN=0,
+            i_DCLK=0,
+            i_DEN=0,
+            i_DWE=0,
+            i_DADDR=0,
+            i_DI=0,
+            i_PSCLK=0,
+            i_PSEN=0,
+            i_PSINCDEC=0,
+            o_CLKOUT0=clkout_raw,
+            o_LOCKED=self.locked,
+        )
+        self.specials += Instance("BUFG", i_I=clkout_raw, o_O=cd_free.clk)
+        self.specials += MultiReg(self.enable, ce, odomain=cd_free.name, n=2)
+        self.specials += Instance("BUFGCE", i_I=clkout_raw, i_CE=ce, o_O=self.clk)

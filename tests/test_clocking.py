@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import re
 from fractions import Fraction
 
 import pytest
@@ -178,3 +179,94 @@ def test_limits_are_the_documented_ones():
     assert clocking.PFD_MIN_HZ == 10_000_000
     assert clocking.PFD_MAX_HZ == 450_000_000
     assert clocking.OUT_MAX_HZ == 800_000_000
+
+
+# ProjectClock ------------------------------------------------------------------------------
+
+
+def _convert_project_clock(clk_in_hz, clock_hz):
+    from migen import Module, Signal
+    from migen.fhdl.verilog import convert
+
+    from tt_harness.core.clocking import ProjectClock
+
+    class Top(Module):
+        def __init__(self):
+            self.clk_in = Signal()
+            self.submodules.pc = ProjectClock(None, self.clk_in, clk_in_hz, clock_hz)
+
+    top = Top()
+    ios = {top.clk_in, top.pc.enable, top.pc.clk, top.pc.locked}
+    return top.pc, str(convert(top, ios=ios, name="top"))
+
+
+def _verilog_int(text):
+    m = re.fullmatch(r"(?:\d+'d)?(\d+)", text)
+    assert m is not None, text
+    return int(m.group(1))
+
+
+def _instance(verilog, primitive):
+    m = re.search(
+        rf"^{primitive}\s*#?\s*\((.*?)\)\s*\w+\s*\((.*?)\);", verilog, re.MULTILINE | re.DOTALL
+    )
+    if m is None:
+        m = re.search(rf"^{primitive}\s+\w+\s*\((.*?)\);", verilog, re.MULTILINE | re.DOTALL)
+        assert m is not None, f"no {primitive} instance in:\n{verilog}"
+        return {}, dict(re.findall(r"\.(\w+)\(([^()]*)\)", m.group(1)))
+    params = dict(re.findall(r"\.(\w+)\(([^()]*)\)", m.group(1)))
+    ports = dict(re.findall(r"\.(\w+)\(([^()]*)\)", m.group(2)))
+    return params, ports
+
+
+@pytest.mark.parametrize(
+    "clk_in_hz,clock_hz", [(50_000_000, 25_175_000), (100_000_000, 31_500_000)]
+)
+def test_project_clock_instantiates_solver_setting(clk_in_hz, clock_hz):
+    pc, v = _convert_project_clock(clk_in_hz, clock_hz)
+    s = solve(clk_in_hz, clock_hz)
+    assert pc.setting == s
+
+    params, ports = _instance(v, "MMCME2_ADV")
+    assert float(params["CLKFBOUT_MULT_F"]) == s.mult
+    assert _verilog_int(params["DIVCLK_DIVIDE"]) == s.divclk
+    assert float(params["CLKOUT0_DIVIDE_F"]) == s.div
+    assert float(params["CLKIN1_PERIOD"]) == pytest.approx(1e9 / clk_in_hz)
+    assert ports["CLKIN1"] == "clk_in"
+    assert ports["CLKFBIN"] == ports["CLKFBOUT"]
+    assert ports["LOCKED"] == "locked"
+
+
+def test_project_clock_gates_through_bufgce_with_synchronised_enable():
+    _, v = _convert_project_clock(50_000_000, 25_175_000)
+    _, mmcm = _instance(v, "MMCME2_ADV")
+    _, bufg = _instance(v, "BUFG")
+    _, bufgce = _instance(v, "BUFGCE")
+
+    raw = mmcm["CLKOUT0"]
+    # Both buffers take the un-gated MMCM output; the gated one drives the project clock.
+    assert bufg["I"] == raw
+    assert bufgce["I"] == raw
+    assert bufgce["O"] == "clk"
+
+    # CE comes from the second of two flops clocked by the free-running (BUFG) copy of the
+    # same clock, and the first flop samples `enable`.
+    free = bufg["O"]
+    ce = bufgce["CE"]
+    blocks = re.findall(r"always @\(posedge (\w+)\) begin(.*?)end", v, re.DOTALL)
+    assigns = {}
+    for clk, body in blocks:
+        for dst, src in re.findall(r"(\w+)\s*<=\s*(\w+);", body):
+            assigns[dst] = (clk, src)
+    # Follow comb aliases (assign a = b;) from CE back to a register.
+    aliases = dict(re.findall(r"assign (\w+) = (\w+);", v))
+    while ce not in assigns and ce in aliases:
+        ce = aliases[ce]
+    assert ce in assigns, v
+    clk2, stage1 = assigns[ce]
+    assert stage1 in assigns, v
+    clk1, src = assigns[stage1]
+    # The free-running domain clock is the BUFG output (possibly via an alias).
+    free_names = {free} | {a for a, b in aliases.items() if b == free}
+    assert clk1 in free_names and clk2 in free_names, (clk1, clk2, free_names)
+    assert src == "enable"
