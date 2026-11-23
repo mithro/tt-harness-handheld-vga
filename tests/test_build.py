@@ -492,7 +492,7 @@ def _check_real(result: build.BuildResult, sources: Sources, toolchain: str) -> 
     )
     _checkout_clean(sources)
     for name, d in sorted(result.timing.items()):
-        print(f"{toolchain} {name}: {d.achieved_mhz:.2f} MHz against {d.constraint_mhz:.2f} MHz")
+        print(f"{toolchain} {sources.project.macro} {name}: {build.describe(d)}")
 
 
 DOTTEE_ID = "ttsky26a/tt_um_algofoogle_dottee"
