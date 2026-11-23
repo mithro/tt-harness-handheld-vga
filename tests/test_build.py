@@ -151,6 +151,22 @@ def test_nextpnr_domain_absent_from_report() -> None:
         build.parse_nextpnr(pre + post, PLAN, LOG)
 
 
+@pytest.mark.parametrize("pair", ["sys->pclk", "pclk->sys"])
+def test_gate_requires_both_sys_pclk_pairs(pair: str) -> None:
+    timing = build.parse_nextpnr(NEXTPNR_PASS, PLAN, LOG)
+    del timing[pair]
+    with pytest.raises(TimingError, match=f"unconstrained.*{re.escape(pair)}.*absent"):
+        build.check(timing, PLAN, LOG)
+
+
+def test_gate_fails_on_a_failing_cross_entry() -> None:
+    timing = build.parse_vivado(VIVADO_DOTTEE, PLAN, LOG)
+    key = "project:project/hvsync_gen/vsync_reg/Q->pclk"
+    timing[key] = dataclasses.replace(timing[key], met=False, hold_slack_ns=-0.1)
+    with pytest.raises(TimingError, match="timing not met in project:"):
+        build.check(timing, PLAN, LOG)
+
+
 def test_gate_requires_sys_and_pclk() -> None:
     timing = build.parse_nextpnr(NEXTPNR_PASS, PLAN, LOG)
     del timing["pclk"]
@@ -506,13 +522,51 @@ def test_real_build_openxc7(project_id: str) -> None:
         assert result.project_clocks == ()
 
 
+def _source_hashes(sources: Sources) -> dict[str, str]:
+    src = sources.root / "src"
+    return {
+        str(f): hashlib.sha256(f.read_bytes()).hexdigest()
+        for f in sorted(src.rglob("*"))
+        if f.is_file()
+    }
+
+
+_DIRECTIVE_NONE = re.compile(rb"(`default_nettype[ \t]+)none\b")
+
+
+def _assert_only_directives_differ(original: Path, copy: Path) -> int:
+    """Every differing line is a `default_nettype none` -> `wire` directive; returns how many."""
+    a = original.read_bytes().split(b"\n")
+    b = copy.read_bytes().split(b"\n")
+    assert len(a) == len(b)
+    changed = 0
+    for la, lb in zip(a, b, strict=True):
+        if la == lb:
+            continue
+        assert _DIRECTIVE_NONE.search(la), f"{original}: changed line is no directive: {la!r}"
+        assert _DIRECTIVE_NONE.sub(rb"\1wire", la) == lb, (la, lb)
+        changed += _DIRECTIVE_NONE.subn(b"", la)[1]
+    return changed
+
+
 @pytest.mark.vivado
 @pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
-def test_real_build_vivado_refuses_to_modify_sources(tmp_path: Path) -> None:
+def test_real_build_vivado_retry_can_be_forbidden(tmp_path: Path) -> None:
     sources = _real_sources()
-    with pytest.raises(build.BuildError, match=r"Synth 8-6735.*--vivado-nettype-rewrite"):
-        build.build_compare(sources.project, sources, "arty", "vivado", tmp_path, 1000)
+    before = _source_hashes(sources)
+    with pytest.raises(build.BuildError, match=r"Synth 8-6735.*--no-vivado-nettype-rewrite"):
+        build.build_compare(
+            sources.project,
+            sources,
+            "arty",
+            "vivado",
+            tmp_path,
+            1000,
+            vivado_nettype_rewrite=False,
+        )
     assert not list(tmp_path.glob("*.bit"))
+    assert not (tmp_path / "src-nettype-wire").exists()
+    assert _source_hashes(sources) == before
     _checkout_clean(sources)
 
 
@@ -520,33 +574,89 @@ def test_real_build_vivado_refuses_to_modify_sources(tmp_path: Path) -> None:
 @pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
 @pytest.mark.parametrize("project_id", [REAL_ID, DOTTEE_ID])
 def test_real_build_vivado(project_id: str) -> None:
+    # The default: unmodified first, then the `default_nettype wire` retry on Synth 8-6735.
     sources = _real_sources(project_id)
+    before = _source_hashes(sources)
     result = build.build_compare(
-        sources.project,
-        sources,
-        "arty",
-        "vivado",
-        _out("vivado", sources),
-        REAL_CLOCKS,
-        vivado_nettype_rewrite=True,
+        sources.project, sources, "arty", "vivado", _out("vivado", sources), REAL_CLOCKS
     )
     _check_real(result, sources, "vivado")
-    assert "[Synth 8-6735]" in result.log.read_text()  # from the unmodified attempt, first
-    # Only files with `default_nettype none` were given modified, and only in that line.
+    log = result.log.read_text()
+    assert "[Synth 8-6735]" in log  # from the unmodified attempt, first
+    assert "retrying Vivado with `default_nettype wire` copies" in log
+    # Only `default_nettype none` directives changed, in the copies; the originals are intact.
+    assert _source_hashes(sources) == before
     unmodified = _unmodified_inputs(sources)
     src = sources.root / "src"
     copies = result.bitstream.parent / "src-nettype-wire"
-    assert result.source_rewrites
+    rewritten = dict(result.source_rewrites)
+    assert rewritten, "Vivado needed the retry for this design"
     assert len(result.inputs) == len(unmodified)
+    for copy in sorted(copies.rglob("*")):
+        if not copy.is_file():
+            continue
+        original = src / copy.relative_to(copies)
+        changed = _assert_only_directives_differ(original, copy)
+        assert changed == rewritten.get(str(original), 0)
     for given, digest in result.inputs.items():
         original = src / Path(given).relative_to(copies)
-        if str(original) in result.source_rewrites:
-            assert Path(given).read_text() == original.read_text().replace(
-                "`default_nettype none", "`default_nettype wire"
-            )
-        else:
+        if str(original) not in rewritten:
             assert digest == unmodified[str(original)]
     if project_id == DOTTEE_ID:
+        assert result.language == build.SYSTEMVERILOG
         assert result.project_clocks == ("project/hvsync_gen/vsync_reg/Q",)
     else:
+        assert result.language == build.VERILOG
         assert result.project_clocks == ()
+
+
+# The rewrite and its precondition ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected, count",
+    [
+        ("`default_nettype none\n", "`default_nettype wire\n", 1),
+        ("`default_nettype \t none // x\n", "`default_nettype \t wire // x\n", 1),
+        ("// `default_nettype none\n", "// `default_nettype none\n", 0),
+        ("/* `default_nettype none\n */\n", "/* `default_nettype none\n */\n", 0),
+        ('$display("`default_nettype none");\n', '$display("`default_nettype none");\n', 0),
+        ("`default_nettype nonesuch\n", "`default_nettype nonesuch\n", 0),
+        ("`default_nettype wire\n", "`default_nettype wire\n", 0),
+        (
+            "`default_nettype none\r\nmodule m; endmodule\r\n`default_nettype none\r\n",
+            "`default_nettype wire\r\nmodule m; endmodule\r\n`default_nettype wire\r\n",
+            2,
+        ),
+    ],
+)
+def test_rewrite_nettype_none(text: str, expected: str, count: int) -> None:
+    assert build.rewrite_nettype_none(text) == (expected, count)
+
+
+UNDECLARED = HERE / "data" / "projects" / "undeclared"
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(tools.find("yosys") is None, reason="yosys not installed")
+@pytest.mark.parametrize("toolchain", build.TOOLCHAINS)
+def test_undeclared_net_fails_before_any_rewrite(tmp_path: Path, toolchain: str) -> None:
+    # A real undeclared net under `default_nettype none`: Yosys rejects it, so neither flow
+    # gets as far as its tools, and Vivado's rewrite is never reached.
+    files = ("tt_um_test_undeclared.v",)
+    project = dataclasses.replace(
+        _counter().project,
+        macro="tt_um_test_undeclared",
+        top_module="tt_um_test_undeclared",
+        source_files=files,
+    )
+    sources = Sources(project, UNDECLARED, (UNDECLARED / "src" / files[0],), needs_sv=False)
+    before = _source_hashes(sources)
+    with pytest.raises(build.BuildError, match="pre-screen.*implicitly declared"):
+        build.build_compare(project, sources, "arty", toolchain, tmp_path, 100)
+    assert not (tmp_path / "src-nettype-wire").exists()
+    assert not list(tmp_path.glob("*.bit"))
+    log = (tmp_path / "build.log").read_text()
+    assert "pre-screen failed, nothing built" in log
+    assert "vivado -mode" not in log and "nextpnr-xilinx" not in log
+    assert _source_hashes(sources) == before
