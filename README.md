@@ -1,4 +1,4 @@
-# tt-handheld-harness
+# tt-harness-handheld-vga
 
 An FPGA harness for running [Tiny Tapeout](https://tinytapeout.com/) demo designs on
 handheld-console-shaped FPGA boards.

@@ -64,7 +64,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tt-handheld-harness"
+name = "tt-harness-handheld-vga"
 version = "0.0.0"
 source = { virtual = "." }
 

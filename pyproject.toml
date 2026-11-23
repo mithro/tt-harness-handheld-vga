@@ -1,5 +1,5 @@
 [project]
-name = "tt-handheld-harness"
+name = "tt-harness-handheld-vga"
 version = "0.0.0"
 description = "FPGA harness for running Tiny Tapeout demo designs on handheld-console FPGA boards"
 license = "Apache-2.0"
