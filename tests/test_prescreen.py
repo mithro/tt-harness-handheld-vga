@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,12 @@ def sources_for(tmp_path: Path, top: str, files: list[Path], needs_sv: bool = Fa
         uio_in=0,
         patch=None,
     )
-    return Sources(project, root, tuple(root / "src" / f.name for f in files), needs_sv)
+    return Sources(
+        project=project,
+        root=root,
+        files=tuple(root / "src" / f.name for f in files),
+        needs_sv=needs_sv,
+    )
 
 
 def fixture(tmp_path: Path, name: str) -> Sources:
@@ -143,12 +149,7 @@ def test_syntax_error_raises_with_log(tmp_path):
 @needs_yosys
 def test_wrong_top_raises(tmp_path):
     sources = fixture(tmp_path, "tt_um_test_ring")
-    sources = Sources(
-        Project(**{**sources.project.__dict__, "top_module": "tt_um_absent"}),
-        sources.root,
-        sources.files,
-        sources.needs_sv,
-    )
+    sources = replace(sources, project=replace(sources.project, top_module="tt_um_absent"))
     with pytest.raises(prescreen.PrescreenError):
         run(sources, tmp_path)
 

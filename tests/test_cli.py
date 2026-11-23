@@ -87,7 +87,7 @@ def verdict_env(tmp_path, monkeypatch):
     log = tmp_path / "yosys.log"
 
     def fake_fetch(project, cache, videos_repo=None):
-        return fetch.Sources(project, tmp_path, (), False)
+        return fetch.Sources(project=project, root=tmp_path, files=(), needs_sv=False)
 
     def fake_check(sources, out_dir=None):
         if state["prescreen_error"]:
