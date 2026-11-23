@@ -88,7 +88,8 @@ def _check_against_reference(
     if shared:
         ref_dir = verdict.default_reference_dir()
         if not (ref_dir / sources.project.id / "reference.json").is_file():
-            return  # no shared reference for this design (or no TT_REFERENCE_DIR checkout)
+            # The local reference matched; the shared comparison cannot run.
+            pytest.skip(f"no shared reference for {sources.project.id} under {ref_dir}")
         try:
             ref = verdict.load_reference(ref_dir, sources.project.id)
         except verdict.ReferenceInvalid as e:

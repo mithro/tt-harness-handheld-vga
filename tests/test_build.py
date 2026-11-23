@@ -97,8 +97,10 @@ def test_nextpnr_long_mangled_clock_name() -> None:
     assert mangled in text and "clk0" not in text
     timing = build.parse_nextpnr(text, PLAN, LOG)
     assert timing["sys"].achieved_mhz == 210.88
-    assert timing["sys->pclk"].achieved_mhz == pytest.approx(1000 / 6.59)
-    assert timing["pclk->sys"].achieved_mhz == pytest.approx(1000 / 0.99)
+    assert timing["sys->pclk"].setup_slack_ns == pytest.approx(10 - 6.59)
+    assert timing["pclk->sys"].setup_slack_ns == pytest.approx(10 - 0.99)
+    # A data-path delay against a harness budget is not a frequency.
+    assert timing["sys->pclk"].achieved_mhz is None
 
 
 def test_nextpnr_three_clocks_with_a_project_clock() -> None:
@@ -220,8 +222,8 @@ def test_nextpnr_without_post_route_report() -> None:
 def test_vivado_report() -> None:
     timing = build.parse_vivado(VIVADO_PASS, PLAN, LOG)
     assert set(timing) == {"sys", "pclk", "sys->pclk", "pclk->sys"}
-    assert timing["sys"].achieved_mhz == pytest.approx(1000 / (10 - 5.700))
-    assert timing["pclk"].achieved_mhz == pytest.approx(1000 / (60 - 48.768))
+    # Without the pair reports' requirements no frequency is claimed.
+    assert all(d.achieved_mhz is None for d in timing.values())
     assert timing["pclk"].constraint_mhz == pytest.approx(16.667, abs=1e-3)
     assert timing["sys->pclk"].setup_slack_ns == 17.283
     assert timing["sys->pclk"].hold_slack_ns == 8.317
@@ -660,3 +662,330 @@ def test_undeclared_net_fails_before_any_rewrite(tmp_path: Path, toolchain: str)
     assert "pre-screen failed, nothing built" in log
     assert "vivado -mode" not in log and "nextpnr-xilinx" not in log
     assert _source_hashes(sources) == before
+
+
+# Fix 1 ---------------------------------------------------------------------------------------
+
+# Real lines of the logo's unmodified Vivado attempt, and one in the same format naming the
+# generated top (what the reviewer saw for the edges design before the top was read first).
+LOGO_SRC = "/w/work/sources/tt08/logo/src"
+NETTYPE_PROJECT = (
+    "ERROR: [Synth 8-6735] net type must be explicitly specified for 'clk' when "
+    f"default_nettype is none [{LOGO_SRC}/vga_sync_generator.v:21]\n"
+    "ERROR: [Synth 8-9844] non-net port 'clk' cannot be of mode input "
+    f"[{LOGO_SRC}/vga_sync_generator.v:21]\n"
+)
+NETTYPE_HARNESS = (
+    "ERROR: [Synth 8-6735] net type must be explicitly specified for 'clk100' when "
+    "default_nettype is none [/w/build/compare/arty-vivado/tt00/edges/arty_compare.v:3]\n"
+)
+OTHER_ERROR = f"ERROR: [Synth 8-2716] syntax error near '>>' [{LOGO_SRC}/audio.v:194]\n"
+LOGO_FILES = [Path(f"{LOGO_SRC}/vga_sync_generator.v"), Path(f"{LOGO_SRC}/palette.v")]
+
+
+@pytest.mark.parametrize(
+    "text, decision",
+    [
+        (NETTYPE_PROJECT, "retry"),
+        (NETTYPE_PROJECT + NETTYPE_HARNESS, "retry"),
+        (NETTYPE_HARNESS, "harness"),
+        (OTHER_ERROR, "none"),
+    ],
+)
+def test_nettype_retry_trigger(text: str, decision: str) -> None:
+    got, named = build.nettype_retry(text, LOGO_FILES)
+    assert got == decision
+    if decision == "retry":
+        assert named == [f"{LOGO_SRC}/vga_sync_generator.v"]
+
+
+def test_generated_top_is_immune_to_project_directives(tmp_path: Path) -> None:
+    s = _counter()
+    top = arty.Top(s.project, 1_000_000, 100)
+    text = arty.to_verilog(top, tmp_path / "t.v").read_text()
+    assert text.startswith("`default_nettype wire\n")
+
+
+def test_project_clock_commands() -> None:
+    reg = build.project_clock_command("register")
+    gate = build.project_clock_command("gate")
+    # A flip-flop's clock: both edges on rising edges of its C pin (divide by two).
+    assert "-edges {1 3 5}" in reg and "-source $master $root" in reg
+    assert "-divide_by" not in reg
+    # A gate: pclk's own waveform.
+    assert "-divide_by 1" in gate and "-edges" not in gate
+    tcl = build._VIVADO_CLOCKS.format(
+        sys_period=10.0,
+        input_port="clk100",
+        bufg="pclk_bufg",
+        divide=6,
+        settle=2,
+        settle_minus_1=1,
+        register_command=reg,
+        gate_command=gate,
+    )
+    assert reg in tcl and gate in tcl and "kind $kind" in tcl
+
+
+def test_vivado_achieved_from_pair_requirements() -> None:
+    lines = (
+        "tt-harness requirement: sys -> sys setup 10.000 ns\n"
+        "tt-harness requirement: pclk -> pclk setup 60.000 ns\n"
+        "tt-harness requirement: sys -> pclk setup 20.000 ns\n"
+    )
+    timing = build.parse_vivado(lines + VIVADO_PASS, PLAN, LOG)
+    assert timing["sys"].achieved_mhz == pytest.approx(1000 / (10 - 5.700))
+    assert timing["pclk"].achieved_mhz == pytest.approx(1000 / (60 - 48.768))
+    assert timing["sys->pclk"].achieved_mhz == pytest.approx(1000 / (20 - 17.283))
+    assert timing["pclk->sys"].achieved_mhz is None  # no requirement line for it
+
+
+def test_vivado_half_cycle_worst_path_uses_its_own_requirement() -> None:
+    # If pclk's worst path were a 30 ns rise-to-fall path, the frequency is derived from
+    # that requirement, never from the 60 ns period.
+    text = VIVADO_PASS.replace("  pclk             48.768", "  pclk             18.768")
+    lines = "tt-harness requirement: pclk -> pclk setup 30.000 ns\n"
+    timing = build.parse_vivado(lines + text, PLAN, LOG)
+    assert timing["pclk"].achieved_mhz == pytest.approx(1000 / (30 - 18.768))
+
+
+def test_vivado_register_project_clock_has_twice_the_period() -> None:
+    # A register-made clock (-edges {1 3 5}) has period 120 ns; a gate-made one 60 ns.
+    reg = VIVADO_DOTTEE.replace(
+        "(master pin project/hvsync_gen/vsync_reg/C)",
+        "(master pin project/hvsync_gen/vsync_reg/C) kind register",
+    )
+    with pytest.raises(TimingError, match="period 60.0 ns, not 120.000"):
+        build.parse_vivado(reg, PLAN, LOG)
+    reg = reg.replace(
+        "    project_clk0  {0.000 30.000}     60.000          16.667",
+        "    project_clk0  {0.000 60.000}     120.000         8.333 ",
+    )
+    timing = build.parse_vivado(reg, PLAN, LOG)
+    assert timing["project:project/hvsync_gen/vsync_reg/Q"].constraint_mhz == pytest.approx(
+        1000 / 120
+    )
+
+
+def test_vivado_clock_with_setup_but_no_hold_figures_is_refused() -> None:
+    text = VIVADO_PASS.replace("0.192", "   NA", 1)
+    with pytest.raises(TimingError, match="only one of setup and hold"):
+        build.parse_vivado(text, PLAN, LOG)
+
+
+def test_vivado_clock_without_paths_is_marked() -> None:
+    row = next(ln for ln in VIVADO_PASS.splitlines() if ln.startswith("  pclk ") and "48.768" in ln)
+    fields = row.split()
+    fields[1:9] = ["NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA"]
+    timing = build.parse_vivado(VIVADO_PASS.replace(row, "  " + "  ".join(fields)), PLAN, LOG)
+    assert timing["pclk"].intra_paths is False
+    assert timing["pclk"].achieved_mhz is None
+    assert timing["pclk"].met  # pulse width still checked
+
+
+OPPOSITE = "Info: Max delay posedge project.clk -> negedge project.clk: 40.00 ns\n"
+
+
+def test_nextpnr_opposite_edge_path_within_a_clock_is_gated() -> None:
+    # Within one clock, rise to fall is half a period (30 ns) less the allowance: 20 ns.
+    pre, post = _post_route(NEXTPNR_PASS)
+    timing = build.parse_nextpnr(pre + post + OPPOSITE, PLAN, LOG)
+    d = timing["pclk->pclk (opposite edges)"]
+    assert d.kind == "cross" and not d.met
+    assert d.setup_slack_ns == pytest.approx(20 - 40)
+    with pytest.raises(TimingError, match="timing not met in pclk->pclk"):
+        build.check(timing, PLAN, LOG)
+
+
+def _half_cycle(text: str) -> str:
+    """The logo excerpt as if pclk had falling-edge users too (prepack line, target)."""
+    text = text.replace(
+        "tt-harness clock: domain pclk net 'project.clk' 16.666666666666668 MHz",
+        "tt-harness clock: domain pclk net 'project.clk' 33.333333333333336 MHz "
+        "(cells 60 rising 56 falling 4 latches 0 half-cycle; BUFG pclk_bufg)",
+    )
+    return text.replace("(PASS at 16.67 MHz)", "(PASS at 33.33 MHz)")
+
+
+def test_nextpnr_half_cycle_clock() -> None:
+    timing = build.parse_nextpnr(_half_cycle(NEXTPNR_PASS), PLAN, LOG)
+    assert timing["pclk"].half_cycle
+    assert timing["pclk"].constraint_mhz == pytest.approx(2 * PLAN.pclk_mhz)
+    assert "constraint doubled" in build.describe(timing["pclk"])
+    # The doubled target is required: timed at the plain frequency is a wrong constraint.
+    wrong = _half_cycle(NEXTPNR_PASS).replace("(PASS at 33.33 MHz)", "(PASS at 16.67 MHz)")
+    with pytest.raises(TimingError, match="timed at 16.67 MHz, not 33.333"):
+        build.parse_nextpnr(wrong, PLAN, LOG)
+
+
+def _without_project_fmax(text: str) -> str:
+    pre, post = _post_route(text)
+    post = "\n".join(ln for ln in post.splitlines() if "'project.uo_out[3]':" not in ln)
+    return pre + post
+
+
+def test_nextpnr_project_clock_with_cells_but_no_fmax_fails() -> None:
+    text = NEXTPNR_DOTTEE.replace(
+        "16.666666666666668 MHz (clocks",
+        "16.666666666666668 MHz (cells 12 rising 12 falling 0 latches 0; clocks",
+    )
+    with pytest.raises(TimingError, match="project.uo_out.*12 clocked cells.*absent"):
+        build.parse_nextpnr(_without_project_fmax(text), PLAN, LOG)
+
+
+def test_nextpnr_project_clock_of_one_cell_has_no_intra_paths() -> None:
+    text = NEXTPNR_DOTTEE.replace(
+        "16.666666666666668 MHz (clocks",
+        "16.666666666666668 MHz (cells 1 rising 1 falling 0 latches 0; clocks",
+    )
+    timing = build.parse_nextpnr(_without_project_fmax(text), PLAN, LOG)
+    d = timing["project:project.uo_out[3]"]
+    assert d.intra_paths is False and d.achieved_mhz is None
+
+
+def test_undeclared_symbols(tmp_path: Path) -> None:
+    src = tmp_path / "a.v"
+    src.write_text("module a(clk, q);\n  input clk;\n  output reg [3:0] q;\nendmodule\n")
+    log = (
+        "WARNING: [Synth 8-11241] undeclared symbol 'q', assumed default net type 'wire' [a.v:1]\n"
+        "WARNING: [Synth 8-11241] undeclared symbol 'ghost', assumed default net type 'wire'\n"
+    )
+    assert build.undeclared_symbols(log, [src]) == ["ghost"]
+    assert build.undeclared_symbols("", [src]) == []
+
+
+def test_rewritten_sources_must_be_under_src(tmp_path: Path) -> None:
+    s = _counter()
+    outside = tmp_path / "elsewhere.v"
+    outside.write_text("module x; endmodule\n")
+    s = dataclasses.replace(s, files=(*s.files, outside))
+    job = build._Job(
+        sources=s,
+        board=arty,
+        toolchain="vivado",
+        part=arty.PARTS["vivado"],
+        out_dir=tmp_path,
+        top_v=tmp_path / "t.v",
+        pins_xdc=tmp_path / "p.xdc",
+        plan=PLAN,
+        jobs=1,
+        log=tmp_path / "build.log",
+        language=build.VERILOG,
+    )
+    with pytest.raises(build.BuildError, match="not under"):
+        build._vivado_rewritten_sources(job)
+
+
+def test_build_compare_removes_stale_reports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for name in ("timing.rpt", "nextpnr.log", "sys-to-pclk-setup.rpt", "vivado.log"):
+        (tmp_path / name).write_text("from an earlier build")
+    (tmp_path / "src-nettype-wire").mkdir()
+    seen = []
+
+    def implement(job) -> str:
+        seen.extend(p.name for p in tmp_path.iterdir())
+        job.unchecked_bit.write_bytes(b"bit")
+        return NEXTPNR_PASS
+
+    _fake_flow(monkeypatch, "openxc7", NEXTPNR_PASS)
+    flow = dataclasses.replace(build._FLOWS["openxc7"], implement=implement)
+    monkeypatch.setitem(build._FLOWS, "openxc7", flow)
+    s = _counter()
+    result = build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
+    for name in ("timing.rpt", "nextpnr.log", "sys-to-pclk-setup.rpt", "vivado.log"):
+        assert name not in seen
+    assert "src-nettype-wire" not in seen
+    # The standing openXC7 facts, in fixed wording.
+    assert build.LIMIT_NO_HOLD in result.limitations
+    assert build.LIMIT_CROSS_BUDGET in result.limitations
+    assert build.LIMIT_LOCAL_CLOCKS not in result.limitations  # no project clocks
+
+
+def test_build_compare_reports_prescreen_disagreement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    _fake_flow(monkeypatch, "openxc7", NEXTPNR_PASS)
+    screen = prescreen.Prescreen(0, 0, 1, True, Path("prescreen.log"))
+    monkeypatch.setattr(build.prescreen, "check", lambda sources, out_dir=None: screen)
+    s = _counter()
+    result = build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
+    assert any("disagree" in item for item in result.limitations)
+    assert "disagree" in capsys.readouterr().err
+
+
+# Real builds of the local test designs ---------------------------------------------------------
+
+
+def _local(name: str, top_module: str) -> Sources:
+    root = HERE / "data" / "projects" / name
+    files = (f"{top_module}.v",)
+    project = dataclasses.replace(
+        _counter().project, macro=top_module, top_module=top_module, source_files=files
+    )
+    return Sources(project, root, tuple(root / "src" / f for f in files), needs_sv=False)
+
+
+EDGES = ("edges", "tt_um_test_edges")  # both edges of clk
+NEGCLK = ("negclk", "tt_um_test_negclk")  # falling edge of a flip-flop-made clock
+
+
+def _local_build(design: tuple[str, str], toolchain: str) -> tuple[Sources, build.BuildResult]:
+    sources = _local(*design)
+    before = _source_hashes(sources)
+    out = _out(toolchain, sources)
+    result = build.build_compare(sources.project, sources, "arty", toolchain, out, 100_000)
+    assert _source_hashes(sources) == before
+    assert result.bitstream.is_file()
+    assert all(d.met for d in result.timing.values())
+    assert bool(result.project_clocks) == bool(prescreen.check(sources).derived_clocks)
+    for name, d in sorted(result.timing.items()):
+        print(f"{toolchain} {sources.project.macro} {name}: {build.describe(d)}")
+    return sources, result
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(not _openxc7_installed(), reason="openXC7 toolchain not installed")
+def test_real_build_openxc7_both_edge_design_checks_half_cycles() -> None:
+    _, result = _local_build(EDGES, "openxc7")
+    pclk = result.timing["pclk"]
+    assert pclk.half_cycle
+    assert pclk.constraint_mhz == pytest.approx(2 * PLAN.pclk_mhz)  # 33.33 MHz
+    assert any("twice its frequency" in item for item in result.limitations)
+    assert result.project_clocks == ()
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(not _openxc7_installed(), reason="openXC7 toolchain not installed")
+def test_real_build_openxc7_negedge_of_a_register_clock() -> None:
+    _, result = _local_build(NEGCLK, "openxc7")
+    assert len(result.project_clocks) == 1
+    assert not result.timing["pclk"].half_cycle  # pclk itself is used on its rising edge
+    assert build.LIMIT_LOCAL_CLOCKS in result.limitations
+
+
+@pytest.mark.vivado
+@pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
+def test_real_build_vivado_clean_project_is_not_rewritten() -> None:
+    # The edges design has `default_nettype none` and ANSI ports: Vivado accepts it as it
+    # is, and the generated top (read first, `default_nettype wire`) is never the trigger.
+    _, result = _local_build(EDGES, "vivado")
+    assert result.source_rewrites == ()
+    assert "[Synth 8-6735]" not in result.log.read_text()
+
+
+@pytest.mark.vivado
+@pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
+def test_real_build_vivado_negedge_of_a_register_clock_is_timed_tightly() -> None:
+    _, result = _local_build(NEGCLK, "vivado")
+    assert result.source_rewrites == ()
+    (root,) = result.project_clocks
+    clock = result.timing[f"{build.PROJECT}{root}"]
+    assert clock.constraint_mhz == pytest.approx(PLAN.pclk_mhz / 2)  # -edges {1 3 5}
+    # pclk -> the project clock's falling edge: that edge lies on a pclk rising edge, so the
+    # hold requirement is 0 (pclk's own falling edge would have given -30 ns).
+    report = (result.bitstream.parent / "pclk-to-project_clk0-hold.rpt").read_text()
+    reqs = re.findall(r"Requirement:\s+(-?[\d.]+)ns\s+\(project_clk0 fall@", report)
+    assert reqs, "no hold path to the project clock's falling edge in the report"
+    assert all(abs(float(r)) < 0.001 for r in reqs), reqs
