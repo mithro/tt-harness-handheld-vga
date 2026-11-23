@@ -64,10 +64,16 @@ their per-project inputs from the same files rather than fetching independently:
 - The published clips are 2x nearest-neighbour, yuv420p and lossy. They are for looking
   at, not for pixel comparison. They live under
   `/srv/data.wafer.space/tinytapeout-vga-videos/<shuttle>/<macro>/`.
-- Exact reference: `data/results/<shuttle>/<macro>/result.json`, field
-  `timing.frame_hashes`: one FNV-1a 64-bit hash per frame over native-resolution RGB888,
-  row-major, each channel being the 2-bit value times 85. The function is at
-  `ttvga/harness/tb.cpp:237`.
+- Exact reference: the testbench computes one FNV-1a 64-bit hash per frame over
+  native-resolution RGB888, row-major, each channel being the 2-bit value times 85. The
+  function is at `ttvga/harness/tb.cpp:237`.
+- The per-frame hash lists are **not** published. `tt-vga collect`
+  (`ttvga/remote.py:263-268`) replaces `timing.frame_hashes` in
+  `data/results/<shuttle>/<macro>/result.json` with `frame_hashes_count`; the full lists
+  exist only in the pipeline's private scratch directories. Reference hashes therefore
+  have to be recomputed by re-running the testbench with the same stimulus. The
+  `tt-vga-fpga-harness` project plans to do this, and the result should be shared between
+  the two harness projects.
 - Reset stimulus in the reference: `ena=1`, `rst_n=0` for 10 clocks with `ui_in` already
   set.
 - Frame 0 is not the first frame after reset. The testbench calibrates on sync for up to
