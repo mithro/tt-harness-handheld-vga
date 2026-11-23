@@ -118,6 +118,20 @@ def test_shorter_recording_with_early_difference_is_still_inconclusive():
     assert verdict.compare(ok(rec), REF, flagged=False).kind == "inconclusive"
 
 
+@pytest.mark.parametrize("flagged", [False, True])
+def test_empty_reference_span_is_inconclusive(flagged):
+    v = verdict.compare(ok(b"\x01\x02\x03\x04\x05"), b"", flagged=flagged)
+    assert v.kind == "inconclusive"
+    assert v.first_diff_clock is None
+    assert "empty" in v.detail
+
+
+def test_reference_with_zero_clocks_raises(tmp_path):
+    write_reference(tmp_path, REF, clocks=0)
+    with pytest.raises(ReferenceInvalid, match="clocks"):
+        verdict.load_reference(tmp_path, PROJECT)
+
+
 def test_longer_recording_compared_over_reference_span_only():
     assert verdict.compare(ok(REF + b"\x99" * 50), REF, flagged=False).kind == "exact"
     v = verdict.compare(ok(differ_at(REF, 77) + b"\x99" * 50), REF, flagged=False)

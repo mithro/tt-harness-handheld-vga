@@ -80,7 +80,7 @@ def load_reference(ref_dir: Path, project_id: str) -> Reference:
     if doc.get("id") != project_id:
         raise ReferenceInvalid(f"{path}: id is {doc.get('id')!r}, expected {project_id!r}")
 
-    clocks = _int_field(doc, "clocks", path, 0)
+    clocks = _int_field(doc, "clocks", path, 1)  # an empty span would match anything
     reset_clocks = _int_field(doc, "reset_clocks", path, 0)
     ui_in = _int_field(doc, "ui_in", path, 0, 255)
     uio_in = _int_field(doc, "uio_in", path, 0, 255)
@@ -122,10 +122,13 @@ def compare(rec: Recording, ref_samples: bytes, flagged: bool) -> Verdict:
 
     A recording that is not intact, or does not cover the whole span, is `inconclusive`
     whatever its bytes are: only a complete, checksummed recording can be `exact` or not.
+    An empty span proves nothing, so it is `inconclusive` too.
     """
     if not rec.ok:
         return Verdict("inconclusive", None, f"recording not usable: {rec.problem}")
     span = len(ref_samples)
+    if span == 0:
+        return Verdict("inconclusive", None, "the reference span is empty")
     if len(rec.samples) < span:
         return Verdict(
             "inconclusive",
