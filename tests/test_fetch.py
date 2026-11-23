@@ -56,6 +56,7 @@ def make_project(repo, commit, files=("top.v",), patch=None):
         top_module="top",
         source_files=tuple(files),
         clock_hz=25_175_000,
+        clock_declared=25_175_000,
         pmods=(),
         address=None,
         ui_in=0,
@@ -170,6 +171,110 @@ def test_git_receives_url_and_commit_after_double_dash(remote, tmp_path, monkeyp
     for args in carrying:
         i = args.index("--")
         assert str(repo) not in args[:i] and first not in args[:i]
+
+
+def _commit_all(repo, msg):
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", msg)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def test_submodule_is_initialised(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    git(sub, "init", "-q")
+    (sub / "lib.v").write_text("module lib;\nendmodule\n")
+    _commit_all(sub, "sub")
+    main = tmp_path / "main"
+    (main / "src").mkdir(parents=True)
+    git(main, "init", "-q")
+    (main / "src/top.v").write_text("module top;\nendmodule\n")
+    git(
+        main,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        "--",
+        str(sub),
+        "src/lib",
+    )
+    commit = _commit_all(main, "main")
+    src = fetch.fetch(make_project(main, commit, ("top.v", "lib/lib.v")), tmp_path / "cache")
+    assert src.files[1].read_text() == "module lib;\nendmodule\n"
+
+
+def test_repo_without_submodules_unaffected(remote, tmp_path, monkeypatch):
+    repo, first, _ = remote
+    calls = []
+    real = fetch._git
+
+    def spy(args, cwd):
+        calls.append(list(args))
+        return real(args, cwd)
+
+    monkeypatch.setattr(fetch, "_git", spy)
+    fetch.fetch(make_project(repo, first), tmp_path / "cache")
+    assert not any("submodule" in a for a in calls)
+
+
+@pytest.mark.parametrize("url", ["ssh://evil.example/x/y", "git://evil.example/x", "../rel"])
+def test_submodule_with_bad_transport_is_rejected(tmp_path, url):
+    main = tmp_path / "main"
+    (main / "src").mkdir(parents=True)
+    git(main, "init", "-q")
+    (main / "src/top.v").write_text("module top;\nendmodule\n")
+    (main / ".gitmodules").write_text(f'[submodule "x"]\n\tpath = src/x\n\turl = {url}\n')
+    commit = _commit_all(main, "main")
+    with pytest.raises(fetch.FetchError) as e:
+        fetch.fetch(make_project(main, commit), tmp_path / "cache")
+    assert "tt00/tt_um_x" in str(e.value) and url in str(e.value)
+    assert not (tmp_path / "cache/tt00/tt_um_x" / commit).exists()
+
+
+@pytest.fixture
+def videos_with_polyfill(tmp_path):
+    cells = tmp_path / "videos/ttvga/harness/cells"
+    cells.mkdir(parents=True)
+    (cells / "sky130_polyfill.v").write_text("// videos polyfill\n")
+    return tmp_path / "videos"
+
+
+def test_missing_polyfill_is_substituted(remote, tmp_path, videos_with_polyfill):
+    repo, first, _ = remote
+    project = make_project(repo, first, ("top.v", "sky130_polyfill.v"))
+    src = fetch.fetch(project, tmp_path / "cache", videos_repo=videos_with_polyfill)
+    assert src.files[1].is_file()
+    assert src.files[1].read_text() == "// videos polyfill\n"
+    assert src.files[1].is_relative_to(src.root)
+
+
+def test_own_polyfill_is_kept(tmp_path, videos_with_polyfill):
+    repo = tmp_path / "own"
+    (repo / "src").mkdir(parents=True)
+    git(repo, "init", "-q")
+    (repo / "src/top.v").write_text("module top;\nendmodule\n")
+    (repo / "src/sky130_polyfill.v").write_text("// own polyfill\n")
+    commit = _commit_all(repo, "own")
+    project = make_project(repo, commit, ("top.v", "sky130_polyfill.v"))
+    src = fetch.fetch(project, tmp_path / "cache", videos_repo=videos_with_polyfill)
+    assert src.files[1].read_text() == "// own polyfill\n"
+
+
+def test_missing_polyfill_without_videos_file_is_error(remote, tmp_path):
+    repo, first, _ = remote
+    project = make_project(repo, first, ("top.v", "sky130_polyfill.v"))
+    with pytest.raises(fetch.FetchError, match="sky130_polyfill.v"):
+        fetch.fetch(project, tmp_path / "cache", videos_repo=tmp_path / "nowhere")
+
+
+@pytest.mark.parametrize("entry", ["../escape.v", "/etc/passwd", "a/../../x.v"])
+def test_source_path_must_stay_inside_src(remote, tmp_path, entry):
+    repo, first, _ = remote
+    with pytest.raises(fetch.FetchError) as e:
+        fetch.fetch(make_project(repo, first, ("top.v", entry)), tmp_path / "cache")
+    assert "tt00/tt_um_x" in str(e.value) and entry in str(e.value)
 
 
 def _videos_repo(tmp_path, repo, commit):
