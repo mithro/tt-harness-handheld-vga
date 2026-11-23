@@ -38,6 +38,7 @@ def make_sources(root: Path, top: str, files: tuple[str, ...], ui_in: int = 0) -
         top_module=top,
         source_files=files,
         clock_hz=25_175_000,
+        clock_declared=25_175_000,
         pmods=(),
         address=None,
         ui_in=ui_in,
@@ -45,7 +46,12 @@ def make_sources(root: Path, top: str, files: tuple[str, ...], ui_in: int = 0) -
         patch=None,
     )
     paths = tuple(root / "src" / f for f in files)
-    return Sources(project, root, paths, any(p.suffix == ".sv" for p in paths))
+    return Sources(
+        project=project,
+        root=root,
+        files=paths,
+        needs_sv=any(p.suffix == ".sv" for p in paths),
+    )
 
 
 @pytest.fixture
@@ -71,6 +77,18 @@ def test_reset_clocks_is_honoured(counter, tmp_path):
     data = reference.simulate(counter, 40, tmp_path / "ref", reset_clocks=25).read_bytes()
     assert data[:25] == bytes([COUNTER_UI_IN]) * 25
     assert data[25] == (COUNTER_UI_IN + 1) & 0xFF
+
+
+def test_dump_samples_after_rising_edge_before_falling_edge(tmp_path):
+    # uo_out = {fall[3:0], rise[3:0]}: `rise` counts on rising edges once out of reset, and
+    # `fall` copies `rise` on each falling edge. Sampled after rising edge i and before the
+    # falling edge that follows it, `fall` still holds the count from rising edge i - 1.
+    sources = make_sources(DATA / "edges", "tt_um_test_edges", ("tt_um_test_edges.v",))
+    data = reference.simulate(sources, 16, tmp_path / "ref").read_bytes()
+    # Byte 0 is skipped: `fall` has seen no falling edge yet, so it holds its initial value.
+    # Clocks 1 to 9 are in reset; rising edges 10 to 15 count rise to 1..6.
+    assert data[1:] == bytes(9) + bytes([0x01, 0x12, 0x23, 0x34, 0x45, 0x56])
+    # Sampling after the falling edge instead would give 0x11, 0x22, ... from clock 10.
 
 
 def test_two_runs_are_byte_identical(counter, tmp_path):
@@ -142,7 +160,11 @@ def test_agrees_with_sibling_reference(tmp_path):
         project.ui_in,
         project.uio_in,
     )
-    sources = fetch.fetch(project, tools.REPO / "work" / "sources")
+    try:
+        sources = fetch.fetch(project, tools.REPO / "work" / "sources")
+    except fetch.FetchError as e:
+        # A cold source cache with no network access, for example.
+        pytest.skip(f"cannot fetch {AGREEMENT_ID} sources (empty cache and no network?): {e}")
     ours = reference.simulate(sources, AGREEMENT_CLOCKS, tmp_path / "ref").read_bytes()
     with gzip.open(sibling, "rb") as f:
         theirs = f.read(AGREEMENT_CLOCKS)
