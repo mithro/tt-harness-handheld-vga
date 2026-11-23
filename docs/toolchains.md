@@ -118,3 +118,15 @@ was not tried: Miniconda with Anaconda's `defaults` channel (its terms of servic
 organisational use, and `gmp 5.1.2` may not be there either), hand-editing the pins, or
 building VTR and the Yosys plugins from source. The solver output is kept in
 `.toolchains/logs/f4pga-conda.log`.
+
+## LiteX and Migen (Python)
+
+`pyproject.toml` pins these from their Git repositories (recorded in `uv.lock`), as of
+2026-11-23:
+
+| Package | Pin |
+|---|---|
+| `litex`, `litex-boards` | tag `2026.08`, the newest LiteX release |
+| `migen` | `m-labs/migen` master at `e19524c963a8342952840983047557707fbe0b6a` |
+
+`pythondata-*` packages are only needed for SoC builds and are not installed yet.
