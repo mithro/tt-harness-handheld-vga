@@ -43,3 +43,13 @@ see [`docs/toolchains.md`](docs/toolchains.md).
 ## Licence
 
 Apache-2.0. See `LICENSE`.
+
+## Development
+
+```sh
+uv sync
+uv run tt-harness --version
+uv run pytest -m "not toolchain and not vivado"
+```
+
+Tests marked `toolchain` need `.toolchains/`; tests marked `vivado` need Vivado.

@@ -2,15 +2,40 @@
 name = "tt-harness-handheld-vga"
 version = "0.0.0"
 description = "FPGA harness for running Tiny Tapeout demo designs on handheld-console FPGA boards"
+readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "litex",
+    "litex-boards",
+    "migen",
+    "pyyaml",
+]
+
+[project.scripts]
+tt-harness = "tt_harness.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff"]
 
-[tool.uv]
-package = false
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tt_harness"]
+
+[tool.uv.sources]
+migen = { git = "https://github.com/m-labs/migen", rev = "e19524c963a8342952840983047557707fbe0b6a" }
+litex = { git = "https://github.com/enjoy-digital/litex", tag = "2026.08" }
+litex-boards = { git = "https://github.com/litex-hub/litex-boards", tag = "2026.08" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "toolchain: needs the open-source toolchains installed under .toolchains/",
+    "vivado: needs a Vivado installation",
+]
+
+[tool.ruff]
+line-length = 100
