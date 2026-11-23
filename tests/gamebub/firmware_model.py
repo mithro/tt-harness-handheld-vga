@@ -427,7 +427,8 @@ class FirmwareModel:
         return 0 if (yield self.dut.fpga_irq) else 1
 
     def service_interrupt(self):
-        """Section 6: what the firmware does when irq_n is low. Returns the pending mask."""
+        """Section 6: what the firmware does when its interrupt line is low (see
+        ``mcu_int_n``). Returns the pending mask."""
         pending = yield from self.read_u32(CTRL_IRQ_PENDING)
         if pending:
             yield from self.write_u32(CTRL_IRQ_PENDING, pending)

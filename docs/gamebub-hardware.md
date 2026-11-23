@@ -29,7 +29,12 @@ Sources:
   full reconfiguration.
 - The configuration pins share nets with the runtime link: `FPGA_SPI_CLK` goes to both CCLK
   (E9) and user pin T14, and `FPGA_SPI_D0` goes to both DIN (K18) and V15.
-- Runtime link is QSPI (clk, cs_n, d[3:0]) plus an open-drain `mcu_irq_n`. There is no UART.
+- Runtime link is QSPI (clk, cs_n, d[3:0]) plus an interrupt pin, N15. On rev 2-4 that pin
+  is **push-pull, active high**: it drives the gate of an n-FET (Q801, AO3400A,
+  `gamebub-pcb/handheld_rev4_1/fpga_io_14.kicad_sch`) that pulls the MCU's active-low,
+  level-triggered interrupt line (`firmware/handheld/src/device/interrupt.rs:85-91`); the
+  framework drives it that way (`framework/verilog/handheld/top.sv:404-410`). Only rev 1
+  had an open-drain `mcu_irq_n`. There is no UART.
 - The stock firmware expects the framework register map at `0xF100_xxxx` over QSPI
   immediately after load, and reads the twelve FPGA-side buttons through register
   `0xF1002000`.
@@ -72,6 +77,9 @@ tag). Firmware paths are under `firmware/handheld/src/`.
 
 ### What a core must implement for stock firmware
 
+**The authority for this is `docs/gamebub-mcu-protocol.md`**, written from the firmware
+source with line citations; the outline below is a summary and defers to it.
+
 The official framework's top level (Chisel, `HandheldTop.scala`) implements the QSPI slave
 and the `0xF1` registers, and hands everything else to the core. A design that replaces
 that top level, as this harness does, must implement all of it itself:
@@ -79,14 +87,27 @@ that top level, as this harness does, must implement all of it itself:
 - **QSPI framing** (`device/drivers/fpga/mod.rs` L252-296): one command byte on a single
   line, then a 32-bit big-endian address in quad mode, then data in quad mode. Command
   byte: bit 0 read, bits 1-2 word size, bit 3 byte swap, bit 4 auto-increment, bits 5-6
-  line width. Reads have 8 dummy bytes and are capped at 16 MHz.
-- **Address map:** 0xF1xx_xxxx registers (buttons at 0xF100_2000, command status at
-  0xF100_1104, interrupt status), 0xF2 overlay, 0xF3 framebuffer; everything else is core
-  memory. A host mailbox at 0xF000_0000 and a core mailbox at 0xF000_1000.
+  line width. Reads have 8 dummy bytes (16 clocks). Register reads are capped at 16 MHz
+  (`MAX_SPI_READ_CLOCK`, `device/drivers/fpga/mod.rs:46`) but actually run at **10 MHz**:
+  the firmware's devices are 40/20/10/4/2 MHz and it takes the first not above the cap
+  (`device/mod.rs:372`, `device/drivers/fpga/mod.rs:219-237`).
+- **Address map:** 0xF1xx_xxxx registers (buttons at 0xF100_2000; host command status at
+  **0xF100_1100**, `device/drivers/fpga/mod.rs:31`, `core/command.rs:80-109`; 0xF100_1104 is
+  the core request channel, `core/command.rs:120-192`; interrupt enable and pending), 0xF2
+  overlay; everything else is core memory. The firmware never addresses 0xF3 (the
+  framework's framebuffer region; no 0xF3 address appears in `firmware/handheld/src` at
+  8b1135b, and the firmware's framebuffer output goes to the 0xF2 overlay,
+  `device/mod.rs:469-474`). A host mailbox at 0xF000_0000 and a core mailbox at
+  0xF000_1000.
 - **Handshakes:** `GET_STATUS` (reply SETUP=2, then HALT=3), `SETUP_COMPLETE`, `CORE_RUN`,
   `CORE_HALT`, `NOTIFY_FOCUS`. `core-example/rtl/demo_core.sv` L63-160 shows the core side.
-- **Timeouts:** 100 ms for setup, 10 ms for notify. A failure during load shows an error
-  and reloads the boot bitstream. After the core is running, command failures are ignored.
+- **Timeouts:** 100 ms for setup, 10 ms for notify (`core/mod.rs:36-37`). The 100 ms starts
+  at the firmware's first status poll (`core/mod.rs:278`, `core/command.rs:44-63`), after
+  the dock write, interrupt-enable write and button read that follow configuration
+  (`bitstream/mod.rs:56-58`). A failure during load shows an error and reloads the boot
+  bitstream. CORE_RUN and NOTIFY_FOCUS failures are ignored even during load
+  (`core/mod.rs:344-345`, `:256-260`); a SETUP_COMPLETE failure aborts it
+  (`core/mod.rs:331`).
 - The MCU initialises the LCD and the DAC (fixed 48 kHz, MCLK = 256 x fs) at boot whatever
   core is loaded, turns the backlight off while programming, and powers the DAC up on
   focus. The core must generate the I2S clocks.
@@ -144,7 +165,7 @@ from that source.
 | LCD R[0..7] | E18 E16 D18 D17 C17 B18 B17 A18 |
 | Buttons | A L6, B K6, X M6, Y N5, Up N16, Down L13, Left L14, Right M16, L K13, R K5, Start H6, Select H5 |
 | DAC | mclk T15, wclk R15, bclk R16, din P15 |
-| MCU QSPI | clk T14, cs_n U17, d0-3 V15 V16 U16 V17, irq_n N15 |
+| MCU QSPI | clk T14, cs_n U17, d0-3 V15 V16 U16 V17, irq N15 (push-pull, active high into an n-FET; the XDC names it `mcu_irq_n`) |
 | HDMI (p/n) | clk C2/C1, d0 A4/A3, d1 B3/B2, d2 B1/A1 |
 | PMOD[0..3] | V14 U14 U13 R13 |
 | Test points | M14 M13 N14 P14 |

@@ -8,9 +8,11 @@ reproduced.
 
 **Authority.** `elipsitz/gamebub`, branch `v1.1-beta`, commit `8b1135b`. All paths below are
 relative to `firmware/handheld/src/` at that commit, and `file:N` or `file:N-M` cite lines.
-Where the firmware leaves something to a library (the ESP-IDF SPI driver, `esp-idf-hal`
-0.45.2 per `firmware/handheld/Cargo.lock`), the point is listed under
-[Unverified](#unverified).
+Where the firmware leaves something to a library, the ESP SPI HAL is cited as
+`hal/spi.rs:N`: `esp-idf-hal` 0.45.2, the version `firmware/handheld/Cargo.lock` pins
+(line 1406-1407), file `src/spi.rs` of that crate. Board wiring is cited from the
+rev 4.1 schematic (`gamebub/gamebub-pcb`, `handheld_rev4_1/`). Points neither source
+settles are listed under [Unverified](#unverified).
 
 Terms: **MCU** is the ESP32-S3 running the firmware. **Core** is the FPGA design. A
 **word** is the unit selected by the command byte's word-size field. "LE" is
@@ -23,7 +25,7 @@ little-endian.
 | `clk` | MCU to FPGA | SPI clock. Shares the net with configuration CCLK. |
 | `cs_n` | MCU to FPGA | Active low. Driven by software as a GPIO (`device/mod.rs:384-389`). |
 | `dq[3:0]` | bidirectional | `dq[0]` shares the net with configuration DIN. |
-| `irq_n` | FPGA to MCU | Shared, active-low, level-triggered MCU interrupt line (`device/interrupt.rs:85-91`). Must be open-drain. |
+| `FPGA_IRQ` | FPGA to MCU | FPGA pin N15, **push-pull, active high**. On rev 2, 3 and 4 it drives the gate of an n-MOSFET (Q801, AO3400A, `fpga_io_14.kicad_sch`) whose drain pulls the MCU's shared, active-low, level-triggered interrupt line low (`device/interrupt.rs:85-91`). The official framework drives the pin directly with its active-high interrupt on these revisions (`gamebub/framework` `verilog/handheld/top.sv:404-410`). Rev 1 alone wired the pin straight to the line, open-drain. |
 
 - One ESP SPI host (`spi2`) drives the link in quad mode, half duplex, with DMA and a
   32 KiB maximum transfer (`device/mod.rs:218-228`, `device/mod.rs:377-379`).
@@ -49,8 +51,10 @@ little-endian.
 ## 2. QSPI framing
 
 A transaction is one `cs_n` low period (`device/drivers/fpga/mod.rs:263-270`,
-`:287-295`). The three or four phases are separate driver operations under one chip
-select, so the clock may pause between phases while `cs_n` stays low.
+`:287-295`). The three or four phases are separate driver operations of one
+`transaction` call; the HAL asserts chip select once before the first operation and
+releases it after the last (`hal/spi.rs:1053-1105`, `raise_cs` at 1068 and `lower_cs` at
+1102), so `cs_n` stays low throughout while the clock may pause between phases.
 
 1. **Command**: 1 byte, single line on `dq[0]`, most significant bit first: 8 clocks.
 2. **Address**: 4 bytes, big-endian (`to_be_bytes`), quad: 8 clocks
@@ -61,8 +65,11 @@ select, so the clock may pause between phases while `cs_n` stays low.
    (`:293`).
 
 In quad phases each byte is sent as its high nibble then its low nibble, nibble bit 3 on
-`dq[3]` (see Unverified U2). SPI mode 0: the clock idles low, the receiver samples on the
-rising edge, the transmitter changes data after the falling edge (U1).
+`dq[3]` (see Unverified U2). SPI mode 0, most significant bit first: the firmware sets
+only rate and duplex (`device/mod.rs:377-379`), and `Config::new()` is the HAL's
+`Default` (`hal/spi.rs:267-269`) with `data_mode: MODE_0` and `bit_order: MsbFirst`
+(`hal/spi.rs:348-356`). The clock idles low, the receiver samples on the rising edge,
+and the transmitter changes data after the falling edge.
 
 ```
             command (dq0 only)      address (quad)    dummy (16 clk)    data (quad)
@@ -90,11 +97,12 @@ Built by `SpiCommand::as_read_command`/`as_write_command` and `spi_write`/`spi_r
 | 2:1 | word size | 0 = 8 bit, 1 = 16 bit, 2 = 32 bit, 3 = 64 bit (`:342-349`); 3 is never sent |
 | 3 | byte swap | always 1 (`SpiCommand::new`, `:358-365`) |
 | 4 | auto-increment | always 1 (`:358-365`) |
-| 6:5 | line width | always quad (`LineWidth::Quad`, numeric value 2, U3) |
+| 6:5 | line width | always quad: `LineWidth::Quad` cast to `u8`; the enum is `Single, Dual, Quad` with no explicit discriminants (`hal/spi.rs:199-205`), so the value is 2 |
 | 7 | — | 0 |
 
-So the firmware sends only `0x54`/`0x55` (8 bit), `0x56`/`0x57` (16 bit) and
-`0x58`/`0x59` (32 bit) write/read commands.
+So the firmware sends only `0x58`/`0x59` (8 bit), `0x5A`/`0x5B` (16 bit) and
+`0x5C`/`0x5D` (32 bit) write/read commands. Register accesses (`write_u32`/`read_u32`)
+use `0x5C`/`0x5D`; overlay writes use `0x5A`.
 
 ### 2.2 Data, words, byte order and address increment
 
@@ -148,7 +156,7 @@ brackets. Constants are from `device/drivers/fpga/mod.rs:18-41`.
 | `0xF100_0104` | INFO_VIDEO_DEPTH | R | colour depth | [0] | never read |
 | `0xF100_0108` | INFO_INPUT_CAPS | R | 3:0 number of input slots (clamped to 4); 6 rumble; 7 extended slot format (`input/mod.rs:139-141`, `:265-283`) | 0 recommended | read once during load (`core/mod.rs:283-287`) |
 | `0xF100_1000` | CTRL_IRQ_ENABLE | RW | one enable bit per interrupt source, numbered as in section 6 | 0 | written whole from the MCU's own copy (`device/drivers/fpga/mod.rs:209-217`) |
-| `0xF100_1004` | CTRL_IRQ_PENDING | R/W1C | one pending bit per source; writing 1 clears | 0 | read and written back on `irq_n` (`device/interrupt.rs:180-187`) |
+| `0xF100_1004` | CTRL_IRQ_PENDING | R/W1C | one pending bit per source; writing 1 clears | 0 | read and written back on each MCU interrupt (`device/interrupt.rs:180-187`) |
 | `0xF100_100C` | CTRL_DOCK | W | 0 docked; 1 use built-in screen while docked (`device/drivers/fpga/mod.rs:336-339`) | 0 | written after every configuration and on display-mode change (`device/mod.rs:647-654`, `:657-684`) |
 | `0xF100_1010` | CTRL_FOCUS | W | 0: 1 = the core has focus (menu closed) | 0 | `core/mod.rs:245-247` |
 | `0xF100_1014` | CTRL_VIBRATE | W | firmware writes 1 as the core starts (`core/mod.rs:342`); meaning not stated in the firmware (U8) | 0 | once |
@@ -287,10 +295,13 @@ write after configuration normally contains only Button.
   CoreRequest just before SETUP_COMPLETE (`core/mod.rs:328`) and disabled again on exit
   (`core/mod.rs:227-229`). Vblank is used only by the built-in cores. Bits 2 and 3 are
   never enabled by the firmware.
-- `irq_n` must be low while `(pending & enable) != 0` (the firmware relies on level
-  semantics: it re-arms a low-level GPIO interrupt after servicing,
-  `device/interrupt.rs:85-91`, `:192`). The line is shared with the DAC and fuel gauge
-  (`device/interrupt.rs:165-177`).
+- The FPGA_IRQ pin must be driven **high** (push-pull) while `(pending & enable) != 0`
+  and low otherwise. Through the board's n-FET (section 1) that holds the MCU's line low
+  exactly while an enabled interrupt is pending. The firmware relies on level semantics:
+  it re-arms a low-level GPIO interrupt after servicing (`device/interrupt.rs:85-91`,
+  `:192`), so a pin left high (or an inverted pin) makes the interrupt fire continuously,
+  and a pin that never goes high means interrupts never arrive. The MCU line is shared
+  with the DAC and fuel gauge (`device/interrupt.rs:165-177`).
 - Service: read IRQ_PENDING; if non-zero write the same value back to clear it and
   dispatch; if the Button bit was set, read STATUS_BUTTON (`device/interrupt.rs:180-198`).
 - What sets Button pending is the core's choice; the firmware only needs it whenever
@@ -318,11 +329,11 @@ picks it and any user-selected files (`core/file_selection.rs:12-27`):
 
 | # | Step | Transaction | Failure |
 |---|---|---|---|
-| 0 | LCD off, sleep 10 ms, configure the FPGA (`bitstream/mod.rs:34-55`) | slave serial, 80 MHz; `DONE` is logged, not checked (`device/drivers/fpga/mod.rs:196-200`) | config errors panic (`unwrap`) |
+| 0 | internal display only: LCD off and sleep 10 ms (`bitstream/mod.rs:34-41`); then configure the FPGA (`bitstream/mod.rs:52-55`) | slave serial, 80 MHz; `DONE` is logged, not checked (`device/drivers/fpga/mod.rs:196-200`) | config errors panic (`unwrap`) |
 | 1 | dock state (`bitstream/mod.rs:56`) | W `CTRL_DOCK` = docked \| builtin<<1 | panic only on driver error |
 | 2 | enable Button IRQ (`bitstream/mod.rs:57`) | W `CTRL_IRQ_ENABLE` = mask (normally `0x2`) | as above |
 | 3 | input state (`bitstream/mod.rs:58`) | R `STATUS_BUTTON` | as above |
-| 4 | LCD on (`bitstream/mod.rs:61-63`) | LCD bus only; sleeps at least 5 ms (`device/drivers/ili9806e.rs:217-229`) | — |
+| 4 | internal display only: LCD on (`bitstream/mod.rs:61-63`) | LCD bus only; sleeps at least 5 ms (`device/drivers/ili9806e.rs:217-229`). When docked to an external display this step is skipped and the first GET_STATUS can follow step 3 immediately | — |
 | 5 | wait for SETUP (`core/mod.rs:278`) | status poll, expected 2, *T* = 100 ms | abort |
 | 6 | UI enters game view and redraws (`core/mod.rs:279-280`) | overlay writes, asynchronous | — |
 | 7 | input caps (`core/mod.rs:283-287`) | R `INFO_INPUT_CAPS`; slot writes only if caps say so | panic only on driver error |
@@ -377,15 +388,15 @@ FILE_READ_START/FILE_READ_END and reads, then reconfigures with the boot bitstre
 
 Points the firmware source does not settle, with what this project assumes:
 
-- **U1. SPI mode.** The firmware sets only baud rate and half duplex
-  (`device/mod.rs:377-379`); the mode comes from the `esp-idf-hal` 0.45.2 default, taken
-  to be mode 0 (clock idle low, sample on rising edge, MSB first). Consistent with the
-  official framework's receiver.
+- **U1. SPI mode.** *Settled*, no longer unverified: mode 0, MSB first, from the HAL
+  defaults (`hal/spi.rs:267-269`, `:348-356`; section 2).
 - **U2. Quad nibble order.** High nibble first with bit 3 on `dq[3]` (ESP32-S3 SPI
-  hardware convention), not stated in the firmware.
-- **U3. `LineWidth::Quad` numeric value.** Assumed 2 (the `esp-idf-hal` enum order
-  single, dual, quad), so bits 6:5 = `0b10` and the commands of section 2.1. The
-  firmware casts the enum (`device/drivers/fpga/mod.rs:261`, `:283`).
+  hardware convention). Neither the firmware nor the HAL source states it; the official
+  framework's receiver agrees (it shifts the 4-bit input in whole, `dq[3]` most
+  significant, `SpiReceiverFifo.scala:179`, and sends bits 7:4 of the byte first, `:153`).
+- **U3. `LineWidth::Quad` numeric value.** *Settled*, no longer unverified: it is 2
+  (`hal/spi.rs:199-205`; section 2.1). The firmware casts the enum
+  (`device/drivers/fpga/mod.rs:261`, `:283`).
 - **U4. Idle lines in the command phase.** Whether the ESP drives `dq[3:1]` (and to what)
   while sending the single-line command byte. A core must ignore them.
 - **U5. Undriven bus value.** What the MCU reads if the FPGA does not drive `dq` during a
