@@ -15,6 +15,12 @@ Verilog parsing fails), then `hierarchy -check -top <top>; proc -noopt; flatten`
   "found logic loop" warning each, read from that pass's own output (`tee -o`);
 - derived_clocks: distinct nets clocking a flip-flop or memory port that do not reach the
   top-level `clk` port through only wires, buffers and inverters, from `write_json`.
+
+Known blind spots: registers without a reset (whose initial values differ between the
+simulator and the fabric) and asynchronous resets driven from logic are not detected, so a
+mismatch they cause is reported as `mismatch`. Gated or multiplexed clocks are
+deliberately counted as derived; that is conservative and can label a real harness
+mismatch `nondeterministic`.
 """
 
 from __future__ import annotations

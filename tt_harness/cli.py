@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from tt_harness import __version__, fetch, manifest, prescreen, reference, verdict
+from tt_harness.core.stimulus import RESET_CLOCKS
 from tt_harness.host import frame
 from tt_harness.tools import REPO
 
@@ -127,16 +128,40 @@ def _cmd_reference(args: argparse.Namespace) -> int:
 _VERDICT_EXIT = {"exact": 0, "mismatch": 1, "nondeterministic": 1, "inconclusive": 2}
 
 
+def _check_stimulus(ref: verdict.Reference, project: manifest.Project) -> None:
+    """Refuse a reference made under different inputs from those the compare build applies.
+
+    A difference there would show up as a `mismatch` that is not the design's or the
+    harness's fault, so it is an error instead.
+    """
+    for name, ref_value, build_value in (
+        ("ui_in", ref.ui_in, project.ui_in),
+        ("uio_in", ref.uio_in, project.uio_in),
+    ):
+        if ref_value != build_value:
+            raise ValueError(
+                f"{project.id}: reference {name} 0x{ref_value:02x} differs from the "
+                f"compare build's 0x{build_value:02x} ({ref.path})"
+            )
+    if ref.reset_clocks != RESET_CLOCKS:
+        raise ValueError(
+            f"{project.id}: reference reset_clocks {ref.reset_clocks} differs from the "
+            f"compare build's {RESET_CLOCKS} ({ref.path})"
+        )
+
+
 def _cmd_verdict(args: argparse.Namespace) -> int:
     try:
+        # The reference first: a missing or invalid one is reported before fetch and Yosys.
+        ref = verdict.load_reference(
+            args.reference_dir or verdict.default_reference_dir(), args.project
+        )
         rec = frame.decode(args.recording.read_bytes())
         projects = manifest.load(args.videos_repo or manifest.default_videos_repo())
         project = manifest.get(projects, args.project)
+        _check_stimulus(ref, project)
         sources = fetch.fetch(project, args.cache, args.videos_repo)
         screen = prescreen.check(sources)
-        ref = verdict.load_reference(
-            args.reference_dir or verdict.default_reference_dir(), project.id
-        )
     except (
         KeyError,
         OSError,

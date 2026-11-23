@@ -83,13 +83,15 @@ def verdict_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TT_REFERENCE_DIR", str(ref_dir))
     monkeypatch.setenv("TT_VIDEOS_REPO", str(MANIFEST))
 
-    state = {"flagged": False, "prescreen_error": None}
+    state = {"flagged": False, "prescreen_error": None, "calls": []}
     log = tmp_path / "yosys.log"
 
     def fake_fetch(project, cache, videos_repo=None):
+        state["calls"].append("fetch")
         return fetch.Sources(project=project, root=tmp_path, files=(), needs_sv=False)
 
     def fake_check(sources, out_dir=None):
+        state["calls"].append("prescreen")
         if state["prescreen_error"]:
             raise prescreen.PrescreenError(state["prescreen_error"])
         f = state["flagged"]
@@ -180,11 +182,42 @@ def test_verdict_bad_reference_is_an_error(verdict_env, capsys):
     code, doc, err = _verdict(verdict_env, _frame(VERDICT_REF), capsys)
     _assert_error(code, doc, err)
     assert "clocks" in err
+    assert verdict_env["state"]["calls"] == []  # refused before fetch and Yosys
 
 
 def test_verdict_missing_reference_is_an_error(verdict_env, capsys):
     verdict_env["ref"].unlink()
     _assert_error(*_verdict(verdict_env, _frame(VERDICT_REF), capsys))
+    assert verdict_env["state"]["calls"] == []
+
+
+def test_verdict_runs_fetch_and_prescreen_when_reference_is_valid(verdict_env, capsys):
+    code, _, _ = _verdict(verdict_env, _frame(VERDICT_REF), capsys)
+    assert code == 0
+    assert verdict_env["state"]["calls"] == ["fetch", "prescreen"]
+
+
+def _edit_reference(env, **fields):
+    ref = env["ref"]
+    doc = json.loads(ref.read_text())
+    doc.update(fields)
+    ref.write_text(json.dumps(doc))
+
+
+@pytest.mark.parametrize(
+    ("fields", "names"),
+    [
+        ({"ui_in": 0x30}, ("ui_in", "0x30", "0x00")),
+        ({"uio_in": 0x01}, ("uio_in", "0x01", "0x00")),
+        ({"reset_clocks": 11}, ("reset_clocks", "11", "10")),
+    ],
+)
+def test_verdict_stimulus_divergence_is_an_error_not_a_mismatch(verdict_env, capsys, fields, names):
+    _edit_reference(verdict_env, **fields)
+    code, doc, err = _verdict(verdict_env, _frame(_differ(5)), capsys)
+    _assert_error(code, doc, err)
+    for name in names:
+        assert name in err
 
 
 def test_verdict_prescreen_failure_is_an_error(verdict_env, capsys):
