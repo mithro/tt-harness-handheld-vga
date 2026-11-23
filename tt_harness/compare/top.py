@@ -17,7 +17,7 @@ from migen.fhdl import verilog
 from migen.fhdl.specials import Special
 
 from tt_harness.compare.recorder import StepRecorder
-from tt_harness.core.stimulus import ReferenceStimulus
+from tt_harness.core.stimulus import RESET_CLOCKS, ReferenceStimulus
 from tt_harness.manifest import Project
 
 MODULE_NAME = "compare_top"
@@ -44,7 +44,7 @@ class CompareTop(Module):
         baud: int,
         clocks: int,
         settle: int = 2,
-        reset_clocks: int = 10,
+        reset_clocks: int = RESET_CLOCKS,
         clock_buffer: ClockBuffer | None = None,
     ) -> None:
         self.clk = Signal()

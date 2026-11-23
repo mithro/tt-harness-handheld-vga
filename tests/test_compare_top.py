@@ -8,16 +8,16 @@ sources; `uart_capture_main.cpp` decodes the UART line and writes the received b
 from __future__ import annotations
 
 import re
-import struct
-import zlib
 from pathlib import Path
 
 import pytest
 
-from tt_harness import fetch, manifest, reference, tools
+from tt_harness import fetch, manifest, reference, tools, verdict
 from tt_harness.compare import recorder, sim, top
 from tt_harness.compare.top import CompareTop
+from tt_harness.core.stimulus import RESET_CLOCKS
 from tt_harness.fetch import Sources
+from tt_harness.host import frame
 from tt_harness.manifest import Project
 
 DATA = Path(__file__).resolve().parent / "data" / "projects"
@@ -62,20 +62,45 @@ def _real(project_id: str) -> Sources:
         pytest.skip(f"cannot fetch {project_id} sources (empty cache and no network?): {e}")
 
 
-def _check_against_reference(sources: Sources, clocks: int, tmp_path: Path) -> None:
-    frame = sim.simulate(sources, clocks, tmp_path / "compare", SYS_CLK_FREQ, BAUD)
-    expected = reference.simulate(sources, clocks, tmp_path / "ref").read_bytes()
-    assert len(frame) == recorder.frame_length(clocks)
-    assert frame[: recorder.HEADER_LENGTH] == recorder.header(clocks)
-    payload = frame[recorder.HEADER_LENGTH : -recorder.TRAILER_LENGTH]
-    crc = frame[-recorder.TRAILER_LENGTH :]
-    assert crc == struct.pack("<I", zlib.crc32(payload)), "frame CRC does not match its payload"
+def _assert_same(payload: bytes, expected: bytes, what: str) -> None:
+    assert len(payload) == len(expected), f"{len(payload)} bytes against {len(expected)} ({what})"
     if payload != expected:
         first = next(i for i, (a, b) in enumerate(zip(payload, expected, strict=True)) if a != b)
         pytest.fail(
-            f"{sources.project.id}: first difference at clock {first}: "
-            f"FPGA model {payload[first]:#04x}, reference {expected[first]:#04x}"
+            f"first difference from {what} at clock {first}: "
+            f"FPGA model {payload[first]:#04x}, {what} {expected[first]:#04x}"
         )
+
+
+def _check_against_reference(
+    sources: Sources, clocks: int, tmp_path: Path, shared: bool = False
+) -> None:
+    """The full captured payload equals the local reference (and the shared one, if any)."""
+    data = sim.simulate(sources, clocks, tmp_path / "compare", SYS_CLK_FREQ, BAUD)
+    # The exact bytes on the line: one frame and nothing else.
+    assert len(data) == recorder.frame_length(clocks)
+    assert data[: recorder.HEADER_LENGTH] == recorder.header(clocks)
+    rec = frame.decode(data)
+    assert rec.ok, f"frame not decoded: {rec.problem}"  # magic, version, length and CRC
+    assert rec.clocks == clocks
+    expected = reference.simulate(sources, clocks, tmp_path / "ref").read_bytes()
+    _assert_same(rec.samples, expected, "local reference")
+    if shared:
+        ref_dir = verdict.default_reference_dir()
+        if not (ref_dir / sources.project.id / "reference.json").is_file():
+            return  # no shared reference for this design (or no TT_REFERENCE_DIR checkout)
+        try:
+            ref = verdict.load_reference(ref_dir, sources.project.id)
+        except verdict.ReferenceInvalid as e:
+            pytest.fail(f"shared reference present but unusable: {e}")
+        assert (ref.reset_clocks, ref.ui_in, ref.uio_in) == (
+            RESET_CLOCKS,
+            sources.project.ui_in,
+            sources.project.uio_in,
+        )
+        if len(ref.samples) < clocks:
+            pytest.fail(f"shared reference has {len(ref.samples)} samples, fewer than {clocks}")
+        _assert_same(rec.samples, ref.samples[:clocks], "shared reference")
 
 
 def test_verilog_instantiates_project_by_name(tmp_path: Path) -> None:
@@ -123,12 +148,14 @@ class TestSimulation:
 
     def test_logo_screensaver_matches_reference(self, tmp_path: Path) -> None:
         _check_against_reference(
-            _real("tt08/tt_um_tinytapeout_logo_screensaver"), 450_000, tmp_path
+            _real("tt08/tt_um_tinytapeout_logo_screensaver"), 450_000, tmp_path, shared=True
         )
 
     def test_dottee_matches_reference(self, tmp_path: Path) -> None:
         # SystemVerilog syntax, and a second clock derived from vsync inside the project.
-        _check_against_reference(_real("ttsky26a/tt_um_algofoogle_dottee"), 450_000, tmp_path)
+        _check_against_reference(
+            _real("ttsky26a/tt_um_algofoogle_dottee"), 450_000, tmp_path, shared=True
+        )
 
     def test_cycle_limit_is_a_clear_error(self, tmp_path: Path) -> None:
         sources = _local("counter", "tt_um_test_counter")
