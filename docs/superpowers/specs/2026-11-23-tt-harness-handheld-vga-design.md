@@ -66,8 +66,9 @@ remotely.
 
 ## Constraints
 
-- Languages: LiteX and Migen, or plain Verilog. No Chisel (owner's instruction). The
-  Game Bub's own framework is Chisel and is not used.
+- Languages (owner's instruction): LiteX and Migen are preferred over Verilog. Plain
+  Verilog is acceptable but not the first choice. No Chisel; the Game Bub's own framework
+  is Chisel and is not used.
 - Game Bub: the MCU owns the SD card and FPGA configuration; the FPGA sees it only over
   QSPI. The panel is parallel RGB scanned as 480x800 portrait. Audio is I2S at a fixed
   48 kHz with MCLK = 256 x fs. One 50 MHz oscillator.
@@ -232,10 +233,9 @@ result:
   and `RAW ` chunks (`samples_per_word=4`, first-sample-MSB flag, as the RP2350 capture
   writes). No samples can be lost, so no `TIME` overrun chunk is expected; a UART framing
   or length error makes the run inconclusive.
-- The sampler itself is plain Verilog with no vendor primitives and is contributed to
-  `vgacap/rtl/` as the first piece of a shared capture library, by a reviewed change on a
-  branch in the local `vgacap` checkout (agreed with the capture project, which owns the
-  run-length encoder). The clock gate, FIFO and UART framing are LiteX/Migen in this repo.
+- The sampler is a Migen module with no vendor primitives. Its generated Verilog is
+  offered to `vgacap/rtl/` as the first piece of a shared capture library (see "Sharing
+  and dependencies"). The clock gate, FIFO and UART framing are also Migen, in this repo.
 - A host-side script loads the bitstream, collects the bytes, writes the stream and
   produces a verdict.
 
@@ -272,10 +272,16 @@ What this project offers for reuse:
 
 - Each core block (reference-stimulus sequencer, gamepad emulator, VGA capture, 7-segment
   sampler, audio filter) is a self-contained module with a documented port list and its
-  own tests, usable without the rest of the harness or the SoC. Blocks likely to be
-  useful outside LiteX (the sampler, the gamepad emulator, the stimulus sequencer) are
-  plain Verilog so the iCE40 harness and others can take them.
-- The sampler goes to `vgacap/rtl/`, the shared capture library.
+  own tests, usable without the rest of the harness or the SoC. All of them are written
+  in Migen.
+- For projects that do not use LiteX, the blocks likely to be useful elsewhere (the
+  sampler, the gamepad emulator, the stimulus sequencer) are also exported as standalone
+  generated Verilog with no vendor primitives. The build produces these files and a test
+  checks the generated Verilog in simulation, so the Migen source stays the single
+  original.
+- The sampler's generated Verilog is offered to `vgacap/rtl/`, the shared capture
+  library, with a header naming this repository and commit as its source. Whether that
+  library accepts generated Verilog is for the capture project and the owner to say.
 - The host-side recorder output is the shared per-clock dump and vgacap stream formats,
   so other projects' tools can read it.
 
@@ -287,8 +293,6 @@ verdict. Where a shared piece already exists and is a leaf, it is used rather th
 - **Data, read as files:** the shared manifest (`data/targets.json` and compiled
   overrides from a `tinytapeout-vga-videos` checkout) and, when they exist, the reference
   files from `tt-harness-fpga-vga`. Their schemas are the interface.
-- **Shared RTL:** the sampler lives in `vgacap/rtl/` and is pulled in at a pinned commit
-  for the Arty compare build only.
 - **Optional tool:** `vgacap`'s frame tools turn a recorded stream into pictures for a
   person to look at. Nothing depends on them for a pass or fail.
 - Nothing from any of them is needed to build or run the Game Bub harness.
