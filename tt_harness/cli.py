@@ -69,9 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bc_p.add_argument("--baud", type=_positive_int, default=1_000_000, help="UART baud rate")
     bc_p.add_argument(
-        "--vivado-nettype-rewrite",
-        action="store_true",
-        help="let Vivado read copies with `default_nettype wire` if it rejects the sources",
+        "--no-vivado-nettype-rewrite",
+        dest="vivado_nettype_rewrite",
+        action="store_false",
+        help="fail instead of letting Vivado read `default_nettype wire` copies (Synth 8-6735)",
     )
     bc_p.add_argument(
         "--jobs", type=_positive_int, default=build.MAX_JOBS, help="cores the tools may use"
@@ -209,8 +210,12 @@ def _cmd_build_compare(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     print(f"sources read as {result.language}", file=sys.stderr)
-    for path in result.source_rewrites:
-        print(f"warning: {path} was given to {args.toolchain} modified", file=sys.stderr)
+    if result.source_rewrites:
+        files = ", ".join(f"{Path(f).name} ({n})" for f, n in result.source_rewrites)
+        print(
+            f"warning: {args.toolchain} read copies with `default_nettype none` as `wire`: {files}",
+            file=sys.stderr,
+        )
     print(result.bitstream)
     return 0
 

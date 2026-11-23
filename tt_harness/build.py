@@ -26,11 +26,17 @@ in the report has no constraint (it was timed at a default), a clock was timed a
 different target than the one given, or any domain misses. On failure no bitstream is left
 at `BuildResult.bitstream`'s path.
 
-Project sources are given to the tools unmodified, as Verilog-2005 unless the design needs
-SystemVerilog (a `.sv` file, or the plain parse fails), the rule the pre-screen uses. The
-one exception is opt-in: Vivado rejects a non-ANSI port without a net type under
-`default_nettype none` and offers no option to relax it; `vivado_nettype_rewrite=True`
-gives it copies with `default_nettype wire` and records them in `source_rewrites`.
+Project sources are read as Verilog-2005 unless the design needs SystemVerilog (a `.sv`
+file, or the plain parse fails), the rule the pre-screen uses; openXC7 builds always read
+the fetched files unmodified. Vivado rejects a non-ANSI port without a separate net
+declaration (`input clk;`) under `` `default_nettype none `` (Synth 8-6735, an error that
+cannot be downgraded), which most Tiny Tapeout VGA designs contain. Only then does the
+Vivado flow retry from copies in which each `` `default_nettype none `` directive, and
+nothing else, reads `` `default_nettype wire ``: Yosys has already parsed the unmodified
+sources with `none` in force, and it rejects any genuinely undeclared net, so the rewrite
+can only relax Vivado's port-declaration strictness and cannot create an implicit net. The
+copies are listed in `BuildResult.source_rewrites`; `vivado_nettype_rewrite=False` forbids
+the retry.
 
 Files under `out_dir`: `build.log` (every tool's output), the generated top, constraints and
 scripts, reports, and `<top>.bit` on success.
@@ -112,7 +118,9 @@ class BuildResult:
     language: str = VERILOG  # how the project sources were read
     prescreen_derived_clocks: int = 0  # `prescreen.check(sources).derived_clocks`
     inputs: dict[str, str] = field(default_factory=dict)  # project file -> SHA-256 given
-    source_rewrites: tuple[str, ...] = ()  # project files given to a tool modified
+    # Project files given to the tool modified, with the number of `default_nettype none`
+    # directives changed in each (Vivado only, and only when it needed it).
+    source_rewrites: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -406,9 +414,15 @@ def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomai
     return timing
 
 
+# Every compare build has paths both ways between sys and pclk: rst_n into the project,
+# uo_out into the sampler. A report without them has left them untimed.
+REQUIRED_PAIRS = ("sys->pclk", "pclk->sys")
+
+
 def check(timing: dict[str, TimingDomain], plan: ClockPlan, log: Path) -> None:
-    """Raise `TimingError` unless sys and pclk are reported and every domain met."""
-    missing = sorted(set(plan.clocks) - set(timing))
+    """Raise `TimingError` unless sys, pclk and both pairs between them are reported,
+    and every clock and clock pair met timing."""
+    missing = sorted((set(plan.clocks) | set(REQUIRED_PAIRS)) - set(timing))
     if missing:
         raise TimingError(
             f"unconstrained: clock domain(s) {', '.join(missing)} absent from the timing report",
@@ -501,11 +515,13 @@ class _Job:
     jobs: int
     log: Path
     language: str
-    vivado_nettype_rewrite: bool = False
+    vivado_nettype_rewrite: bool = True
+    # Yosys (the pre-screen) parsed the unmodified sources, `default_nettype none` in force.
+    yosys_accepted_unmodified: bool = False
     # Filled in by the flow: project file given to the tool -> its SHA-256, and the files
     # given modified.
     inputs: dict[str, str] = field(default_factory=dict)
-    rewrites: list[str] = field(default_factory=list)
+    rewrites: list[tuple[str, int]] = field(default_factory=list)
 
     @property
     def top(self) -> str:
@@ -720,8 +736,47 @@ foreach c [get_clocks {{pclk project_clk*}}] {{
 _VIVADO_NETTYPE_ERROR = "[Synth 8-6735]"
 
 
+_NETTYPE_NONE = re.compile(r"`default_nettype([ \t]+)none\b")
+
+
+def rewrite_nettype_none(text: str) -> tuple[str, int]:
+    """Replace each `` `default_nettype none `` directive by `` `default_nettype wire ``.
+
+    Only directives outside comments and string literals are changed, and nothing else in
+    the text (the whitespace inside the directive is kept). Returns the new text and the
+    number of directives changed.
+    """
+    out: list[str] = []
+    count = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] not in '"\n':
+                j += 2 if text[j] == "\\" else 1
+            j = min(j + 1, n)
+        elif c == "`" and (m := _NETTYPE_NONE.match(text, i)):
+            out.append(f"`default_nettype{m.group(1)}wire")
+            count += 1
+            i = m.end()
+            continue
+        else:
+            j = i + 1
+        out.append(text[i:j])
+        i = j
+    return "".join(out), count
+
+
 def _vivado_rewritten_sources(job: _Job) -> tuple[list[Path], list[Path]]:
-    """Copies of src/ with `default_nettype none` read as `wire` (opt-in, recorded)."""
+    """Copies of src/ with each `default_nettype none` directive read as `wire` (recorded)."""
     src = job.sources.root / "src"
     dest = job.out_dir / "src-nettype-wire"
     if dest.exists():
@@ -729,11 +784,12 @@ def _vivado_rewritten_sources(job: _Job) -> tuple[list[Path], list[Path]]:
     shutil.copytree(src, dest, symlinks=False)
     for path in sorted(dest.rglob("*")):
         if path.is_file() and path.suffix in (".v", ".sv", ".vh", ".svh"):
-            text = path.read_text(errors="surrogateescape")
-            fixed = re.sub(r"`default_nettype\s+none\b", "`default_nettype wire", text)
-            if fixed != text:
-                path.write_text(fixed, errors="surrogateescape")
-                job.rewrites.append(str(src / path.relative_to(dest)))
+            # Bytes in and out, so line endings and encoding are kept exactly.
+            text = path.read_bytes().decode("utf-8", errors="surrogateescape")
+            fixed, count = rewrite_nettype_none(text)
+            if count:
+                path.write_bytes(fixed.encode("utf-8", errors="surrogateescape"))
+                job.rewrites.append((str(src / path.relative_to(dest)), count))
     files, include_dirs = verilate.project_files(job.sources)
     return (
         [dest / f.relative_to(src) for f in files],
@@ -825,8 +881,17 @@ def _vivado_implement(job: _Job) -> str:
             raise BuildError(
                 f"{job.sources.project.id}: Vivado rejects the unmodified sources: "
                 f"{nettype[0].strip()}; Vivado cannot relax this (message 8-6735 cannot be "
-                "downgraded); vivado_nettype_rewrite=True (--vivado-nettype-rewrite) builds "
-                "from copies with `default_nettype wire`",
+                "downgraded), and the `default_nettype wire` retry is forbidden "
+                "(vivado_nettype_rewrite=False, --no-vivado-nettype-rewrite)",
+                job.log,
+            )
+        if not job.yosys_accepted_unmodified:
+            # Without Yosys's acceptance under `none`, the rewrite could hide a real
+            # undeclared net. (build_compare fails before this when the pre-screen fails.)
+            raise BuildError(
+                f"{job.sources.project.id}: Vivado rejects the unmodified sources "
+                f"({nettype[0].strip()}) and Yosys has not accepted them, so they are not "
+                "rewritten",
                 job.log,
             )
         with job.log.open("a") as f:
@@ -874,7 +939,7 @@ def build_compare(
     clocks: int,
     baud: int = 1_000_000,
     jobs: int = 16,
-    vivado_nettype_rewrite: bool = False,
+    vivado_nettype_rewrite: bool = True,
 ) -> BuildResult:
     """Build the compare bitstream for `project` and gate it on timing.
 
@@ -904,6 +969,8 @@ def build_compare(
     try:
         screen = prescreen.check(sources, out_dir / "prescreen")
     except prescreen.PrescreenError as e:
+        with log.open("a") as f:
+            f.write(f"tt-harness: pre-screen failed, nothing built: {e}\n")
         raise BuildError(f"{project.id}: pre-screen (yosys) failed: {e}", log) from e
     language = SYSTEMVERILOG if sources.needs_sv or screen.sv_retried else VERILOG
     with log.open("a") as f:
@@ -930,6 +997,8 @@ def build_compare(
         log=log,
         language=language,
         vivado_nettype_rewrite=vivado_nettype_rewrite,
+        # prescreen.check raised otherwise, so Yosys read them as fetched, `none` in force.
+        yosys_accepted_unmodified=True,
     )
     flow = _FLOWS[toolchain]
     try:
@@ -951,8 +1020,11 @@ def build_compare(
                 f"tt-harness: warning: the tools found project clocks {clocks_made}, the "
                 f"pre-screen {screen.derived_clocks} derived clock(s)\n"
             )
-        for path in job.rewrites:
-            f.write(f"tt-harness: warning: {path} was given to {toolchain} modified\n")
+        for path, count in job.rewrites:
+            f.write(
+                f"tt-harness: warning: {path} was given to {toolchain} with {count} "
+                "`default_nettype none` directive(s) read as `wire`\n"
+            )
     return BuildResult(
         bitstream,
         toolchain,
