@@ -29,6 +29,7 @@ PARTS = {"vivado": "xc7a35ticsg324-1L", "openxc7": "xc7a35tcsg324-1"}
 MODULE_NAME = "arty_compare"
 BUFG_NAME = "pclk_bufg"
 SYS_CLK_PORT = "clk100"
+SYS_BUFG_NAME = "sys_bufg"
 
 
 @dataclass(frozen=True)
@@ -78,8 +79,14 @@ class ArtyCompare(Module):
         self.submodules.compare = compare = CompareTop(
             project, SYS_CLK_FREQ, baud, clocks, settle=settle, clock_buffer=bufg
         )
+        # The system clock's BUFG is explicit too, so that synthesis need not insert clock
+        # buffers itself: Yosys's automatic one would also buffer a clock the project makes
+        # from a register that drives data (dottee's vsync, which is uo_out[3]), and
+        # nextpnr-xilinx cannot route a global clock net to data pins.
+        sys_clk = Signal(name_override="sys_clk_buffered")
+        self.specials += Instance("BUFG", name=SYS_BUFG_NAME, i_I=self.clk100, o_O=sys_clk)
         self.comb += [
-            compare.clk.eq(self.clk100),
+            compare.clk.eq(sys_clk),
             compare.rst.eq(0),
             self.serial_tx.eq(compare.tx),
             self.user_led0.eq(compare.done),

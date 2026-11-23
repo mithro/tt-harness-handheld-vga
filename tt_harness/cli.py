@@ -69,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bc_p.add_argument("--baud", type=_positive_int, default=1_000_000, help="UART baud rate")
     bc_p.add_argument(
+        "--vivado-nettype-rewrite",
+        action="store_true",
+        help="let Vivado read copies with `default_nettype wire` if it rejects the sources",
+    )
+    bc_p.add_argument(
         "--jobs", type=_positive_int, default=build.MAX_JOBS, help="cores the tools may use"
     )
     bc_p.add_argument(
@@ -182,6 +187,7 @@ def _cmd_build_compare(args: argparse.Namespace) -> int:
             args.clocks,
             baud=args.baud,
             jobs=args.jobs,
+            vivado_nettype_rewrite=args.vivado_nettype_rewrite,
         )
     except build.TimingError as e:
         print(f"tt-harness build-compare: {args.project}: timing: {e}", file=sys.stderr)
@@ -202,6 +208,9 @@ def _cmd_build_compare(args: argparse.Namespace) -> int:
             f"{'met' if d.met else 'NOT MET'}",
             file=sys.stderr,
         )
+    print(f"sources read as {result.language}", file=sys.stderr)
+    for path in result.source_rewrites:
+        print(f"warning: {path} was given to {args.toolchain} modified", file=sys.stderr)
     print(result.bitstream)
     return 0
 
