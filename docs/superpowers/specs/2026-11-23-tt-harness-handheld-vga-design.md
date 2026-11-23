@@ -233,9 +233,9 @@ result:
   and `RAW ` chunks (`samples_per_word=4`, first-sample-MSB flag, as the RP2350 capture
   writes). No samples can be lost, so no `TIME` overrun chunk is expected; a UART framing
   or length error makes the run inconclusive.
-- The sampler is a Migen module with no vendor primitives. Its generated Verilog is
-  offered to `vgacap/rtl/` as the first piece of a shared capture library (see "Sharing
-  and dependencies"). The clock gate, FIFO and UART framing are also Migen, in this repo.
+- The sampler is a Migen module with no vendor primitives, contributed to `vgacap/rtl/`
+  as the first piece of a shared capture library (see "Sharing and dependencies"). The
+  clock gate, FIFO and UART framing are also Migen, in this repo.
 - A host-side script loads the bitstream, collects the bytes, writes the stream and
   produces a verdict.
 
@@ -279,9 +279,11 @@ What this project offers for reuse:
   generated Verilog with no vendor primitives. The build produces these files and a test
   checks the generated Verilog in simulation, so the Migen source stays the single
   original.
-- The sampler's generated Verilog is offered to `vgacap/rtl/`, the shared capture
-  library, with a header naming this repository and commit as its source. Whether that
-  library accepts generated Verilog is for the capture project and the owner to say.
+- The sampler goes into `vgacap/rtl/`, the shared capture library, as Migen source with
+  its generated Verilog committed beside it (owner's decision: "migen/litex with generate
+  verilog included. most projects here are litex"). A test regenerates the Verilog and
+  fails if the committed file is stale. This project then uses the sampler from `vgacap`
+  at a pinned commit.
 - The host-side recorder output is the shared per-clock dump and vgacap stream formats,
   so other projects' tools can read it.
 
@@ -293,6 +295,8 @@ verdict. Where a shared piece already exists and is a leaf, it is used rather th
 - **Data, read as files:** the shared manifest (`data/targets.json` and compiled
   overrides from a `tinytapeout-vga-videos` checkout) and, when they exist, the reference
   files from `tt-harness-fpga-vga`. Their schemas are the interface.
+- **Shared RTL:** the sampler, from `vgacap/rtl/` at a pinned commit, for the Arty compare
+  build only.
 - **Optional tool:** `vgacap`'s frame tools turn a recorded stream into pictures for a
   person to look at. Nothing depends on them for a pass or fail.
 - Nothing from any of them is needed to build or run the Game Bub harness.
