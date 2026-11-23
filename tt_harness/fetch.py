@@ -38,9 +38,14 @@ class Sources:
     warnings: tuple[str, ...] = ()
 
 
-def _git(args: list[str], cwd: Path) -> str:
+def _protocols_for(project: Project) -> tuple[str, ...]:
+    """Transports git may use: `file` only when the top-level repo is itself a local path."""
+    return ("https",) if project.repo.startswith("https://") else ("https", "file")
+
+
+def _git(args: list[str], cwd: Path, protocols: tuple[str, ...]) -> str:
     """Run git in `cwd`, returning stdout; raises `subprocess.CalledProcessError` on failure."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ALLOW_PROTOCOL="https:file")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ALLOW_PROTOCOL=":".join(protocols))
     result = subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -78,7 +83,12 @@ def _patch_id(project: Project) -> str:
 
 
 def _sources(project: Project, root: Path, warnings: tuple[str, ...] = ()) -> Sources:
-    src_dir = (root / _SRC_DIR).resolve()
+    src = root / _SRC_DIR
+    src_dir = root.resolve() / _SRC_DIR
+    if src.is_symlink() or not src.resolve().is_relative_to(root.resolve()):
+        raise FetchError(
+            f"{project.id}: source directory {src} is a symlink or escapes the checkout"
+        )
     files = tuple(root / _SRC_DIR / f for f in project.source_files)
     for entry, f in zip(project.source_files, files, strict=True):
         if not f.resolve().is_relative_to(src_dir):
@@ -88,26 +98,32 @@ def _sources(project: Project, root: Path, warnings: tuple[str, ...] = ()) -> So
     return Sources(project, root, files, any(f.suffix == ".sv" for f in files), warnings)
 
 
-def _submodules(project: Project, dest: Path) -> list[str]:
+def _submodules(project: Project, dest: Path, protocols: tuple[str, ...]) -> list[str]:
     """Initialise submodules as videos `ttvga/harness/job.py` does; returns warnings.
 
     A failure is not fatal (job.py ignores it, and an unused submodule may be unreachable); a
     needed file that is missing is caught later. `.gitmodules` comes from the fetched,
-    untrusted repository, so transports are limited only by GIT_ALLOW_PROTOCOL in `_git`:
-    git refuses any other transport itself and that shows up as a warning.
+    untrusted repository, so transports are limited only by GIT_ALLOW_PROTOCOL in `_git`
+    (`protocols`, decided once per fetch from the top-level repo). Non-https transports, and
+    `file` unless the top-level repo is a local path, are deliberately refused by git itself
+    and surface here as warnings, never as a clone.
     """
     if not (dest / ".gitmodules").is_file():
         return []
     try:
-        listing = _git(["config", "-f", ".gitmodules", "--get-regexp", r"submodule\..*\.url"], dest)
+        listing = _git(
+            ["config", "-f", ".gitmodules", "--get-regexp", r"submodule\..*\.url"], dest, protocols
+        )
         for line in listing.splitlines():
             key, _, url = line.partition(" ")
             url = url.strip()
             https = _SSH_GITHUB_RE.sub("https://github.com/", url)
             if https != url:
-                _git(["config", "-f", ".gitmodules", key, https], dest)
-        _git(["submodule", "sync", "-q", "--recursive"], dest)
-        _git(["submodule", "update", "-q", "--init", "--depth", "1", "--recursive"], dest)
+                _git(["config", "-f", ".gitmodules", key, https], dest, protocols)
+        _git(["submodule", "sync", "-q", "--recursive"], dest, protocols)
+        _git(
+            ["submodule", "update", "-q", "--init", "--depth", "1", "--recursive"], dest, protocols
+        )
     except subprocess.CalledProcessError as e:
         lines = e.stderr.strip().splitlines()
         return [f"{project.id}: submodule init failed: {lines[-1] if lines else e}"]
@@ -134,7 +150,7 @@ def _polyfill(project: Project, dest: Path, videos_repo: Path) -> str | None:
         if Path(entry).name != _POLYFILL:
             continue
         target = dest / _SRC_DIR / entry
-        if target.exists():
+        if target.exists() or target.is_symlink():
             continue
         source = _polyfill_source(videos_repo)
         if not source.is_file():
@@ -148,7 +164,13 @@ def _polyfill(project: Project, dest: Path, videos_repo: Path) -> str | None:
     return digest
 
 
-def _checkout(project: Project, dest: Path) -> list[str]:
+def _checkout(
+    project: Project,
+    dest: Path,
+    protocols: tuple[str, ...],
+    submodule_protocols: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Fetch and check out `project` into `dest`; the submodule phase may use fewer transports."""
     dest.mkdir(parents=True)
     try:
         for args in (
@@ -157,17 +179,21 @@ def _checkout(project: Project, dest: Path) -> list[str]:
             ["fetch", "-q", "--depth", "1", "origin", "--", project.commit],
             ["checkout", "-q", "--detach", "FETCH_HEAD"],
         ):
-            _git(args, dest)
+            _git(args, dest, protocols)
     except subprocess.CalledProcessError as e:
         raise FetchError(
             f"{project.id}: git {e.cmd[1]} failed for commit {project.commit}: {e.stderr.strip()}"
         ) from e
     except subprocess.TimeoutExpired as e:
         raise FetchError(f"{project.id}: git timed out fetching commit {project.commit}") from e
-    warnings = _submodules(project, dest)
+    warnings = _submodules(project, dest, submodule_protocols or protocols)
     if project.patch is not None:
         try:
-            _git(["apply", "--whitespace=nowarn", "--", str(Path(project.patch).resolve())], dest)
+            _git(
+                ["apply", "--whitespace=nowarn", "--", str(Path(project.patch).resolve())],
+                dest,
+                protocols,
+            )
         except subprocess.CalledProcessError as e:
             raise FetchError(
                 f"{project.id}: patch {project.patch} did not apply: {e.stderr.strip()}"
@@ -208,7 +234,8 @@ def fetch(project: Project, cache: Path, videos_repo: Path | None = None) -> Sou
         if stale.exists():
             shutil.rmtree(stale)
     try:
-        warnings = _checkout(project, partial)
+        protocols = _protocols_for(project)
+        warnings = _checkout(project, partial, protocols)
         digest = _polyfill(project, partial, videos)
         _sources(project, partial)  # raises FetchError if a listed file is missing
         record = {"patch": patch_id, "polyfill": digest, "warnings": warnings}

@@ -160,9 +160,9 @@ def test_git_receives_url_and_commit_after_double_dash(remote, tmp_path, monkeyp
     calls = []
     real = fetch._git
 
-    def spy(args, cwd):
+    def spy(args, cwd, protocols):
         calls.append(list(args))
-        return real(args, cwd)
+        return real(args, cwd, protocols)
 
     monkeypatch.setattr(fetch, "_git", spy)
     fetch.fetch(make_project(repo, first), tmp_path / "cache")
@@ -210,9 +210,9 @@ def test_repo_without_submodules_unaffected(remote, tmp_path, monkeypatch):
     calls = []
     real = fetch._git
 
-    def spy(args, cwd):
+    def spy(args, cwd, protocols):
         calls.append(list(args))
-        return real(args, cwd)
+        return real(args, cwd, protocols)
 
     monkeypatch.setattr(fetch, "_git", spy)
     fetch.fetch(make_project(repo, first), tmp_path / "cache")
@@ -365,3 +365,66 @@ def test_cli_fetch_prints_warnings_to_stderr(tmp_path, capsys):
     out = capsys.readouterr()
     assert rc == 0
     assert "submodule" in out.err and "submodule" not in out.out
+
+
+def test_https_toplevel_allows_only_https_in_every_git_call(tmp_path, monkeypatch):
+    envs = []
+
+    def fake_run(cmd, **kwargs):
+        envs.append(kwargs["env"]["GIT_ALLOW_PROTOCOL"])
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(fetch.subprocess, "run", fake_run)
+    project = make_project("https://example.invalid/r", "a" * 40)
+    with pytest.raises(fetch.FetchError):  # the fake checkout has no source files
+        fetch.fetch(project, tmp_path / "cache")
+    assert envs and set(envs) == {"https"}
+    assert fetch._protocols_for(make_project("/some/path", "a" * 40)) == ("https", "file")
+
+
+def test_file_submodule_refused_when_submodule_protocols_are_https_only(tmp_path):
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    git(secret, "init", "-q")
+    (secret / "secret.v").write_text("// private\n")
+    sha = _commit_all(secret, "secret")
+    main = tmp_path / "main"
+    (main / "src").mkdir(parents=True)
+    git(main, "init", "-q")
+    (main / "src/top.v").write_text("module top;\nendmodule\n")
+    (main / ".gitmodules").write_text(f'[submodule "x"]\n\tpath = src/x\n\turl = file://{secret}\n')
+    git(main, "add", "-A")
+    git(main, "update-index", "--add", "--cacheinfo", f"160000,{sha},src/x")
+    git(main, "commit", "-q", "-m", "main")
+    commit = git(main, "rev-parse", "HEAD")
+    dest = tmp_path / "dest"
+    warnings = fetch._checkout(
+        make_project(main, commit), dest, ("https", "file"), submodule_protocols=("https",)
+    )
+    assert len(warnings) == 1 and "submodule" in warnings[0]
+    assert not list(dest.rglob("secret.v"))
+
+
+def test_symlinked_src_is_rejected(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "real").mkdir(parents=True)
+    git(repo, "init", "-q")
+    (repo / "real/top.v").write_text("module top;\nendmodule\n")
+    (repo / "src").symlink_to("real")
+    commit = _commit_all(repo, "r")
+    with pytest.raises(fetch.FetchError, match="tt00/tt_um_x.*source directory"):
+        fetch.fetch(make_project(repo, commit), tmp_path / "cache")
+
+
+def test_dangling_polyfill_symlink_is_not_written_through(tmp_path, videos_with_polyfill):
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    git(repo, "init", "-q")
+    (repo / "src/top.v").write_text("module top;\nendmodule\n")
+    victim = tmp_path / "victim.txt"
+    (repo / "src/sky130_polyfill.v").symlink_to(victim)
+    commit = _commit_all(repo, "r")
+    project = make_project(repo, commit, ("top.v", "sky130_polyfill.v"))
+    with pytest.raises(fetch.FetchError, match="sky130_polyfill.v"):
+        fetch.fetch(project, tmp_path / "cache", videos_repo=videos_with_polyfill)
+    assert not victim.exists()
