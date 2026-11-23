@@ -45,6 +45,58 @@ Sources:
   (`firmware/handheld/src/device/drivers/fpga/xilinx.rs`). If the design-name tag carries
   `UserID=` it must equal `0xB0100004`; a missing ID is accepted.
 
+## SD card access for a core, through the MCU (stock firmware)
+
+Checked 2026-11-23 against `elipsitz/gamebub` branch `v1.1-beta` @8b1135b (a branch, not a
+tag). Firmware paths are under `firmware/handheld/src/`.
+
+- A core's `files.json` (`core/info.rs`) declares up to 16 files. Each entry has exactly
+  one of `filename` (a fixed path inside `/sdcard/cores/<id>/`, loaded with no picker),
+  `user_selected` or `dependent_on_0`, plus `address`, `max_size`, `read_only`,
+  `on_demand` and others.
+- **Preload:** before the core runs, the MCU writes the whole file over QSPI to `address`
+  in 16 KiB chunks, bracketed by `FILE_WRITE_START` (0x0300) and `FILE_WRITE_END` (0x0301)
+  (`core/files.rs`).
+- **On demand, started by the core** (`core/command.rs`, `core/files_on_demand.rs`): the
+  core raises a request (IRQ bit 4); the MCU reads six words (command plus five
+  parameters) from 0xF000_1000, acts, writes three result words back and sets status bits
+  in 0xF100_1104. Commands: `FILE_GET_SIZE` 0x0400, `FILE_SET_SIZE` 0x0401, `FILE_READ`
+  0x0402 (`[id, dest_addr, off_lo, off_hi, len]`; the MCU QSPI-writes the data to
+  `dest_addr`), `FILE_WRITE` 0x0403, `FILE_FLUSH` 0x0404.
+- So a core **can** read any declared file at any offset whenever it chooses, on stock
+  firmware. It cannot open a name it invents at runtime; the file must be declared in
+  `files.json`. Opening arbitrary names would need a small firmware change (a `FILE_OPEN`
+  command).
+- An SPI error during `FILE_READ` makes the firmware panic (`files_on_demand.rs` L195).
+  Real QSPI throughput on the board is unmeasured.
+
+### What a core must implement for stock firmware
+
+The official framework's top level (Chisel, `HandheldTop.scala`) implements the QSPI slave
+and the `0xF1` registers, and hands everything else to the core. A design that replaces
+that top level, as this harness does, must implement all of it itself:
+
+- **QSPI framing** (`device/drivers/fpga/mod.rs` L252-296): one command byte on a single
+  line, then a 32-bit big-endian address in quad mode, then data in quad mode. Command
+  byte: bit 0 read, bits 1-2 word size, bit 3 byte swap, bit 4 auto-increment, bits 5-6
+  line width. Reads have 8 dummy bytes and are capped at 16 MHz.
+- **Address map:** 0xF1xx_xxxx registers (buttons at 0xF100_2000, command status at
+  0xF100_1104, interrupt status), 0xF2 overlay, 0xF3 framebuffer; everything else is core
+  memory. A host mailbox at 0xF000_0000 and a core mailbox at 0xF000_1000.
+- **Handshakes:** `GET_STATUS` (reply SETUP=2, then HALT=3), `SETUP_COMPLETE`, `CORE_RUN`,
+  `CORE_HALT`, `NOTIFY_FOCUS`. `core-example/rtl/demo_core.sv` L63-160 shows the core side.
+- **Timeouts:** 100 ms for setup, 10 ms for notify. A failure during load shows an error
+  and reloads the boot bitstream. After the core is running, command failures are ignored.
+- The MCU initialises the LCD and the DAC (fixed 48 kHz, MCLK = 256 x fs) at boot whatever
+  core is loaded, turns the backlight off while programming, and powers the DAC up on
+  focus. The core must generate the I2S clocks.
+- No command lets a core ask for a different bitstream, and there is no UART or logging
+  channel for cores.
+
+The framework RTL is CERN-OHL-S-2.0 (or GPL-2.0-or-later), and there is no Verilog version
+of the bus slave. This project implements the protocol above from this description, not
+from that source.
+
 ## Display
 
 - ILI9806E controller, 24-bit parallel RGB (dot clock, hsync, vsync, DE, 8/8/8) driven
