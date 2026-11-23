@@ -60,6 +60,8 @@ remotely.
 - Board-specific logic mixed into the board-independent core, which would make the next
   handheld a rewrite.
 - A second frame-cutting or hashing implementation that has to agree with `vgacap`'s.
+- A dependency tree between the harness projects. A little duplicated code is preferred
+  to importing code from several sibling repositories (owner's instruction).
 - Copying Game Bub framework RTL (CERN-OHL-S/GPL) into this Apache-2.0 repository.
 - Claims about Game Bub hardware behaviour that were only checked in simulation.
 
@@ -201,7 +203,23 @@ A Python package using LiteX/Migen, in three layers:
 - Transport to the Pi: Ethernet where it works on both toolchains, with the UART as the
   fallback for short captures. *(Builder's call.)*
 - A host-side script on the Pi loads the bitstream, collects the stream and hands it to
-  the shared frame code for a verdict.
+  the frame code for a verdict.
+
+### Dependencies on other projects
+
+Kept to one code dependency and two data formats:
+
+- **Code:** `vgacap` only, for cutting frames out of a stream and hashing them. It is a
+  leaf with no dependencies of its own, and it is the one piece that must agree exactly
+  across projects. Pinned to a commit.
+- **Data, read as files:** the shared manifest (`data/targets.json` and compiled
+  overrides from a `tinytapeout-vga-videos` checkout) and the reference files
+  (`reference/<shuttle>/<macro>.json` produced by `tt-harness-fpga-vga`). This project
+  reads the files; it does not import either project's code.
+- **Duplicated here on purpose:** the vgacap stream *writer* used by the Arty recorder
+  (small, and it runs in gateware and firmware where the Python package cannot), the
+  reference file reader, and the verdict logic (exact, shifted, similar, inconclusive).
+- Nothing is needed from any of them to build or run the Game Bub harness.
 
 ## Verification
 
