@@ -11,14 +11,22 @@ Limits are the Artix-7 speed grade -1 (and -1LI, the Arty A7-35T's -1L part) fig
   MMCM_FINMIN 10 MHz, MMCM_FINMAX 800 MHz, MMCM_FVCOMIN 600 MHz, MMCM_FVCOMAX 1200 MHz,
   MMCM_FPFDMIN 10 MHz, MMCM_FPFDMAX 450 MHz, MMCM_FOUTMAX 800 MHz,
   MMCM_FOUTMIN 4.69 MHz (note 5: F_VCO / 128).
+- DS181 (v1.27), Table 32 "Global Clock Switching Characteristics (Including BUFGCTRL)",
+  -1 and -1LI columns: F_MAX_BUFG 464 MHz. CLKOUT0 always drives a BUFG and a BUFGCE
+  here, so this, not MMCM_FOUTMAX, is the highest usable output.
 - UG953 (Vivado 7 Series Libraries Guide), MMCME2_ADV attributes; the same ranges are
   in UG472 (7 Series Clocking Resources), Chapter 3, MMCM attributes table:
   DIVCLK_DIVIDE 1 to 106; CLKFBOUT_MULT_F 2.000 to 64.000; CLKOUT0_DIVIDE_F 1.000 to
   128.000, both in 0.125 steps (fractional mode). Only CLKOUT0 has a fractional divider.
 
-One conservative restriction beyond those documents: a non-integer CLKOUT0_DIVIDE_F must
-be at least 2.000 (LiteX's S7MMCM uses the same lower bound for the fractional divider).
-It only excludes outputs above 300 MHz, which no project clock needs.
+One restriction is unconfirmed: a non-integer CLKOUT0_DIVIDE_F is required to be at least
+2.000. Its only source is LiteX's practice (S7MMCM's CLKOUT0 range starts at 2); no
+primary Xilinx statement of a minimum fractional divide was found. It only excludes
+outputs above 300 MHz, which the 464 MHz buffer limit nearly excludes anyway.
+
+Confirmed from AMD PG065 (Clocking Wizard): fractional divide cannot be combined with a
+phase shift or a non-50% duty cycle on that output. `ProjectClock` uses CLKOUT0 with phase
+0 and duty cycle 0.5, so it satisfies both.
 
 All arithmetic is exact (`fractions.Fraction`); only the reported `vco_hz`, `achieved_hz`
 and `error_ppm` are floats.
@@ -37,7 +45,10 @@ VCO_MIN_HZ = 600_000_000
 VCO_MAX_HZ = 1_200_000_000
 PFD_MIN_HZ = 10_000_000
 PFD_MAX_HZ = 450_000_000
-OUT_MAX_HZ = 800_000_000
+MMCM_FOUT_MAX_HZ = 800_000_000
+# F_MAX_BUFG, speed grade -1 (DS181 Table 32). The effective output cap.
+BUFG_FMAX_HZ = 464_000_000
+OUT_MAX_HZ = min(MMCM_FOUT_MAX_HZ, BUFG_FMAX_HZ)
 
 DIVCLK_RANGE = (1, 106)
 # Multiplier and divider are searched in eighths (0.125 steps).
@@ -117,6 +128,14 @@ def _setting(clk_in_hz: int, clock_hz: int, best) -> MmcmSetting:
     )
 
 
+def _lowest_output(clk_in_hz: int) -> Fraction:
+    return _best(clk_in_hz, Fraction(1))[-1]
+
+
+def _hz(value: Fraction) -> str:
+    return str(value.numerator) if value.denominator == 1 else f"{float(value):.3f}"
+
+
 def solve(clk_in_hz: int, clock_hz: int, tolerance: float = 0.001) -> MmcmSetting:
     """The MMCME2 setting closest to `clock_hz` from `clk_in_hz`.
 
@@ -124,6 +143,9 @@ def solve(clk_in_hz: int, clock_hz: int, tolerance: float = 0.001) -> MmcmSettin
     VCO. Raises `ClockError` naming the requested and nearest achievable frequency when the
     best setting is further than `tolerance` (a fraction: 0.001 is 0.1%) from the request.
     """
+    tol = Fraction(str(tolerance))
+    if tol <= 0:
+        raise ValueError(f"tolerance must be positive, got {tolerance}")
     if not FIN_MIN_HZ <= clk_in_hz <= FIN_MAX_HZ:
         raise ClockError(
             f"input clock {clk_in_hz} Hz is outside the MMCM input range "
@@ -135,19 +157,23 @@ def solve(clk_in_hz: int, clock_hz: int, tolerance: float = 0.001) -> MmcmSettin
             f"cannot generate {clock_hz} Hz: a project clock must be positive "
             f"(the nearest achievable from {clk_in_hz} Hz is {lowest.achieved_hz:.3f} Hz)"
         )
-    tol = Fraction(str(tolerance))
-    if tol <= 0:
-        raise ValueError(f"tolerance must be positive, got {tolerance}")
     best = _best(clk_in_hz, Fraction(clock_hz))
     setting = _setting(clk_in_hz, clock_hz, best)
     if best[0][0] / clock_hz > tol:
-        raise ClockError(
-            f"cannot generate {clock_hz} Hz from {clk_in_hz} Hz within "
-            f"{float(tol * 1_000_000):g} ppm: nearest achievable is "
-            f"{setting.achieved_hz:.3f} Hz ({setting.error_ppm:+.1f} ppm; "
-            f"DIVCLK_DIVIDE={setting.divclk}, CLKFBOUT_MULT_F={setting.mult:.3f}, "
+        where = f"cannot generate {clock_hz} Hz from {clk_in_hz} Hz within {float(tol * 100):g}%"
+        nearest = (
+            f"nearest achievable is {setting.achieved_hz:.3f} Hz "
+            f"(DIVCLK_DIVIDE={setting.divclk}, CLKFBOUT_MULT_F={setting.mult:.3f}, "
             f"CLKOUT0_DIVIDE_F={setting.div:.3f})"
         )
+        lowest = _lowest_output(clk_in_hz)
+        if clock_hz > OUT_MAX_HZ:
+            reason = f"above the global clock buffer maximum {OUT_MAX_HZ} Hz"
+        elif clock_hz < lowest:
+            reason = f"below the MMCM minimum output {_hz(lowest)} Hz from this input"
+        else:
+            reason = f"{setting.error_ppm:+.1f} ppm off"
+        raise ClockError(f"{where}: {reason}; {nearest}")
     return setting
 
 

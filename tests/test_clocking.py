@@ -20,6 +20,7 @@ def _check_limits(clk_in_hz, s):
     pfd = clk_in_hz / s.divclk
     assert 10e6 <= pfd <= 450e6
     assert 600e6 <= s.vco_hz <= 1200e6
+    assert s.achieved_hz <= 464e6
     assert s.vco_hz == pytest.approx(clk_in_hz * s.mult / s.divclk, rel=1e-12)
     assert s.achieved_hz == pytest.approx(s.vco_hz / s.div, rel=1e-12)
     assert s.fractional == (not s.mult.is_integer() or not s.div.is_integer())
@@ -88,14 +89,23 @@ def test_zero_and_negative_raise(clock_hz):
     assert str(clock_hz) in str(exc.value)
 
 
-def test_above_part_limit_raises_naming_nearest():
+@pytest.mark.parametrize("clk_in_hz", INPUTS)
+def test_request_at_buffer_cap_solves(clk_in_hz):
+    # CLKOUT0 always drives a BUFG/BUFGCE, whose -1 F_MAX is 464 MHz (DS181 Table 32).
+    s = solve(clk_in_hz, 464_000_000)
+    _check_limits(clk_in_hz, s)
+    assert s.achieved_hz <= 464_000_000
+    assert abs(s.error_ppm) <= 1000
+
+
+@pytest.mark.parametrize("clock_hz", [500_000_000, 800_000_000, 3_000_000_000])
+def test_above_buffer_cap_raises_naming_cap(clock_hz):
     with pytest.raises(ClockError) as exc:
-        solve(50_000_000, 3_000_000_000)
+        solve(50_000_000, clock_hz)
     msg = str(exc.value)
-    assert "3000000000" in msg
-    # The highest MMCM output is 800 MHz (DS181 MMCM_FOUTMAX).
-    assert "800000000" in msg
-    assert "ppm" in msg
+    assert str(clock_hz) in msg
+    assert "above the global clock buffer maximum 464000000 Hz" in msg
+    assert "nearest achievable" in msg
 
 
 def test_below_minimum_output_raises_naming_nearest():
@@ -104,8 +114,17 @@ def test_below_minimum_output_raises_naming_nearest():
         solve(50_000_000, 4)
     msg = str(exc.value)
     assert "4 Hz" in msg
-    assert "4687500" in msg
-    assert "ppm" in msg
+    assert "below the MMCM minimum output 4687500 Hz" in msg
+    assert "nearest achievable is 4687500" in msg
+    assert "ppm" not in msg
+
+
+@pytest.mark.parametrize("tolerance", [0, -0.001])
+def test_tolerance_is_validated_before_clock(tolerance):
+    # A bad tolerance is reported as such even when the clock is also invalid.
+    with pytest.raises(ValueError, match="tolerance") as exc:
+        solve(50_000_000, 0, tolerance=tolerance)
+    assert not isinstance(exc.value, ClockError)
 
 
 def test_just_outside_tolerance_raises_and_names_nearest():
@@ -122,8 +141,12 @@ def test_just_outside_tolerance_raises_and_names_nearest():
 
 def test_tolerance_parameter_is_respected():
     # 25.175 MHz is 6.9 ppm off from 50 MHz; a 1 ppm tolerance refuses it.
-    with pytest.raises(ClockError):
+    with pytest.raises(ClockError) as exc:
         solve(50_000_000, 25_175_000, tolerance=1e-6)
+    msg = str(exc.value)
+    assert "25175000 Hz" in msg
+    assert "-6.9 ppm off" in msg
+    assert "nearest achievable is 25174825.175 Hz" in msg
 
 
 @pytest.mark.parametrize("clk_in_hz", [0, 5_000_000, 900_000_000])
@@ -178,7 +201,8 @@ def test_limits_are_the_documented_ones():
     assert clocking.VCO_MAX_HZ == 1_200_000_000
     assert clocking.PFD_MIN_HZ == 10_000_000
     assert clocking.PFD_MAX_HZ == 450_000_000
-    assert clocking.OUT_MAX_HZ == 800_000_000
+    assert clocking.MMCM_FOUT_MAX_HZ == 800_000_000
+    assert clocking.BUFG_FMAX_HZ == 464_000_000
 
 
 # ProjectClock ------------------------------------------------------------------------------
