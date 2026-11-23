@@ -95,13 +95,14 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
 - Exact reference: the testbench computes one FNV-1a 64-bit hash per frame over
   native-resolution RGB888, row-major, each channel being the 2-bit value times 85. The
   function is at `ttvga/harness/tb.cpp:237`.
-- The per-frame hash lists are **not** published. `tt-vga collect`
-  (`ttvga/remote.py:263-268`) replaces `timing.frame_hashes` in
-  `data/results/<shuttle>/<macro>/result.json` with `frame_hashes_count`; the full lists
-  exist only in the pipeline's private scratch directories. Reference hashes therefore
-  have to be recomputed by re-running the testbench with the same stimulus. The
-  `tt-harness-fpga-vga` project plans to do this, and the result should be shared between
-  the two harness projects.
+- The per-frame hash lists are published since 2026-11-23 (commit 3505405 of
+  `tinytapeout-vga-videos`): `data/results/<shuttle>/<macro>/frame_hashes.txt`, for all
+  408 projects with frames. The file has `#` comment lines, then `key: value` lines (id,
+  mode, width, height, clock_hz, clocks_per_pixel, capture_after_clock, frames), then one
+  hash per line, frame 0 first. Frame 0 starts at the first vsync-pulse end after
+  `capture_after_clock`; clock 0 is the first clock of the reset sequence.
+- This project's verdict is per clock and does not use these hashes. They are a second,
+  independent check: frames cut from a recording can be hashed and compared with them.
 - Reset stimulus in the reference: `ena=1`, `rst_n=0` for 10 clocks with `ui_in` already
   set.
 - Frame 0 is not the first frame after reset. The testbench calibrates on sync for up to
