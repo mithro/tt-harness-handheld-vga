@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from migen import Module, Signal
 
+# Reset clocks the reference simulation and the compare build both use (`rst_n` low).
+RESET_CLOCKS = 10
+
 
 class ReferenceStimulus(Module):
     """Fixed project inputs with `rst_n` low for the first `reset_clocks` project clocks.
@@ -15,7 +18,7 @@ class ReferenceStimulus(Module):
     constructor's constants. All outputs are combinational.
     """
 
-    def __init__(self, ui_in: int, uio_in: int, reset_clocks: int = 10) -> None:
+    def __init__(self, ui_in: int, uio_in: int, reset_clocks: int = RESET_CLOCKS) -> None:
         for name, value in (("ui_in", ui_in), ("uio_in", uio_in)):
             if not 0 <= value <= 0xFF:
                 raise ValueError(f"{name} must be 0..255, got {value}")
