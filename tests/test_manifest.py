@@ -57,6 +57,21 @@ def test_undeclared_clock_defaults_to_reference_clock(projects):
     assert projects["ttihp26a/tt_um_urish_rings"].clock_hz == 25_175_000
 
 
+def test_clock_declared_versus_clock_hz(projects, tmp_path):
+    rings = projects["ttihp26a/tt_um_urish_rings"]
+    assert (rings.clock_declared, rings.clock_hz) == (0, 25_175_000)
+    root = tmp_path / "videos"
+    shutil.copytree(FIXTURE, root)
+    path = root / "data/targets.json"
+    data = json.loads(path.read_text())
+    for t in data["targets"]:
+        if t["macro"] == "tt_um_urish_rings":
+            t["clock_hz"] = 25_000_000
+    path.write_text(json.dumps(data))
+    p = manifest.load(root)["ttihp26a/tt_um_urish_rings"]
+    assert (p.clock_declared, p.clock_hz) == (25_000_000, 25_000_000)
+
+
 def test_retro_console_has_fixed_ui_in(projects):
     assert projects["tt06/tt_um_toivoh_retro_console"].ui_in == 0x30
 
