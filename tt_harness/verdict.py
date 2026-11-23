@@ -12,6 +12,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,13 @@ from typing import Literal
 from tt_harness.host.frame import Recording
 
 SCHEMAS = (1, 2)
+DEFAULT_REFERENCE_DIR = "~/github/TinyTapeout/tt-harness-fpga-vga/work/reference"
 _COMPARE_BLOCK = 1 << 16
+
+
+def default_reference_dir() -> Path:
+    """The shared reference files: `$TT_REFERENCE_DIR`, else the conventional sibling path."""
+    return Path(os.environ.get("TT_REFERENCE_DIR", DEFAULT_REFERENCE_DIR)).expanduser()
 
 
 class ReferenceInvalid(ValueError):
