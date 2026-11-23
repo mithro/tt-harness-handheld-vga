@@ -6,7 +6,7 @@ constraints file (`framework/verilog/handheld/rev_4.xdc`). Only the resources th
 uses are listed; cartridge, link port, SDRAM, SRAM, HDMI and rumble are left out.
 """
 
-from litex.build.generic_platform import IOStandard, Pins, Subsignal
+from litex.build.generic_platform import IOStandard, Misc, Pins, Subsignal
 from litex.build.xilinx import Xilinx7SeriesPlatform
 
 DEVICE = "xc7a100tcsg324-1"
@@ -28,10 +28,13 @@ _io = [
         Subsignal("b", Pins("R17 P18 N17 M17 M18 L16 L18 K17")),
         IOStandard("LVCMOS33"),
     ),
-    # The twelve FPGA-side buttons. Active low: each switch pulls its line to ground, with
-    # pull-ups per docs/gamebub-hardware.md. The rev 4.1 buttons sheet carries three 10k
-    # resistor packs to +3V3_FPGA (external pull-ups), so no internal pull is enabled here.
-    # (The upstream XDC additionally sets PULLTYPE PULLUP on these pins.)
+    # The twelve FPGA-side buttons. Active low: each switch pulls its line to ground. The
+    # external pull-up packs on the rev 4.1 buttons sheet (gamebub-pcb
+    # handheld_rev4_1/buttons.kicad_sch: RN1601, RN1602, RN1603 and R1602) are marked DNP,
+    # not fitted; the sheet's note gives the Artix-7 internal pull-up current instead. The
+    # board relies on the FPGA's internal pull-ups, so they are required here (the same
+    # PULLTYPE PULLUP property the upstream constraints set). Task 7b must confirm the open
+    # flow (openXC7) actually emits the pull-up in its FASM, not only Vivado.
     (
         "buttons",
         0,
@@ -48,6 +51,7 @@ _io = [
         Subsignal("start", Pins("H6")),
         Subsignal("select", Pins("H5")),
         IOStandard("LVCMOS33"),
+        Misc("PULLTYPE=PULLUP"),
     ),
     # TLV320DAC3101 I2S; the FPGA generates all four clocks/data.
     (

@@ -130,8 +130,14 @@ from that source.
 
 ## Buttons
 
-- Twelve on the FPGA, active low with pull-ups: A, B, X, Y, Up, Down, Left, Right, L, R,
-  Start, Select.
+- Twelve on the FPGA, active low (each switch pulls its line to ground): A, B, X, Y, Up,
+  Down, Left, Right, L, R, Start, Select.
+- **The FPGA's internal pull-ups are required.** On rev 4.1 the external pull-up packs
+  RN1601, RN1602, RN1603 and R1602 are marked DNP (not fitted) in
+  `gamebub-pcb/handheld_rev4_1/buttons.kicad_sch`, whose note gives the Artix-7 internal
+  pull-up current instead (90 to 330 uA at 3.3 V). Upstream sets `PULLTYPE PULLUP` on the
+  button ports (`framework/verilog/handheld/rev_4.xdc:131`). Only R1601, on the MCU's Home
+  button, is fitted.
 - Home, Vol+, Vol- and Power are on the MCU. No analogue sticks.
 
 ## Audio

@@ -113,3 +113,27 @@ def test_request_every_resource():
     buttons = p.lookup_request("buttons")
     for b in ("a", "b", "x", "y", "up", "down", "left", "right", "l", "r", "start", "select"):
         assert len(getattr(buttons, b)) == 1
+
+
+BUTTONS = ("a", "b", "x", "y", "up", "down", "left", "right", "l", "r", "start", "select")
+
+
+@pytest.mark.parametrize("toolchain", ["vivado", "openxc7"])
+def test_buttons_have_internal_pullups_in_generated_xdc(toolchain):
+    # Rev 4.1 does not fit the external pull-up packs (RN1601-RN1603, R1602 are DNP on
+    # buttons.kicad_sch); the buttons rely on the FPGA's internal pull-ups. Both LiteX
+    # Xilinx toolchains (Vivado and yosys+nextpnr/openXC7) write the XDC with _build_xdc.
+    from litex.build.xilinx.vivado import _build_xdc
+
+    p = gb.Platform(toolchain=toolchain)
+    p.request("buttons")
+    p.request("lcd")
+    named = [
+        (f"{res[0]}_{res[2]}" if res[2] else res[0], pins, others, res)
+        for _, pins, others, res in p.constraint_manager.get_sig_constraints()
+    ]
+    xdc = _build_xdc(named, [])
+    for b in BUTTONS:
+        assert f"set_property PULLTYPE PULLUP [get_ports {{buttons_{b}}}]" in xdc, b
+    # Only the buttons get a pull-up.
+    assert xdc.count("PULLTYPE PULLUP") == len(BUTTONS)
