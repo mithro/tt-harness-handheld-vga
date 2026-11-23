@@ -72,19 +72,23 @@ def run(
     cwd: Path,
     timeout: float | None,
     env: Mapping[str, str] | None = None,
+    stdout: Path | None = None,
 ) -> int:
     """Run `cmd`, appending the command line and all its output to `log`; return its status.
 
-    TMPDIR is `<repo>/tmp`. The command runs in its own process group so that a timeout (or
+    TMPDIR is `<repo>/tmp`. With `stdout`, standard output goes to that file instead and only
+    standard error to `log`. The command runs in its own process group so that a timeout (or
     an interrupt) also kills the processes it starts, such as Verilator's make and compilers.
     Returns -1 on timeout.
     """
     full_env = dict(os.environ if env is None else env, TMPDIR=str(scratch_dir()))
-    with log.open("a") as f:
-        f.write("$ " + " ".join(cmd) + "\n")
+    with contextlib.ExitStack() as stack:
+        f = stack.enter_context(log.open("a"))
+        out = f if stdout is None else stack.enter_context(stdout.open("wb"))
+        f.write("$ " + " ".join(cmd) + (f" > {stdout}" if stdout else "") + "\n")
         f.flush()
         proc = subprocess.Popen(
-            cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, env=full_env, start_new_session=True
+            cmd, cwd=cwd, stdout=out, stderr=f, env=full_env, start_new_session=True
         )
         try:
             return proc.wait(timeout=timeout)

@@ -62,7 +62,7 @@ class CompareTop(Module):
             project.ui_in, project.uio_in, reset_clocks
         )
         self.pclk = rec.pclk
-        self.project_clk = Signal()
+        self.project_clk = Signal(name_override="project_clk")
         if clock_buffer is None:
             self.comb += self.project_clk.eq(rec.pclk)
         else:
