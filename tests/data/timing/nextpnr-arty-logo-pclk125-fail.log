@@ -1,0 +1,25 @@
+Info: constraining clock net 'project.clk' to 125.00 MHz
+Info: constraining clock net 'clk0' to 100.00 MHz
+tt-harness clock: domain pclk net 'project.clk' 125.0 MHz
+tt-harness clock: domain sys net 'clk0' 100.0 MHz
+
+Info: Max frequency for clock        'clk0': 147.56 MHz (PASS at 100.00 MHz)
+Info: Max frequency for clock 'project.clk': 97.73 MHz (FAIL at 125.00 MHz)
+
+Info: Max delay posedge clk0        -> posedge project.clk: 6.70 ns
+Info: Max delay posedge project.clk -> posedge clk0       : 1.05 ns
+
+Info:    IterCnt |  w/ripup   wo/ripup |  w/r  wo/r |      arcs| batch(sec) total(sec)|
+Info:          0 |        0          0 |    0     0 |         0|       0.05       0.05|
+Info: Routing complete.
+Info: Router1 time 0.05s
+Info: Checksum: 0xfafb1ffa
+Info: 0.2 ns logic, 0.7 ns routing
+
+Info: Max frequency for clock        'clk0': 179.66 MHz (PASS at 100.00 MHz)
+ERROR: Max frequency for clock 'project.clk': 91.46 MHz (FAIL at 125.00 MHz)
+
+Info: Max delay posedge clk0        -> posedge project.clk: 5.89 ns
+Info: Max delay posedge project.clk -> posedge clk0       : 0.95 ns
+
+Info: Slack histogram:
