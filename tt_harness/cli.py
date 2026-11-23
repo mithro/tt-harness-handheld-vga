@@ -42,6 +42,8 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     except (KeyError, FileNotFoundError, fetch.FetchError) as e:
         print(f"tt-harness fetch: {e.args[0] if isinstance(e, KeyError) else e}", file=sys.stderr)
         return 1
+    for warning in sources.warnings:
+        print(f"tt-harness fetch: warning: {warning}", file=sys.stderr)
     print(sources.root)
     return 0
 

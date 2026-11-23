@@ -219,18 +219,55 @@ def test_repo_without_submodules_unaffected(remote, tmp_path, monkeypatch):
     assert not any("submodule" in a for a in calls)
 
 
-@pytest.mark.parametrize("url", ["ssh://evil.example/x/y", "git://evil.example/x", "../rel"])
-def test_submodule_with_bad_transport_is_rejected(tmp_path, url):
+def _repo_with_broken_submodule(tmp_path, url, extra_files=()):
+    """A repo whose submodule at src/x points at `url` and cannot be cloned."""
     main = tmp_path / "main"
     (main / "src").mkdir(parents=True)
     git(main, "init", "-q")
     (main / "src/top.v").write_text("module top;\nendmodule\n")
     (main / ".gitmodules").write_text(f'[submodule "x"]\n\tpath = src/x\n\turl = {url}\n')
-    commit = _commit_all(main, "main")
-    with pytest.raises(fetch.FetchError) as e:
-        fetch.fetch(make_project(main, commit), tmp_path / "cache")
-    assert "tt00/tt_um_x" in str(e.value) and url in str(e.value)
-    assert not (tmp_path / "cache/tt00/tt_um_x" / commit).exists()
+    git(main, "add", "-A")
+    git(main, "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},src/x")
+    git(main, "commit", "-q", "-m", "main")
+    return main, git(main, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "url", ["ssh://evil.example/x/y", "git://evil.example/x", "/nonexistent/sub"]
+)
+def test_unusable_submodule_only_warns(tmp_path, url):
+    main, commit = _repo_with_broken_submodule(tmp_path, url)
+    src = fetch.fetch(make_project(main, commit), tmp_path / "cache")
+    assert src.files[0].is_file()
+    assert len(src.warnings) == 1
+    assert "tt00/tt_um_x" in src.warnings[0] and "submodule" in src.warnings[0]
+
+
+def test_broken_submodule_holding_needed_file_fails(tmp_path):
+    main, commit = _repo_with_broken_submodule(tmp_path, "/nonexistent/sub")
+    with pytest.raises(fetch.FetchError, match=r"lib\.v"):
+        fetch.fetch(make_project(main, commit, ("top.v", "x/lib.v")), tmp_path / "cache")
+
+
+def test_warnings_default_empty_and_survive_cache_hit(tmp_path, remote):
+    repo, first, _ = remote
+    assert fetch.fetch(make_project(repo, first), tmp_path / "c1").warnings == ()
+    main, commit = _repo_with_broken_submodule(tmp_path, "/nonexistent/sub")
+    project = make_project(main, commit)
+    first_run = fetch.fetch(project, tmp_path / "c2")
+    again = fetch.fetch(project, tmp_path / "c2")
+    assert again.warnings == first_run.warnings and len(again.warnings) == 1
+
+
+def test_changed_polyfill_invalidates_cache(remote, tmp_path, videos_with_polyfill):
+    repo, first, _ = remote
+    project = make_project(repo, first, ("top.v", "sky130_polyfill.v"))
+    cache = tmp_path / "cache"
+    fetch.fetch(project, cache, videos_repo=videos_with_polyfill)
+    poly = videos_with_polyfill / "ttvga/harness/cells/sky130_polyfill.v"
+    poly.write_text("// changed polyfill\n")
+    src = fetch.fetch(project, cache, videos_repo=videos_with_polyfill)
+    assert src.files[1].read_text() == "// changed polyfill\n"
 
 
 @pytest.fixture
@@ -317,3 +354,14 @@ def test_project_is_frozen(remote):
     repo, first, _ = remote
     with pytest.raises(dataclasses.FrozenInstanceError):
         make_project(repo, first).commit = "x"  # type: ignore[misc]
+
+
+def test_cli_fetch_prints_warnings_to_stderr(tmp_path, capsys):
+    main, commit = _repo_with_broken_submodule(tmp_path, "/nonexistent/sub")
+    videos = _videos_repo(tmp_path, main, commit)
+    rc = cli.main(
+        ["fetch", "tt00/tt_um_x", "--videos-repo", str(videos), "--cache", str(tmp_path / "c")]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "submodule" in out.err and "submodule" not in out.out
