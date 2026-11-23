@@ -56,6 +56,7 @@ def make_project(repo, commit, files=("top.v",), patch=None):
         top_module="top",
         source_files=tuple(files),
         clock_hz=25_175_000,
+        clock_declared=25_175_000,
         pmods=(),
         address=None,
         ui_in=0,
@@ -159,9 +160,9 @@ def test_git_receives_url_and_commit_after_double_dash(remote, tmp_path, monkeyp
     calls = []
     real = fetch._git
 
-    def spy(args, cwd):
+    def spy(args, cwd, protocols):
         calls.append(list(args))
-        return real(args, cwd)
+        return real(args, cwd, protocols)
 
     monkeypatch.setattr(fetch, "_git", spy)
     fetch.fetch(make_project(repo, first), tmp_path / "cache")
@@ -170,6 +171,147 @@ def test_git_receives_url_and_commit_after_double_dash(remote, tmp_path, monkeyp
     for args in carrying:
         i = args.index("--")
         assert str(repo) not in args[:i] and first not in args[:i]
+
+
+def _commit_all(repo, msg):
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", msg)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def test_submodule_is_initialised(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    git(sub, "init", "-q")
+    (sub / "lib.v").write_text("module lib;\nendmodule\n")
+    _commit_all(sub, "sub")
+    main = tmp_path / "main"
+    (main / "src").mkdir(parents=True)
+    git(main, "init", "-q")
+    (main / "src/top.v").write_text("module top;\nendmodule\n")
+    git(
+        main,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        "--",
+        str(sub),
+        "src/lib",
+    )
+    commit = _commit_all(main, "main")
+    src = fetch.fetch(make_project(main, commit, ("top.v", "lib/lib.v")), tmp_path / "cache")
+    assert src.files[1].read_text() == "module lib;\nendmodule\n"
+
+
+def test_repo_without_submodules_unaffected(remote, tmp_path, monkeypatch):
+    repo, first, _ = remote
+    calls = []
+    real = fetch._git
+
+    def spy(args, cwd, protocols):
+        calls.append(list(args))
+        return real(args, cwd, protocols)
+
+    monkeypatch.setattr(fetch, "_git", spy)
+    fetch.fetch(make_project(repo, first), tmp_path / "cache")
+    assert not any("submodule" in a for a in calls)
+
+
+def _repo_with_broken_submodule(tmp_path, url, extra_files=()):
+    """A repo whose submodule at src/x points at `url` and cannot be cloned."""
+    main = tmp_path / "main"
+    (main / "src").mkdir(parents=True)
+    git(main, "init", "-q")
+    (main / "src/top.v").write_text("module top;\nendmodule\n")
+    (main / ".gitmodules").write_text(f'[submodule "x"]\n\tpath = src/x\n\turl = {url}\n')
+    git(main, "add", "-A")
+    git(main, "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},src/x")
+    git(main, "commit", "-q", "-m", "main")
+    return main, git(main, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "url", ["ssh://evil.example/x/y", "git://evil.example/x", "/nonexistent/sub"]
+)
+def test_unusable_submodule_only_warns(tmp_path, url):
+    main, commit = _repo_with_broken_submodule(tmp_path, url)
+    src = fetch.fetch(make_project(main, commit), tmp_path / "cache")
+    assert src.files[0].is_file()
+    assert len(src.warnings) == 1
+    assert "tt00/tt_um_x" in src.warnings[0] and "submodule" in src.warnings[0]
+
+
+def test_broken_submodule_holding_needed_file_fails(tmp_path):
+    main, commit = _repo_with_broken_submodule(tmp_path, "/nonexistent/sub")
+    with pytest.raises(fetch.FetchError, match=r"lib\.v"):
+        fetch.fetch(make_project(main, commit, ("top.v", "x/lib.v")), tmp_path / "cache")
+
+
+def test_warnings_default_empty_and_survive_cache_hit(tmp_path, remote):
+    repo, first, _ = remote
+    assert fetch.fetch(make_project(repo, first), tmp_path / "c1").warnings == ()
+    main, commit = _repo_with_broken_submodule(tmp_path, "/nonexistent/sub")
+    project = make_project(main, commit)
+    first_run = fetch.fetch(project, tmp_path / "c2")
+    again = fetch.fetch(project, tmp_path / "c2")
+    assert again.warnings == first_run.warnings and len(again.warnings) == 1
+
+
+def test_changed_polyfill_invalidates_cache(remote, tmp_path, videos_with_polyfill):
+    repo, first, _ = remote
+    project = make_project(repo, first, ("top.v", "sky130_polyfill.v"))
+    cache = tmp_path / "cache"
+    fetch.fetch(project, cache, videos_repo=videos_with_polyfill)
+    poly = videos_with_polyfill / "ttvga/harness/cells/sky130_polyfill.v"
+    poly.write_text("// changed polyfill\n")
+    src = fetch.fetch(project, cache, videos_repo=videos_with_polyfill)
+    assert src.files[1].read_text() == "// changed polyfill\n"
+
+
+@pytest.fixture
+def videos_with_polyfill(tmp_path):
+    cells = tmp_path / "videos/ttvga/harness/cells"
+    cells.mkdir(parents=True)
+    (cells / "sky130_polyfill.v").write_text("// videos polyfill\n")
+    return tmp_path / "videos"
+
+
+def test_missing_polyfill_is_substituted(remote, tmp_path, videos_with_polyfill):
+    repo, first, _ = remote
+    project = make_project(repo, first, ("top.v", "sky130_polyfill.v"))
+    src = fetch.fetch(project, tmp_path / "cache", videos_repo=videos_with_polyfill)
+    assert src.files[1].is_file()
+    assert src.files[1].read_text() == "// videos polyfill\n"
+    assert src.files[1].is_relative_to(src.root)
+
+
+def test_own_polyfill_is_kept(tmp_path, videos_with_polyfill):
+    repo = tmp_path / "own"
+    (repo / "src").mkdir(parents=True)
+    git(repo, "init", "-q")
+    (repo / "src/top.v").write_text("module top;\nendmodule\n")
+    (repo / "src/sky130_polyfill.v").write_text("// own polyfill\n")
+    commit = _commit_all(repo, "own")
+    project = make_project(repo, commit, ("top.v", "sky130_polyfill.v"))
+    src = fetch.fetch(project, tmp_path / "cache", videos_repo=videos_with_polyfill)
+    assert src.files[1].read_text() == "// own polyfill\n"
+
+
+def test_missing_polyfill_without_videos_file_is_error(remote, tmp_path):
+    repo, first, _ = remote
+    project = make_project(repo, first, ("top.v", "sky130_polyfill.v"))
+    with pytest.raises(fetch.FetchError, match="sky130_polyfill.v"):
+        fetch.fetch(project, tmp_path / "cache", videos_repo=tmp_path / "nowhere")
+
+
+@pytest.mark.parametrize("entry", ["../escape.v", "/etc/passwd", "a/../../x.v"])
+def test_source_path_must_stay_inside_src(remote, tmp_path, entry):
+    repo, first, _ = remote
+    with pytest.raises(fetch.FetchError) as e:
+        fetch.fetch(make_project(repo, first, ("top.v", entry)), tmp_path / "cache")
+    assert "tt00/tt_um_x" in str(e.value) and entry in str(e.value)
 
 
 def _videos_repo(tmp_path, repo, commit):
@@ -212,3 +354,77 @@ def test_project_is_frozen(remote):
     repo, first, _ = remote
     with pytest.raises(dataclasses.FrozenInstanceError):
         make_project(repo, first).commit = "x"  # type: ignore[misc]
+
+
+def test_cli_fetch_prints_warnings_to_stderr(tmp_path, capsys):
+    main, commit = _repo_with_broken_submodule(tmp_path, "/nonexistent/sub")
+    videos = _videos_repo(tmp_path, main, commit)
+    rc = cli.main(
+        ["fetch", "tt00/tt_um_x", "--videos-repo", str(videos), "--cache", str(tmp_path / "c")]
+    )
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "submodule" in out.err and "submodule" not in out.out
+
+
+def test_https_toplevel_allows_only_https_in_every_git_call(tmp_path, monkeypatch):
+    envs = []
+
+    def fake_run(cmd, **kwargs):
+        envs.append(kwargs["env"]["GIT_ALLOW_PROTOCOL"])
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(fetch.subprocess, "run", fake_run)
+    project = make_project("https://example.invalid/r", "a" * 40)
+    with pytest.raises(fetch.FetchError):  # the fake checkout has no source files
+        fetch.fetch(project, tmp_path / "cache")
+    assert envs and set(envs) == {"https"}
+    assert fetch._protocols_for(make_project("/some/path", "a" * 40)) == ("https", "file")
+
+
+def test_file_submodule_refused_when_submodule_protocols_are_https_only(tmp_path):
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    git(secret, "init", "-q")
+    (secret / "secret.v").write_text("// private\n")
+    sha = _commit_all(secret, "secret")
+    main = tmp_path / "main"
+    (main / "src").mkdir(parents=True)
+    git(main, "init", "-q")
+    (main / "src/top.v").write_text("module top;\nendmodule\n")
+    (main / ".gitmodules").write_text(f'[submodule "x"]\n\tpath = src/x\n\turl = file://{secret}\n')
+    git(main, "add", "-A")
+    git(main, "update-index", "--add", "--cacheinfo", f"160000,{sha},src/x")
+    git(main, "commit", "-q", "-m", "main")
+    commit = git(main, "rev-parse", "HEAD")
+    dest = tmp_path / "dest"
+    warnings = fetch._checkout(
+        make_project(main, commit), dest, ("https", "file"), submodule_protocols=("https",)
+    )
+    assert len(warnings) == 1 and "submodule" in warnings[0]
+    assert not list(dest.rglob("secret.v"))
+
+
+def test_symlinked_src_is_rejected(tmp_path):
+    repo = tmp_path / "r"
+    (repo / "real").mkdir(parents=True)
+    git(repo, "init", "-q")
+    (repo / "real/top.v").write_text("module top;\nendmodule\n")
+    (repo / "src").symlink_to("real")
+    commit = _commit_all(repo, "r")
+    with pytest.raises(fetch.FetchError, match="tt00/tt_um_x.*source directory"):
+        fetch.fetch(make_project(repo, commit), tmp_path / "cache")
+
+
+def test_dangling_polyfill_symlink_is_not_written_through(tmp_path, videos_with_polyfill):
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    git(repo, "init", "-q")
+    (repo / "src/top.v").write_text("module top;\nendmodule\n")
+    victim = tmp_path / "victim.txt"
+    (repo / "src/sky130_polyfill.v").symlink_to(victim)
+    commit = _commit_all(repo, "r")
+    project = make_project(repo, commit, ("top.v", "sky130_polyfill.v"))
+    with pytest.raises(fetch.FetchError, match="sky130_polyfill.v"):
+        fetch.fetch(project, tmp_path / "cache", videos_repo=videos_with_polyfill)
+    assert not victim.exists()

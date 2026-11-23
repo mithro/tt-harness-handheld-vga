@@ -35,7 +35,11 @@ class Project:
     commit: str
     top_module: str
     source_files: tuple[str, ...]
+    # The clock the reference simulation used: the declared clock, or DEFAULT_CLOCK_HZ when
+    # none is declared.
     clock_hz: int
+    # The clock exactly as the manifest or override declares it; 0 when undeclared.
+    clock_declared: int
     pmods: tuple[str, ...]
     address: int | None
     ui_in: int
@@ -90,7 +94,8 @@ def _project(target: dict, videos_repo: Path) -> Project:
     ui_in = int(ov["ui_in"]) if "ui_in" in ov else int(first.get("ui_in", 0))
     uio_in = int(ov["uio_in"]) if "uio_in" in ov else int(first.get("uio_in", 0))
 
-    clock_hz = int(ov.get("clock_hz") or target.get("clock_hz") or 0) or DEFAULT_CLOCK_HZ
+    clock_declared = int(ov.get("clock_hz") or target.get("clock_hz") or 0)
+    clock_hz = clock_declared or DEFAULT_CLOCK_HZ
     address = target.get("address")
     return Project(
         shuttle=shuttle,
@@ -100,6 +105,7 @@ def _project(target: dict, videos_repo: Path) -> Project:
         top_module=ov.get("top_module") or target["top_module"],
         source_files=tuple(ov.get("sources") or target["source_files"]),
         clock_hz=clock_hz,
+        clock_declared=clock_declared,
         pmods=tuple(target.get("pmods") or ()),
         address=int(address) if address not in (None, "") else None,
         ui_in=ui_in,
