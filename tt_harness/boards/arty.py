@@ -101,7 +101,10 @@ def to_verilog(board_top: ArtyCompare, path: Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     ios = {board_top.clk100, board_top.serial_tx, board_top.user_led0}
-    verilog.convert(board_top, ios=ios, name=MODULE_NAME).write(str(path))
+    text = str(verilog.convert(board_top, ios=ios, name=MODULE_NAME))
+    # Harness glue, not project source: Migen's ports carry no net type, so this file must
+    # not be read under a project's `default_nettype none`. The flows also read it first.
+    path.write_text("`default_nettype wire\n" + text)
     return path
 
 

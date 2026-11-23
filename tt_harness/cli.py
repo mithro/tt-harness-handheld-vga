@@ -203,19 +203,12 @@ def _cmd_build_compare(args: argparse.Namespace) -> int:
         text = e.args[0] if isinstance(e, KeyError) else e
         print(f"tt-harness build-compare: {args.project}: {step}: {text}", file=sys.stderr)
         return 1
+    # build_compare itself warns on stderr about rewritten sources and disagreements.
     for name, d in sorted(result.timing.items()):
-        print(
-            f"{name}: {d.achieved_mhz:.2f} MHz achieved, constraint {d.constraint_mhz:.2f} MHz, "
-            f"{'met' if d.met else 'NOT MET'}",
-            file=sys.stderr,
-        )
+        print(f"{name}: {build.describe(d)}, {'met' if d.met else 'NOT MET'}", file=sys.stderr)
     print(f"sources read as {result.language}", file=sys.stderr)
-    if result.source_rewrites:
-        files = ", ".join(f"{Path(f).name} ({n})" for f, n in result.source_rewrites)
-        print(
-            f"warning: {args.toolchain} read copies with `default_nettype none` as `wire`: {files}",
-            file=sys.stderr,
-        )
+    for item in result.limitations:
+        print(f"limitation: {item}", file=sys.stderr)
     print(result.bitstream)
     return 0
 
