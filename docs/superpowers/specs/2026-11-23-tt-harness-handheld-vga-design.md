@@ -34,9 +34,8 @@ remotely.
    board firmware and the demo configurator (reset, `ui_in`, set/wait steps, loud failure
    on an invalid file).
 4. Builds with both Vivado and openXC7, for both Game Bub and Arty A7-35T.
-5. On Arty only: record the project's output so it can be compared with the
-   `tinytapeout-vga-videos` reference simulation, using the frame code shared with
-   `vgacap` and `tt-harness-fpga-vga`.
+5. On Arty only: record the project's output so it can be compared with a reference
+   simulation of the same design.
 6. After a small pool is reliable on Arty, build and check every shuttle VGA design that
    has a reference.
 7. Later stages: the project is loaded separately from the harness while the harness
@@ -59,7 +58,7 @@ remotely.
 - A harness that only works with one toolchain, or needs the project modified.
 - Board-specific logic mixed into the board-independent core, which would make the next
   handheld a rewrite.
-- A second frame-cutting or hashing implementation that has to agree with `vgacap`'s.
+- A verdict that depends on two frame-cutting implementations agreeing.
 - A dependency tree between the harness projects. A little duplicated code is preferred
   to importing code from several sibling repositories (owner's instruction).
 - Copying Game Bub framework RTL (CERN-OHL-S/GPL) into this Apache-2.0 repository.
@@ -95,9 +94,9 @@ using the project's own sync into a framebuffer, and scan that out with the harn
 timing. A pass-through cannot rotate for the portrait panel, and the project cannot be
 slaved to harness timing because it generates its own sync.
 
-**How Arty output is recorded.** A vgacap stream of `uo_out` per project clock (chosen,
-agreed with the other two projects) rather than hashing frames in RTL, which would be a
-second frame cutter.
+**How Arty output is recorded.** The raw `uo_out` value per project clock (chosen, and
+what the other two projects also record) rather than hashing frames in RTL, which would
+make a pass depend on a frame cutter in gateware agreeing with one in software.
 
 ## Stages
 
@@ -240,13 +239,18 @@ result:
 - A host-side script loads the bitstream, collects the bytes, writes the stream and
   produces a verdict.
 
-**Reference until the shared one exists** *(my call)*: `tt-harness-fpga-vga` has not yet
-produced reference files or verdict code, and `vgacap` has no frame hash yet. This
-project does not wait. Its own Verilator simulation of the same project under the same
-stimulus writes a vgacap stream, both streams are cut into frames by `vgacap`'s existing
-`libvgaframe`, and the frames are compared pixel for pixel. When the shared reference
-files and hash land, the comparison switches to them and the local reference remains as
-a cross-check.
+**Comparison is per clock, not per frame.** Both the recording and the reference are
+the `uo_out` byte for every project clock from the first reset clock, so the verdict is a
+byte-for-byte comparison of the two sequences over the reference's span: `exact`,
+`mismatch` (with the first differing clock), or `inconclusive`. No frame cutting or
+hashing is involved in the verdict. Frames are cut only to show a person what differed.
+
+**Reference** *(my call)*: `tt-harness-fpga-vga` plans to publish, per design, a
+`reference.json` and a raw per-clock dump (`uo_out.bin.gz`, one byte per clock, with its
+SHA-256), but has not built it yet. This project does not wait: its own Verilator
+simulation of the same project under the same stimulus writes the same kind of dump.
+When the shared reference files land, the comparison uses them and the local simulation
+remains as a cross-check.
 
 **Boards.** The Welland Arty A7-35T boards are on Raspberry Pi 4 hosts reached through
 `tweed.welland.mithis.com`, loaded with `openFPGALoader -b arty`, UART on
@@ -259,18 +263,16 @@ UART. Use at most two boards, one run at a time per board, a claim file per boar
 
 ### Dependencies on other projects
 
-Kept to one code dependency and two data formats:
+No code is imported from any sibling project to build the harness or to reach a verdict.
 
-- **Code:** `vgacap` only, for cutting frames out of a stream and hashing them. It is a
-  leaf with no dependencies of its own, and it is the one piece that must agree exactly
-  across projects. Pinned to a commit.
 - **Data, read as files:** the shared manifest (`data/targets.json` and compiled
-  overrides from a `tinytapeout-vga-videos` checkout) and the reference files
-  (`reference/<shuttle>/<macro>.json` produced by `tt-harness-fpga-vga`). This project
-  reads the files; it does not import either project's code.
-- **Duplicated here on purpose:** the reference file reader and the verdict logic
-  (exact, shifted, similar, inconclusive).
-- Nothing is needed from any of them to build or run the Game Bub harness.
+  overrides from a `tinytapeout-vga-videos` checkout) and, when they exist, the reference
+  files from `tt-harness-fpga-vga`. Their schemas are the interface.
+- **Shared RTL:** the sampler lives in `vgacap/rtl/` and is pulled in at a pinned commit
+  for the Arty compare build only.
+- **Optional tool:** `vgacap`'s frame tools turn a recorded stream into pictures for a
+  person to look at. Nothing depends on them for a pass or fail.
+- Nothing from any of them is needed to build or run the Game Bub harness.
 
 ## Verification
 
@@ -319,7 +321,7 @@ Steps 2 to 4 and step 6 can overlap.
 
 - Package layout, register maps, block interfaces, filter design, test framework.
 - Framebuffer packing and status-area layout.
-- Recorder buffer size and transport details.
+- Recorder FIFO size and UART framing.
 - How project sources are fetched, provided it reads the shared manifest
   (`data/targets.json` and compiled overrides from `tinytapeout-vga-videos`).
 
@@ -332,4 +334,3 @@ Steps 2 to 4 and step 6 can overlap.
 - Which Welland Arty boards are currently live.
 - Whether nextpnr-xilinx handles the gated project clock (BUFGCE) and the project-clock
   MMCM as LiteX emits them.
-- Whether the reference testbench and `libvgaframe` cut frames at identical pixels.
