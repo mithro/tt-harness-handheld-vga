@@ -30,10 +30,14 @@ built separately, and a small RISC-V SoC in the harness (LiteX) handles manageme
 
 Both Xilinx Vivado and the open-source openXC7 flow (Yosys, nextpnr-xilinx, Project X-Ray).
 
+`uv run scripts/setup_toolchains.py` installs the open-source tools into `.toolchains/`;
+see [`docs/toolchains.md`](docs/toolchains.md).
+
 ## Documentation
 
 - [`docs/gamebub-hardware.md`](docs/gamebub-hardware.md): verified Game Bub hardware facts
   the design depends on.
+- [`docs/toolchains.md`](docs/toolchains.md): installing and using the FPGA toolchains.
 
 ## Licence
 
