@@ -346,15 +346,15 @@ def test_cli_build_compare_unknown_project_fails(tmp_path: Path, capsys) -> None
 # Real builds (Step 7) -------------------------------------------------------------------------
 
 
-def _real_sources() -> Sources:
+def _real_sources(project_id: str = REAL_ID) -> Sources:
     videos = manifest.default_videos_repo()
     if not (videos / "data" / "targets.json").is_file():
         pytest.skip(f"no tinytapeout-vga-videos checkout at {videos} (set TT_VIDEOS_REPO)")
-    project = manifest.get(manifest.load(videos), REAL_ID)
+    project = manifest.get(manifest.load(videos), project_id)
     try:
         return fetch.fetch(project, tools.REPO / "work" / "sources")
     except fetch.FetchError as e:
-        pytest.skip(f"cannot fetch {REAL_ID} sources (empty cache and no network?): {e}")
+        pytest.skip(f"cannot fetch {project_id} sources (empty cache and no network?): {e}")
 
 
 def _openxc7_installed() -> bool:
@@ -388,6 +388,17 @@ def test_real_build_openxc7() -> None:
     _check_real(result, "openxc7")
 
 
+@pytest.mark.toolchain
+@pytest.mark.skipif(not _openxc7_installed(), reason="openXC7 toolchain not installed")
+def test_real_build_openxc7_rejects_a_clock_made_in_the_project(tmp_path: Path) -> None:
+    # dottee clocks some of its logic from its own vsync register; that clock has no
+    # constraint, so the build must fail as unconstrained and leave no bitstream.
+    sources = _real_sources("ttsky26a/tt_um_algofoogle_dottee")
+    with pytest.raises(TimingError, match="unconstrained clock: BUFG .* 'project.uo_out"):
+        build.build_compare(sources.project, sources, "arty", "openxc7", tmp_path, 1000)
+    assert not list(tmp_path.glob("*.bit"))
+
+
 @pytest.mark.vivado
 @pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
 def test_real_build_vivado() -> None:
@@ -395,3 +406,14 @@ def test_real_build_vivado() -> None:
     out = tools.REPO / "build" / "compare" / "arty-vivado" / "tt08" / sources.project.macro
     result = build.build_compare(sources.project, sources, "arty", "vivado", out, REAL_CLOCKS)
     _check_real(result, "vivado")
+
+
+@pytest.mark.vivado
+@pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
+def test_real_build_vivado_rejects_a_clock_made_in_the_project(tmp_path: Path) -> None:
+    # Vivado itself says "All user specified timing constraints are met" for dottee; only
+    # check_timing shows the registers clocked from vsync_reg/Q.
+    sources = _real_sources("ttsky26a/tt_um_algofoogle_dottee")
+    with pytest.raises(TimingError, match=r"unconstrained: .*no_clock \(\d+\)"):
+        build.build_compare(sources.project, sources, "arty", "vivado", tmp_path, 1000)
+    assert not list(tmp_path.glob("*.bit"))

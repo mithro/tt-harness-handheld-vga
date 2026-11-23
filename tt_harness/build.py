@@ -55,7 +55,6 @@ CROSS_DOMAIN_ALLOWANCE_CYCLES = 1
 OPENXC7 = tools.TOOLCHAINS / "openxc7"
 PRJXRAY_DB = OPENXC7 / "squashfs-root" / "opt" / "nextpnr-xilinx" / "external" / "prjxray-db"
 CHIPDB = tools.TOOLCHAINS / "chipdb"
-_SV_SUFFIXES = (".sv",)
 
 
 class _LoggedError(RuntimeError):
@@ -357,7 +356,10 @@ for name, cell in ctx.cells:
         if driver is not None and driver.type == "IBUF" and driver.ports["I"].net is not None:
             source = driver.ports["I"].net.name
         if source != INPUT_PORT:
-            raise RuntimeError(f"tt-harness: BUFG {{name}} is not fed from {{INPUT_PORT}}")
+            raise RuntimeError(
+                f"tt-harness: unconstrained clock: BUFG {{name}} drives clock net "
+                f"'{{out_net.name}}', which is neither {{INPUT_PORT}} nor pclk"
+            )
         domain, mhz = "sys", SYS_MHZ
     if domain in found:
         raise RuntimeError(f"tt-harness: two BUFGs for domain {{domain}}")
@@ -393,9 +395,15 @@ class _Job:
 
 
 def _step(job: _Job, what: str, cmd: list[str], cwd: Path, **kwargs) -> None:
+    start = job.log.stat().st_size
     rc = verilate.run(cmd, job.log, cwd, STEP_TIMEOUT_S, **kwargs)
     if rc != 0:
-        raise BuildError(f"{job.sources.project.id}: {what} failed (exit {rc})", job.log)
+        with job.log.open("rb") as f:
+            f.seek(start)
+            text = f.read().decode(errors="replace")
+        first = re.search(r"^(?:ERROR|Error|error)\b.*$", text, re.MULTILINE)
+        detail = f": {first.group(0)}" if first else ""
+        raise BuildError(f"{job.sources.project.id}: {what} failed (exit {rc}){detail}", job.log)
 
 
 def _tool(name: str) -> Path:
@@ -465,6 +473,11 @@ def _openxc7_implement(job: _Job) -> str:
             text = f.read().decode(errors="replace")
         if rc == 0:
             break
+        unknown = re.search(
+            r"^RuntimeError: tt-harness: (unconstrained clock: .*)$", text, re.MULTILINE
+        )
+        if unknown:
+            raise TimingError(f"{job.sources.project.id}: {unknown.group(1)}", job.log)
         if not re.search(r"^ERROR: Max frequency for clock .*FAIL at", text, re.MULTILINE):
             raise BuildError(
                 f"{job.sources.project.id}: place and route (nextpnr-xilinx) failed (exit {rc})",
@@ -534,13 +547,14 @@ set_multicycle_path -hold -end {settle_minus_1} -from [get_clocks pclk] -to [get
 """
 
 
-def _vivado_sources(job: _Job) -> tuple[list[Path], list[Path], list[Path]]:
-    """Copy src/ for Vivado and return (Verilog files, SystemVerilog files, include dirs).
+def _vivado_sources(job: _Job) -> tuple[list[Path], list[Path]]:
+    """Copy src/ for Vivado and return (source files, include dirs) in the copy.
 
-    Vivado rejects a non-ANSI port without a net type (`input clk;`) under
-    `default_nettype none`, which Verilator and Yosys accept; the copy says
-    `default_nettype wire` instead. Nothing else changes, and a design with a real implicit
-    net would already have failed the reference build.
+    Every file is read as SystemVerilog, as Verilator and Yosys read them (projects use
+    SystemVerilog syntax in .v files). Vivado rejects a non-ANSI port without a net type
+    (`input clk;`) under `default_nettype none`, which Verilator and Yosys accept; the copy
+    says `default_nettype wire` instead. Nothing else changes, and a design with a real
+    implicit net would already have failed the reference build.
     """
     src = job.sources.root / "src"
     dest = job.out_dir / "src"
@@ -556,9 +570,7 @@ def _vivado_sources(job: _Job) -> tuple[list[Path], list[Path], list[Path]]:
     files, include_dirs = verilate.project_files(job.sources)
     moved = [dest / f.relative_to(src) for f in files]
     dirs = [dest / d.relative_to(src) for d in include_dirs]
-    plain = [f for f in moved if f.suffix not in _SV_SUFFIXES]
-    sv = [f for f in moved if f.suffix in _SV_SUFFIXES]
-    return plain, sv, dirs
+    return moved, dirs
 
 
 def _vivado_implement(job: _Job) -> str:
@@ -567,7 +579,7 @@ def _vivado_implement(job: _Job) -> str:
     if settings is None:
         raise FileNotFoundError(f"Vivado not found at {tools.VIVADO_SETTINGS}")
     out = job.out_dir
-    plain, sv, dirs = _vivado_sources(job)
+    files, dirs = _vivado_sources(job)
     clocks_tcl = out / "clocks.tcl"
     clocks_tcl.write_text(
         _VIVADO_CLOCKS.format(
@@ -597,8 +609,7 @@ def _vivado_implement(job: _Job) -> str:
         "\n".join(
             [
                 f"set_param general.maxThreads {job.jobs}",
-                *([f"read_verilog {braced(plain)}"] if plain else []),
-                *([f"read_verilog -sv {braced(sv)}"] if sv else []),
+                f"read_verilog -sv {braced(files)}",
                 f"read_verilog {{{job.top_v}}}",
                 f"read_xdc {{{job.pins_xdc}}}",
                 f"synth_design -top {job.top} -part {job.part} -include_dirs [list {braced(dirs)}]",
