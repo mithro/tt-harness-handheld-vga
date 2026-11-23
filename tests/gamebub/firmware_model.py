@@ -356,9 +356,7 @@ class FirmwareModel:
             raise _CommandFailed(request[0])
         return response
 
-    def command(
-        self, request: list[int], n_response: int = 0, timeout_s: float = NOTIFY_TIMEOUT_S
-    ):
+    def command(self, request: list[int], n_response: int = 0, timeout_s: float = NOTIFY_TIMEOUT_S):
         """Run one host command; raise as the firmware's callers see it."""
         try:
             return (yield from self._run_core_command(request, n_response, timeout_s))

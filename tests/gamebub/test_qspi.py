@@ -48,7 +48,7 @@ def test_single_write_each_word_size(word_size):
     def body(model):
         yield from model.write(BASE, data, word_size)
 
-    _, mem, writes, _ = run_with_memory(body)
+    _, _, writes, _ = run_with_memory(body)
     assert writes == [(BASE + i, b) for i, b in enumerate(data)]
 
 
@@ -114,9 +114,7 @@ def test_read_data_after_exactly_the_dummy_cycles():
 
     def body(model):
         cmd = model.command_byte(True, WORD_8, True, True)
-        return (
-            yield from model.raw_transaction(READ_HZ, cmd, BASE, read_len=2, samples=samples)
-        )
+        return (yield from model.raw_transaction(READ_HZ, cmd, BASE, read_len=2, samples=samples))
 
     value, *_ = run_with_memory(body, mem, undriven=0xF)
     first = 8 + 8 + DUMMY_CLOCKS
