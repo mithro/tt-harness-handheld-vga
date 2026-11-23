@@ -59,6 +59,32 @@ their per-project inputs from the same files rather than fetching independently:
   are in clocks from the first reset clock.
 - Fetch logic: `ttvga/harness/job.py` (shallow fetch of the commit, then apply the patch).
 
+## Shared frame code (working arrangement, 2026-11-23)
+
+Agreed between the three projects' sessions; each project's design is still subject to the
+owner's approval.
+
+- [`vgacap`](https://github.com/mithro/vgacap) owns the capture stream format
+  (`include/vgacap/stream.h`, `python/vgacap/stream.py`: the 8-bit `uo_out` value per
+  project clock, in `RAW `/`RLE ` chunks) and the frame reconstructor (`libvgaframe`). A
+  per-frame hash using the testbench's definition, and a "frames and hashes from a stream"
+  entry point, are to be added there by the `tt-harness-fpga-vga` project.
+- `tt-harness-fpga-vga` owns the reference files (`reference/<shuttle>/<macro>.json`) and
+  the verdict logic. Its reference simulation writes a vgacap stream too, so one frame
+  cutter serves simulation and every board.
+- This project's Arty build emits a vgacap stream of `uo_out`, sampled inside the FPGA from
+  the first reset clock, with `ui_in` and reset pinned to the reference's values. It does
+  not hash in RTL, and comparison is not part of the Game Bub build at all.
+
+Lessons from capturing real boards (from the `tt-vga-capture` project):
+
+- A frame with missing samples is "inconclusive", never "mismatch".
+- Match frame sequences by searching for an offset, not by index.
+- Pin `ui_in`; a demo board driving `ui_in=1` once switched a design to 800x600.
+- The VGA Playground `hvsync_generator` is one pixel and one line off VESA phase.
+- Whether the reference testbench and `libvgaframe` cut frames at identical pixels is
+  unproven.
+
 ## Comparing against the reference
 
 - The published clips are 2x nearest-neighbour, yuv420p and lossy. They are for looking
