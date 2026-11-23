@@ -37,6 +37,7 @@ class _Harness(Module):
         self.dq_oe = qspi.dq_oe
         if with_link:
             self.submodules.link = McuLink(qspi, sys_clk_hz=SYS_HZ, **link_kwargs)
+            self.fpga_irq = self.link.irq
 
 
 def make_dut(with_link: bool = True, **link_kwargs):

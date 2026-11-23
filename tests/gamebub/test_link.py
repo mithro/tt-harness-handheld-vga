@@ -14,12 +14,16 @@ from .firmware_model import (
     CORE_RUN,
     CTRL_CMD_HOST,
     CTRL_IRQ_ENABLE,
+    DUMMY_CLOCKS,
     GET_STATUS,
     HOST_MAILBOX,
     IRQ_BUTTON,
     IRQ_CORE_REQUEST,
     OVERLAY,
     STATUS_SETUP,
+    WORD_8,
+    WORD_16,
+    WORD_32,
     FirmwareError,
     FirmwareModel,
     FirmwareTimeout,
@@ -129,6 +133,118 @@ def test_cpu_acknowledges_forwarded_command():
     assert valid_after_ack == 0
 
 
+def test_forwarded_command_overrun_keeps_first_and_flags():
+    def ack(dut):
+        yield dut.link.cmd_ack.eq(1)
+        yield from sim.wait_ticks(8)
+        yield dut.link.cmd_ack.eq(0)
+
+    def words(dut):
+        out = []
+        for w in dut.link.cmd_words:
+            out.append((yield w))
+        return out
+
+    def body(model, dut):
+        with pytest.raises(FirmwareError):
+            yield from model.command([0x0402, 1, 2])
+        first = (yield from read_sys(dut.link.cmd_overrun)), (yield from words(dut))
+        with pytest.raises(FirmwareError):
+            yield from model.command([0x0403, 3, 4])
+        second = (yield from read_sys(dut.link.cmd_overrun)), (yield from words(dut))
+        yield from ack(dut)
+        cleared = (yield from read_sys(dut.link.cmd_valid)), (yield dut.link.cmd_overrun)
+        with pytest.raises(FirmwareError):
+            yield from model.command([0x0404, 5])
+        third = (yield from read_sys(dut.link.cmd_overrun)), (yield from words(dut))
+        return first, second, cleared, third
+
+    _, (first, second, cleared, third) = run_link(body)
+    assert first[0] == 0 and first[1][:3] == [0x0402, 1, 2]
+    assert second[0] == 1 and second[1][:3] == [0x0402, 1, 2]  # the first is not lost
+    assert cleared == (0, 0)
+    assert third[0] == 0 and third[1][:2] == [0x0404, 5]
+
+
+# Section 2.1: the command bytes the firmware sends, from the documented bit fields.
+DOCUMENTED_COMMAND_BYTES = {
+    (False, WORD_8): 0x58,
+    (True, WORD_8): 0x59,
+    (False, WORD_16): 0x5A,
+    (True, WORD_16): 0x5B,
+    (False, WORD_32): 0x5C,
+    (True, WORD_32): 0x5D,
+}
+
+
+@pytest.mark.parametrize(("read", "word_size"), list(DOCUMENTED_COMMAND_BYTES))
+def test_command_byte_values_match_document(read, word_size):
+    fields = int(read) | (word_size << 1) | (1 << 3) | (1 << 4) | (0b10 << 5)
+    assert fields == DOCUMENTED_COMMAND_BYTES[(read, word_size)]
+    assert FirmwareModel.command_byte(read, word_size, True, True) == fields
+
+
+def test_boot_sends_only_documented_command_bytes():
+    def body(model, dut):
+        yield from model.boot()
+
+    model, _ = run_link(body)
+    assert set(model.command_bytes) == {0x5A, 0x5C, 0x5D}  # overlay; register W/R
+
+
+CUT_POINTS = {
+    "mid-command": ("w", 4),
+    "mid-address": ("w", 8 + 5),
+    "mid-data-nibble": ("w", 8 + 8 + 1),  # high nibble of CTRL_CMD_HOST byte 0 only
+    "mid-read": ("r", 8 + 8 + DUMMY_CLOCKS + 3),
+}
+
+
+@pytest.mark.parametrize("cut", list(CUT_POINTS))
+def test_early_cs_release_then_boot(cut):
+    kind, clocks = CUT_POINTS[cut]
+
+    def body(model, dut):
+        yield from model.write_u32(HOST_MAILBOX, 0x1234)  # an unknown command, waiting
+        read = kind == "r"
+        cmd = model.command_byte(read, WORD_32, True, True)
+        data = None if read else (0x8).to_bytes(4, "little")
+        yield from model.raw_transaction(
+            40_000_000 if not read else 10_000_000,
+            cmd,
+            CTRL_CMD_HOST,
+            data=data,
+            read_len=4,
+            stop_after_clocks=clocks,
+        )
+        valid = yield from read_sys(dut.link.cmd_valid)
+        yield from model.boot()
+        return valid
+
+    model, valid = run_link(body)
+    assert valid == 0  # the cut write never started the unknown command
+    assert model.running
+    assert model.ignored_errors == []
+
+
+def test_stray_falling_edge_before_first_rising_edge():
+    def body(model, dut):
+        yield dut.cs_n.eq(0)
+        yield from sim.wait_ticks(4)
+        yield dut.spi_fall.eq(1)
+        yield
+        yield dut.spi_fall.eq(0)
+        yield from sim.wait_ticks(4)
+        # Chip select stays low into a normal transaction.
+        (status,) = yield from model.command([GET_STATUS], 1)
+        yield from model.boot()
+        return status
+
+    model, status = run_link(body)
+    assert status == STATUS_SETUP
+    assert model.running
+
+
 @pytest.mark.parametrize("addr", [0xF100_0F00, 0xF100_100C + 0x100, 0xF1FF_FFFC, 0xF000_0800])
 def test_undefined_register_write_ignored_read_zero(addr):
     def body(model, dut):
@@ -173,13 +289,18 @@ def test_boot_against_link_in_reset_times_out():
 
 
 def test_button_interrupt_after_boot():
+    """Checked where the firmware sees it: the MCU's line, after the board's n-FET."""
+
     def body(model, dut):
         yield from model.boot()
-        idle = yield from read_sys(dut.link.irq_n)
+        yield from sim.wait_ticks(SYS_SETTLE_TICKS)
+        idle = yield from model.mcu_int_n()
         yield dut.link.buttons.eq(1 << BUTTONS.index("start"))
-        asserted = yield from read_sys(dut.link.irq_n)
+        yield from sim.wait_ticks(SYS_SETTLE_TICKS)
+        asserted = yield from model.mcu_int_n()
         pending = yield from model.service_interrupt()
-        released = yield from read_sys(dut.link.irq_n)
+        yield from sim.wait_ticks(SYS_SETTLE_TICKS)
+        released = yield from model.mcu_int_n()
         return idle, asserted, pending, released, model.input_state
 
     _, (idle, asserted, pending, released, state) = run_link(body)

@@ -9,6 +9,7 @@ The model is a set of Migen simulator coroutines that drive the pads of a device
 test bit by bit. The device must expose:
 
 - ``cs_n``, ``clk``, ``dq_i`` (4), ``dq_o`` (4), ``dq_oe``: the QSPI pads;
+- ``fpga_irq``: the FPGA's interrupt pin (active high, into the board's n-FET);
 - ``spi_rise``, ``spi_fall``: simulation-only strobes. The SPI clock is gated (it stops
   between transactions), which Migen's simulator cannot generate directly, so the device's
   SPI-clocked logic runs from a fast free-running ``tick`` clock with these as clock
@@ -148,6 +149,7 @@ class FirmwareModel:
         docked: bool = False,
         use_builtin_screen: bool = False,
         overlay_span_pixels: int = 16,
+        op_pause_periods: int = 3,
     ):
         self.dut = dut
         self.time_scale = time_scale
@@ -158,9 +160,11 @@ class FirmwareModel:
         self.docked = docked
         self.use_builtin_screen = use_builtin_screen
         self.overlay_span_pixels = overlay_span_pixels
+        self.op_pause_periods = op_pause_periods  # clock pause between operations (U6)
         self.system_clock_hz = DEFAULT_SYSTEM_CLOCK_HZ
 
         self.now = 0  # ticks
+        self.command_bytes: list[int] = []  # every command byte sent, in order
         self.interrupts = 0  # the firmware's copy of the enable mask (section 6)
         self._master_drives = False
         self.transactions: list[tuple[str, int, int, int]] = []  # (kind, addr, bytes, Hz)
@@ -207,13 +211,14 @@ class FirmwareModel:
         if drive is not None:
             yield dut.dq_i.eq(drive)
         yield from self._tick(half - 1)
+        # Sample in the last tick before the rising edge: what the MCU latches is what
+        # the device has been presenting, not anything the edge itself causes.
+        oe = yield dut.dq_oe
+        value = (yield dut.dq_o) if oe else self.undriven
         yield dut.spi_rise.eq(1)
         yield from self._tick(1)  # this tick is the rising edge
         yield dut.spi_rise.eq(0)
         yield dut.clk.eq(1)
-        # Values read here are those present at the edge.
-        oe = yield dut.dq_oe
-        value = (yield dut.dq_o) if oe else self.undriven
         yield from self._tick(half - 1)
         yield dut.spi_fall.eq(1)
         yield from self._tick(1)  # falling edge
@@ -233,29 +238,38 @@ class FirmwareModel:
     ):
         """One chip-select period: command, address, then write data or dummy + read.
 
-        ``stop_after_clocks`` releases chip select early. ``samples`` collects what the
-        MCU sampled on every clock. Returns the bytes read.
+        The firmware issues these phases as separate driver operations under one chip
+        select (section 2), so the clock is held low for ``op_pause_periods`` SPI periods
+        between operations, with chip select still low. ``stop_after_clocks`` releases
+        chip select early. ``samples`` collects what the MCU sampled on every clock.
+        Returns the bytes read.
         """
         dut = self.dut
         half = self.period_ticks(rate_hz) // 2
-        plan: list[int | None] = [((command >> b) & 1) | self.idle_lines for b in range(7, -1, -1)]
-        plan += [(address >> (4 * n)) & 0xF for n in range(7, -1, -1)]
+        self.command_bytes.append(command)
         reading = command & 1
+        ops: list[list[int | None]] = [
+            [((command >> b) & 1) | self.idle_lines for b in range(7, -1, -1)],
+            [(address >> (4 * n)) & 0xF for n in range(7, -1, -1)],
+        ]
         if reading:
-            plan += [None] * (DUMMY_CLOCKS + 2 * read_len)
+            ops += [[None] * DUMMY_CLOCKS, [None] * (2 * read_len)]
         else:
-            for byte in data or b"":
-                plan += [byte >> 4, byte & 0xF]
-        if stop_after_clocks is not None:
-            plan = plan[:stop_after_clocks]
+            ops.append([n for byte in data or b"" for n in (byte >> 4, byte & 0xF)])
 
         yield dut.cs_n.eq(0)
         self._master_drives = True
         got: list[int] = []
-        for drive in plan:
-            if drive is None:
-                self._master_drives = False
-            got.append((yield from self._clock(half, drive)))
+        budget = stop_after_clocks
+        for index, op in enumerate(ops):
+            if index and self.op_pause_periods:
+                yield from self._tick(self.op_pause_periods * 2 * half)
+            for drive in op:
+                if budget is not None and len(got) >= budget:
+                    break
+                if drive is None:
+                    self._master_drives = False
+                got.append((yield from self._clock(half, drive)))
         yield dut.cs_n.eq(1)
         self._master_drives = False
         yield from self._tick(self.cs_high_periods * 2 * half)
@@ -402,6 +416,15 @@ class FirmwareModel:
     def reset_core(self):
         yield from self._command_ignoring_errors([CORE_HALT])
         yield from self._command_ignoring_errors([CORE_RUN])
+
+    def mcu_int_n(self):
+        """Level of the MCU's shared, active-low interrupt line (section 6).
+
+        On rev 2-4 the FPGA pin ``fpga_irq`` drives the gate of an n-MOSFET whose drain is
+        that line, so a high FPGA pin pulls the line low. The firmware's interrupt is
+        level-triggered on low.
+        """
+        return 0 if (yield self.dut.fpga_irq) else 1
 
     def service_interrupt(self):
         """Section 6: what the firmware does when irq_n is low. Returns the pending mask."""

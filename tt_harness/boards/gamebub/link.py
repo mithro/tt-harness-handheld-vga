@@ -17,7 +17,8 @@ Clock-domain crossing (``spi`` and ``sys`` must be declared asynchronous clock g
 - spi to sys, events (IRQ pending clear, forwarded commands): a toggle in ``spi``
   crossed with ``MultiReg``; the data that goes with it (clear mask, command words) is
   held in ``spi`` registers that cannot change again for at least one further
-  transaction (well over 0.5 us), and sys samples it within four sys cycles of the toggle.
+  transaction (well over 0.5 us), and sys samples it within four sys cycles of the
+  toggle. Forwarded command words are copied into sys registers at that point.
 """
 
 from __future__ import annotations
@@ -78,13 +79,25 @@ class McuLink(Module):
     - ``buttons`` (in, 12): bit order ``BUTTONS``, 1 = pressed;
     - ``reset`` (in): while high the link answers no command (so the MCU times out),
       holds the status at SETUP and ``running`` low;
-    - ``irq_n`` (out): low while an enabled interrupt is pending; drive the pin open-drain;
+    - ``irq`` (out): high while an enabled interrupt is pending. Drive the board's
+      FPGA_IRQ pin push-pull with this value; the board inverts it (rev 2-4: the pin is
+      the gate of an n-FET that pulls the MCU's active-low interrupt line low);
     - ``running`` (out): the MCU has sent CORE_RUN (and no CORE_HALT since);
     - ``focus`` (out): last NOTIFY_FOCUS argument;
     - ``dock`` (out, 2), ``vibrate``, ``video_filter`` (out): last values written;
     - CPU port: ``cmd_valid`` (out) rises when a command the RTL does not handle arrives
-      (it has already been answered with an error), ``cmd_words`` (6 x 32) hold that
-      command and its five arguments, ``cmd_ack`` (in) clears ``cmd_valid``.
+      (it has already been answered with an error); ``cmd_words`` (out, 6 x 32, sys
+      registers) then hold that command and its five arguments until ``cmd_ack`` (in)
+      clears ``cmd_valid``. A command forwarded while ``cmd_valid`` is still set is
+      dropped and sets ``cmd_overrun`` (out), which ``cmd_ack`` also clears.
+
+    CDC assumptions on the sys inputs: ``buttons`` must already be synchronous to sys
+    (debounced or synchronised by the board layer). ``buttons`` and the IRQ pending bits
+    cross into ``spi`` bit by bit: each bit is an independent flag, so a read that
+    catches some bits before and some after a change is still a correct sample of each
+    button or source, and no multi-bit coherence is needed. Pending bits are cleared by
+    write-1-to-clear of exactly the bits the MCU read, so a bit set between its read and
+    its clear is cleared too (the firmware then reads STATUS_BUTTON, so no press is lost).
     """
 
     def __init__(
@@ -99,13 +112,14 @@ class McuLink(Module):
     ):
         self.buttons = Signal(len(BUTTONS))
         self.reset = Signal()
-        self.irq_n = Signal(reset=1)
+        self.irq = Signal()
         self.running = Signal()
         self.focus = Signal()
         self.dock = Signal(2)
         self.vibrate = Signal()
         self.video_filter = Signal()
         self.cmd_valid = Signal()
+        self.cmd_overrun = Signal()
         self.cmd_ack = Signal()
         self.cmd_words = [Signal(32, name=f"cmd_word{i}") for i in range(FORWARDED_WORDS)]
 
@@ -251,10 +265,7 @@ class McuLink(Module):
             (fwd_toggle, fwd_toggle_sys),
         ]:
             to_sys(src, dst)
-        self.comb += [
-            self.running.eq(running_sys & ~self.reset),
-            *[c.eq(f) for c, f in zip(self.cmd_words, fwd_words)],
-        ]
+        self.comb += self.running.eq(running_sys & ~self.reset)
 
         # -- sys-domain interrupt and CPU-port logic --------------------------------------
 
@@ -262,14 +273,25 @@ class McuLink(Module):
         clr_prev = Signal()
         fwd_prev = Signal()
         clear = Signal(IRQ_SOURCES)
-        self.comb += If(clr_toggle_sys != clr_prev, clear.eq(clr_mask))
+        forwarded = Signal()
+        self.comb += [
+            If(clr_toggle_sys != clr_prev, clear.eq(clr_mask)),
+            forwarded.eq(fwd_toggle_sys != fwd_prev),
+        ]
         self.sync += [
             buttons_prev.eq(self.buttons),
             clr_prev.eq(clr_toggle_sys),
             fwd_prev.eq(fwd_toggle_sys),
             pending.eq((pending & ~clear) | Cat(0, self.buttons != buttons_prev, 0, 0, 0)),
-            self.irq_n.eq((pending & enable_sys) == 0),
-            If(fwd_toggle_sys != fwd_prev, self.cmd_valid.eq(1)).Elif(
-                self.cmd_ack, self.cmd_valid.eq(0)
-            ),
+            self.irq.eq((pending & enable_sys) != 0),
+            # Capture a forwarded command into sys registers only when the port is free;
+            # one that arrives while another is pending is dropped and flagged.
+            If(
+                forwarded & (~self.cmd_valid | self.cmd_ack),
+                self.cmd_valid.eq(1),
+                self.cmd_overrun.eq(0),
+                *[c.eq(f) for c, f in zip(self.cmd_words, fwd_words)],
+            )
+            .Elif(forwarded, self.cmd_overrun.eq(1))
+            .Elif(self.cmd_ack, self.cmd_valid.eq(0), self.cmd_overrun.eq(0)),
         ]
