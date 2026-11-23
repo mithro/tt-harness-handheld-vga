@@ -124,6 +124,18 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
 - For anyone cutting frames: a design using the VGA Playground's sync generator is cut
   one line later than its own row 0, so row 479 is black porch. Per-clock comparison is
   unaffected.
+- Reference files for the eight pool designs (and five calibration designs) exist since
+  2026-11-23 under `work/reference/<shuttle>/<macro>/` in the `tt-harness-fpga-vga`
+  checkout on this machine: `reference.json`, `uo_out.bin.gz` (6,000,000 clocks),
+  `uio.bin.gz` and eight frame PNGs. That directory is git-ignored scratch, not in the
+  repository. All eight use `ui_in` 0 and `uio_in` 0 and simulate to 640x480@60.
+- Notes on the pool from that project's first batch:
+  - `tt_um_algofoogle_dottee` has SystemVerilog syntax (`p2 >>= 1;`) in a `.v` file, so
+    Yosys needs `read_verilog -sv`. It also has a second clock derived from its own vsync
+    output (`uo_out[3]`); check multi-clock timing figures carefully.
+  - `tt_um_gamepad_pmod_demo` and `tt_um_2048_vga_game` show one static picture with idle
+    inputs, so their references prove only the still image.
+  - On the iCE40UP5K five of the eight miss 25.175 MHz on paper (17 to 23 MHz).
 - This project's verdict is per clock and does not use these hashes. They are a second,
   independent check: frames cut from a recording can be hashed and compared with them.
 - Reset stimulus in the reference: `ena=1`, `rst_n=0` for 10 clocks with `ui_in` already
