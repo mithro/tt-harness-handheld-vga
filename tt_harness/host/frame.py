@@ -29,11 +29,30 @@ class Recording:
 
 
 def decode(data: bytes) -> Recording:
-    """Decode a frame from raw UART bytes; anything before the first magic is skipped."""
+    """Decode a frame from raw UART bytes, skipping anything before it.
+
+    Each occurrence of the magic is tried in order and the first that passes the version,
+    length and CRC checks is returned, so a false magic in boot noise does not hide the
+    real frame. If none passes, the problem of the first occurrence is reported. The CRC
+    is only computed for a candidate whose version is right and whose declared payload
+    fits in the bytes that follow it.
+    """
     start = data.find(MAGIC)
     if start < 0:
         return Recording(0, b"", False, "bad magic")
-    frame = data[start:]
+    first = None
+    while start >= 0:
+        rec = _decode_at(data, start)
+        if rec.ok:
+            return rec
+        first = first or rec
+        start = data.find(MAGIC, start + 1)
+    return first
+
+
+def _decode_at(data: bytes, start: int) -> Recording:
+    """Decode the frame whose magic starts at `data[start]`."""
+    frame = memoryview(data)[start:]
     if len(frame) <= len(MAGIC):
         return Recording(0, b"", False, "short")
     if frame[len(MAGIC)] != VERSION:
@@ -42,10 +61,10 @@ def decode(data: bytes) -> Recording:
         return Recording(0, b"", False, "short")
     (clocks,) = struct.unpack_from("<I", frame, len(MAGIC) + 1)
     samples = bytes(frame[HEADER_LENGTH : HEADER_LENGTH + clocks])
-    trailer = frame[HEADER_LENGTH + clocks : HEADER_LENGTH + clocks + TRAILER_LENGTH]
-    if len(samples) < clocks or len(trailer) < TRAILER_LENGTH:
+    if len(frame) < HEADER_LENGTH + clocks + TRAILER_LENGTH:
         return Recording(clocks, samples, False, "short")
-    if struct.unpack("<I", trailer)[0] != zlib.crc32(samples):
+    (crc,) = struct.unpack_from("<I", frame, HEADER_LENGTH + clocks)
+    if crc != zlib.crc32(samples):
         return Recording(clocks, samples, False, "bad crc")
     return Recording(clocks, samples, True, None)
 

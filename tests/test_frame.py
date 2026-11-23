@@ -46,6 +46,31 @@ def test_noise_before_magic_is_skipped():
     assert rec.ok and rec.samples == PAYLOAD and rec.clocks == len(PAYLOAD)
 
 
+def test_false_magic_in_noise_before_real_frame_is_skipped():
+    noise = b"\x13boot TTHC TTHC\x00\x07 noise"
+    rec = frame.decode(noise + build(PAYLOAD))
+    assert rec.ok and rec.samples == PAYLOAD and rec.clocks == len(PAYLOAD)
+
+
+def test_false_magic_with_absurd_length_before_real_frame_is_skipped():
+    false = b"TTHC\x01" + struct.pack("<I", 0xFFFF_FFF0) + b"junk"
+    rec = frame.decode(false + build(PAYLOAD))
+    assert rec.ok and rec.samples == PAYLOAD
+
+
+def test_false_magic_with_plausible_length_and_bad_crc_before_real_frame_is_skipped():
+    # declares 4 payload bytes that fit, so its CRC is checked and fails
+    false = b"TTHC\x01" + struct.pack("<I", 4) + b"abcd" + b"\x00\x00\x00\x00"
+    rec = frame.decode(false + build(PAYLOAD))
+    assert rec.ok and rec.samples == PAYLOAD
+
+
+def test_without_a_good_frame_the_first_occurrence_problem_is_reported():
+    bad = build(PAYLOAD)[:-4] + b"\x00\x00\x00\x00"
+    rec = frame.decode(b"noise" + bad + b"TTHC\x07")
+    assert (rec.ok, rec.problem, rec.samples) == (False, "bad crc", PAYLOAD)
+
+
 @pytest.mark.parametrize(
     ("data", "problem"),
     [
