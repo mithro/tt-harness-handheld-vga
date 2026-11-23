@@ -32,6 +32,7 @@ litex-boards = { git = "https://github.com/litex-hub/litex-boards", tag = "2026.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--basetemp=tmp/pytest"
 markers = [
     "toolchain: needs the open-source toolchains installed under .toolchains/",
     "vivado: needs a Vivado installation",
