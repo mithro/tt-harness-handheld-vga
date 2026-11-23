@@ -8,7 +8,7 @@ from migen.sim import run_simulation
 
 from tt_harness.core.stimulus import ReferenceStimulus
 
-INDICES = [*range(0, 25), 255, 256, 65535, 2**31, 2**32 - 1]
+INDICES = [*range(25), 255, 256, 65535, 2**31, 2**32 - 1]
 
 
 def _outputs(stim: ReferenceStimulus) -> dict[int, dict[str, int]]:

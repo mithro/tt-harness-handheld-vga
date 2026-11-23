@@ -14,6 +14,7 @@ from __future__ import annotations
 import struct
 import zlib
 from dataclasses import dataclass
+from itertools import pairwise
 
 import pytest
 from migen import If, Module, Signal
@@ -132,7 +133,7 @@ def _expected_frame(clocks: int) -> bytes:
 def _phases(pclk: list[int]) -> list[tuple[int, int]]:
     """(level, length) of each complete constant run of pclk between two transitions."""
     edges = [c for c in range(1, len(pclk)) if pclk[c] != pclk[c - 1]]
-    return [(pclk[a], b - a) for a, b in zip(edges, edges[1:], strict=False)]
+    return [(pclk[a], b - a) for a, b in pairwise(edges)]
 
 
 def _rises(pclk: list[int]) -> list[int]:
