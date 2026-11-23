@@ -48,7 +48,7 @@ simulated with a QSPI pin map.
 
 ## Shared manifest
 
-Both FPGA harness projects (this one and `tt-vga-fpga-harness` for the iCE40 boards) take
+Both FPGA harness projects (this one and `tt-harness-fpga-vga` for the iCE40 boards) take
 their per-project inputs from the same files rather than fetching independently:
 
 - `data/targets.json` (key `targets`): repo, commit, top_module, source_files, pinout,
@@ -69,22 +69,14 @@ their per-project inputs from the same files rather than fetching independently:
   design once they exist.
 - Fetch logic: `ttvga/harness/job.py` (shallow fetch of the commit, then apply the patch).
 
-## Shared frame code (working arrangement, 2026-11-23)
+## What is shared between the projects (as of 2026-11-23)
 
-Agreed between the three projects' sessions; each project's design is still subject to the
-owner's approval.
-
-- [`vgacap`](https://github.com/mithro/vgacap) owns the capture stream format
-  (`include/vgacap/stream.h`, `python/vgacap/stream.py`: the 8-bit `uo_out` value per
-  project clock, in `RAW `/`RLE ` chunks) and the frame reconstructor (`libvgaframe`). A
-  per-frame hash using the testbench's definition, and a "frames and hashes from a stream"
-  entry point, are to be added there by the `tt-harness-fpga-vga` project.
-- `tt-harness-fpga-vga` owns the reference files (`reference/<shuttle>/<macro>.json`) and
-  the verdict logic. Its reference simulation writes a vgacap stream too, so one frame
-  cutter serves simulation and every board.
-- This project's Arty build emits a vgacap stream of `uo_out`, sampled inside the FPGA from
-  the first reset clock, with `ui_in` and reset pinned to the reference's values. It does
-  not hash in RTL, and comparison is not part of the Game Bub build at all.
+The arrangement changed during the day; the current one is in the design document under
+"Sharing and dependencies". In short: comparison is per clock against a raw `uo_out`
+dump, so no project depends on another's frame cutter or hash. `tt-harness-fpga-vga`
+keeps its own frame cutter and hash and publishes written definitions
+(`docs/frame-definition.md` and the `reference.json` schema in that repository).
+`vgacap` owns the capture stream format and a shared capture RTL library (`vgacap/rtl/`).
 
 Lessons from capturing real boards (from the `tt-vga-capture` project):
 
@@ -108,7 +100,7 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
   `data/results/<shuttle>/<macro>/result.json` with `frame_hashes_count`; the full lists
   exist only in the pipeline's private scratch directories. Reference hashes therefore
   have to be recomputed by re-running the testbench with the same stimulus. The
-  `tt-vga-fpga-harness` project plans to do this, and the result should be shared between
+  `tt-harness-fpga-vga` project plans to do this, and the result should be shared between
   the two harness projects.
 - Reset stimulus in the reference: `ena=1`, `rst_n=0` for 10 clocks with `ui_in` already
   set.

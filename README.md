@@ -17,8 +17,9 @@ browser:
 | Audio Pmod on `uio[7]` | the console's speaker / headphones |
 | 7-segment display on `uo_out` | a virtual 7-segment display drawn on screen |
 
-The Tiny Tapeout design sits in a reconfigurable region so the harness and the demos can be
-built separately, and a small RISC-V SoC in the harness (LiteX) handles management.
+A small RISC-V SoC in the harness (LiteX) handles management. In the first stage each
+bitstream contains the harness and one design built together; a later stage puts the design
+in a reconfigurable region so harness and demos can be built and loaded separately.
 
 ## Targets
 
