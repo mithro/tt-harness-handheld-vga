@@ -261,9 +261,28 @@ is a read-only survey of which boards are live. Compare mode needs only JTAG and
 UART. Use at most two boards, one run at a time per board, a claim file per board in
 `~/github/TinyTapeout/tmp/board-claims/`, and stop if `status.json` shows another client.
 
-### Dependencies on other projects
+### Sharing and dependencies
 
-No code is imported from any sibling project to build the harness or to reach a verdict.
+Two instructions from the owner pull against each other and both apply: functionality
+that can be shared and reused is a good target, and a complicated dependency tree between
+projects is not. The rule used here: **share by making small, self-contained pieces with
+a written interface, and depend on at most a leaf.**
+
+What this project offers for reuse:
+
+- Each core block (reference-stimulus sequencer, gamepad emulator, VGA capture, 7-segment
+  sampler, audio filter) is a self-contained module with a documented port list and its
+  own tests, usable without the rest of the harness or the SoC. Blocks likely to be
+  useful outside LiteX (the sampler, the gamepad emulator, the stimulus sequencer) are
+  plain Verilog so the iCE40 harness and others can take them.
+- The sampler goes to `vgacap/rtl/`, the shared capture library.
+- The host-side recorder output is the shared per-clock dump and vgacap stream formats,
+  so other projects' tools can read it.
+
+What this project takes from others:
+
+No code is imported from a sibling project to build the Game Bub harness or to reach a
+verdict. Where a shared piece already exists and is a leaf, it is used rather than rewritten.
 
 - **Data, read as files:** the shared manifest (`data/targets.json` and compiled
   overrides from a `tinytapeout-vga-videos` checkout) and, when they exist, the reference
