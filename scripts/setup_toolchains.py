@@ -74,7 +74,9 @@ OSS_CAD_SUITE_URL = (
     "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/"
     f"{OSS_CAD_SUITE_DATE}/oss-cad-suite-linux-x64-{OSS_CAD_SUITE_DATE.replace('-', '')}.tgz"
 )
-OSS_CAD_SUITE_SHA256 = "2aad704349a323e3669e3df73ec893d96fd87c1fc7ef70889e0b0c6a841a0097"  # upstream
+OSS_CAD_SUITE_SHA256 = (
+    "2aad704349a323e3669e3df73ec893d96fd87c1fc7ef70889e0b0c6a841a0097"  # upstream
+)
 
 OPENXC7_VERSION = "0.8.2"
 OPENXC7_URL = (
@@ -87,14 +89,14 @@ OPENXC7_SHA256 = "6b2e07ce99ef33d3a4e41e2fd2eb916f26bb0ece34a97216ed840a0032e985
 CHIPDB_PARTS = ["xc7a35tcsg324-1", "xc7a100tcsg324-1"]
 
 MICROMAMBA_VERSION = "2.10.0-0"
-MICROMAMBA_URL = (
-    f"https://github.com/mamba-org/micromamba-releases/releases/download/{MICROMAMBA_VERSION}/micromamba-linux-64"
-)
+MICROMAMBA_URL = f"https://github.com/mamba-org/micromamba-releases/releases/download/{MICROMAMBA_VERSION}/micromamba-linux-64"
 MICROMAMBA_SHA256 = "701f39c06f8e6a670a0e186c8479b9e5c0502a2f0cda6cef65d83bdd2875e8bd"  # upstream
 
 # F4PGA: the conda environment and arch-defs pins come from f4pga-examples.
 F4PGA_EXAMPLES_COMMIT = "13f11197b33dae1cde3bf146f317d63f0134eacf"
-F4PGA_EXAMPLES_RAW = f"https://raw.githubusercontent.com/chipsalliance/f4pga-examples/{F4PGA_EXAMPLES_COMMIT}"
+F4PGA_EXAMPLES_RAW = (
+    f"https://raw.githubusercontent.com/chipsalliance/f4pga-examples/{F4PGA_EXAMPLES_COMMIT}"
+)
 F4PGA_EXAMPLES_FILES = {  # recorded
     "xc7/environment.yml": "71903fcca045ce27d46e8c07fd915c330ba4e2b05735af3caed71caae133f8b6",
     "xc7/requirements.txt": "a5652d518d6f90251187e019b91ebf22d201290dfdfd315d50f759d61e629ad3",
@@ -135,7 +137,9 @@ def tool_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def run(cmd: list[str], logname: str, env: dict[str, str] | None = None, cwd: Path | None = None) -> None:
+def run(
+    cmd: list[str], logname: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> None:
     """Run a command with all output appended to a log file; raise on failure."""
     LOGS.mkdir(parents=True, exist_ok=True)
     logfile = LOGS / logname
@@ -144,7 +148,9 @@ def run(cmd: list[str], logname: str, env: dict[str, str] | None = None, cwd: Pa
     with open(logfile, "a") as lf:
         lf.write(f"\n$ {' '.join(str(c) for c in cmd)}\n")
         lf.flush()
-        result = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env or tool_env(), cwd=cwd)
+        result = subprocess.run(
+            cmd, check=False, stdout=lf, stderr=subprocess.STDOUT, env=env or tool_env(), cwd=cwd
+        )
     if result.returncode != 0:
         raise SystemExit(f"ERROR: command failed with exit code {result.returncode}; see {logfile}")
 
@@ -173,7 +179,9 @@ def download(url: str, dest: Path, sha256: str | None) -> Path:
     if sha256 is None:
         log(f"    sha256 {actual} (NOT PINNED)")
     elif actual != sha256:
-        raise SystemExit(f"ERROR: checksum mismatch for {dest}\n  expected {sha256}\n  actual   {actual}")
+        raise SystemExit(
+            f"ERROR: checksum mismatch for {dest}\n  expected {sha256}\n  actual   {actual}"
+        )
     else:
         log(f"    sha256 ok ({dest.stat().st_size // (1 << 20)} MiB)")
     return dest
@@ -239,7 +247,9 @@ def install_oss_cad_suite() -> None:
     install_dir = TOOLCHAINS / "oss-cad-suite"
     if installed(install_dir, OSS_CAD_SUITE_URL):
         return
-    tarball = download(OSS_CAD_SUITE_URL, CACHE / OSS_CAD_SUITE_URL.rsplit("/", 1)[1], OSS_CAD_SUITE_SHA256)
+    tarball = download(
+        OSS_CAD_SUITE_URL, CACHE / OSS_CAD_SUITE_URL.rsplit("/", 1)[1], OSS_CAD_SUITE_SHA256
+    )
     if install_dir.exists():
         shutil.rmtree(install_dir)
     log(f"  Extracting to {install_dir}")
@@ -289,7 +299,10 @@ def install_openxc7() -> None:
         raise SystemExit("ERROR: unsquashfs not found (Debian package: squashfs-tools)")
     snap = download(OPENXC7_URL, CACHE / OPENXC7_URL.rsplit("/", 1)[1], OPENXC7_SHA256)
     fresh_dir(install_dir)
-    run(["unsquashfs", "-n", "-f", "-d", str(install_dir / "squashfs-root"), str(snap)], "openxc7-unsquashfs.log")
+    run(
+        ["unsquashfs", "-n", "-f", "-d", str(install_dir / "squashfs-root"), str(snap)],
+        "openxc7-unsquashfs.log",
+    )
     bin_dir = install_dir / "bin"
     bin_dir.mkdir()
     for tool in OPENXC7_NATIVE_TOOLS:
@@ -318,16 +331,28 @@ def build_one_chipdb(part: str) -> str:
     cmds = [
         # bbaexport.py only needs the standard library, so it runs under the
         # interpreter running this script.  -u keeps its progress in the log.
-        [sys.executable, "-u", str(nextpnr_root / "python" / "bbaexport.py"), "--device", part, "--bba", str(bba)],
+        [
+            sys.executable,
+            "-u",
+            str(nextpnr_root / "python" / "bbaexport.py"),
+            "--device",
+            part,
+            "--bba",
+            str(bba),
+        ],
         [str(openxc7 / "bin" / "bbasm"), "-l", str(bba), str(bin_tmp)],
     ]
     with open(logfile, "a") as lf:
         for cmd in cmds:
             lf.write(f"\n$ {' '.join(cmd)}\n")
             lf.flush()
-            result = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, env=tool_env())
+            result = subprocess.run(
+                cmd, check=False, stdout=lf, stderr=subprocess.STDOUT, env=tool_env()
+            )
             if result.returncode != 0:
-                raise RuntimeError(f"chipdb build for {part} failed (exit {result.returncode}); see {logfile}")
+                raise RuntimeError(
+                    f"chipdb build for {part} failed (exit {result.returncode}); see {logfile}"
+                )
     final = chipdb_dir / f"{part}.bin"
     bin_tmp.replace(final)
     shutil.rmtree(work)
@@ -387,14 +412,23 @@ def install_f4pga() -> None:
 
     micromamba = root / "bin" / "micromamba"
     micromamba.parent.mkdir()
-    shutil.copy(download(MICROMAMBA_URL, CACHE / f"micromamba-{MICROMAMBA_VERSION}-linux-64", MICROMAMBA_SHA256), micromamba)
+    shutil.copy(
+        download(
+            MICROMAMBA_URL, CACHE / f"micromamba-{MICROMAMBA_VERSION}-linux-64", MICROMAMBA_SHA256
+        ),
+        micromamba,
+    )
     micromamba.chmod(0o755)
 
     # Environment definition, kept in its upstream directory layout because
     # xc7/requirements.txt includes ../common/requirements.txt.
     envdef = root / "f4pga-examples"
     for rel, sha in F4PGA_EXAMPLES_FILES.items():
-        cached = download(f"{F4PGA_EXAMPLES_RAW}/{rel}", CACHE / "f4pga-examples" / F4PGA_EXAMPLES_COMMIT / rel, sha)
+        cached = download(
+            f"{F4PGA_EXAMPLES_RAW}/{rel}",
+            CACHE / "f4pga-examples" / F4PGA_EXAMPLES_COMMIT / rel,
+            sha,
+        )
         (envdef / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(cached, envdef / rel)
 
@@ -406,10 +440,16 @@ def install_f4pga() -> None:
     # docs/toolchains.md.
     run(
         [
-            str(micromamba), "create", "--yes", "--no-rc",
-            "--name", F4PGA_ENV_NAME,
-            "--file", str(envdef / "xc7" / "environment.yml"),
-            "--channel", "conda-forge",
+            str(micromamba),
+            "create",
+            "--yes",
+            "--no-rc",
+            "--name",
+            F4PGA_ENV_NAME,
+            "--file",
+            str(envdef / "xc7" / "environment.yml"),
+            "--channel",
+            "conda-forge",
         ],
         "f4pga-conda.log",
         env=env,
@@ -434,8 +474,16 @@ COMPONENTS = [*DEFAULT_COMPONENTS, "f4pga"]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--only", nargs="+", choices=COMPONENTS, default=DEFAULT_COMPONENTS, help="components to install")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        choices=COMPONENTS,
+        default=DEFAULT_COMPONENTS,
+        help="components to install",
+    )
     parser.add_argument("--jobs", type=int, default=2, help="parallel chipdb builds (default: 2)")
     args = parser.parse_args()
 
