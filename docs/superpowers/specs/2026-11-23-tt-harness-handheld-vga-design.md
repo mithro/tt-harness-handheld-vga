@@ -180,7 +180,13 @@ A Python package using LiteX/Migen, in three layers:
   `ui_in` already set), runs the steps, and after `duration_ms` resets and starts again.
 - `demo.json` is the existing version 1 format, unchanged, with exactly one project.
   More than one project, unknown fields, or a project that does not match the one built
-  in are loud failures at build time and again at boot.
+  in are loud failures at build time and again at boot. Validation mirrors the demo
+  configurator's validator (`tt-demo-configurator/src/lib/demoFile.ts`).
+- The project is identified by `shuttle` plus `address`, resolved to a macro, repository
+  and commit through the shared manifest.
+- The project clock is `demo.json`'s `clock_hz`; the manifest's value is not consulted.
+  A `clock_hz` of 0 is a loud build failure *(my call)*: the file is the one place the
+  clock is stated, and guessing would silently run a design at the wrong speed.
 - Scripted gamepad presses are added when the shared `demo.json` format gains them; this
   project does not define its own syntax.
 
@@ -198,20 +204,58 @@ A Python package using LiteX/Migen, in three layers:
 
 ### Arty board layer
 
-- Recorder: `uo_out` per project clock from the first reset clock, stored as raw bytes
-  in the DDR3 (256 MB holds about ten seconds at 25 MHz, the length of the shortest
-  reference clip), then sent to the Pi. Raw storage is used because a busy design changes
-  most pixels, which makes run-length pairs larger than the samples themselves.
-- The host turns the buffer into a vgacap stream: `VGCH` header in external-clock mode,
-  `RAW ` or `RLE ` chunks, and a `TIME` chunk with the cumulative dropped count and
-  message `overrun` if samples were ever lost.
-- The sampler itself is plain Verilog with no vendor primitives. The capture project has
-  proposed that it live in `vgacap/rtl/` as a shared capture library with this project's
-  sampler as the first contribution; the LiteX wrapper stays here.
-- Transport to the Pi: Ethernet where it works on both toolchains, with the UART as the
-  fallback for short captures. *(Builder's call.)*
-- A host-side script on the Pi loads the bitstream, collects the stream and hands it to
-  the frame code for a verdict.
+The Arty build has two modes, chosen at build time.
+
+**Demo mode** is the same as Game Bub without the screen and sound: the firmware runs
+`demo.json`, the gamepad emulator runs, and the UART console reports state. It exists so
+the firmware and gamepad paths can be exercised on a board.
+
+**Compare mode** reproduces the reference simulation's stimulus exactly and records the
+result:
+
+- The stimulus is the reference's, not `demo.json`'s: `ui_in` and `uio_in` held at the
+  reference's fixed values, the gamepad emulator off, `ena=1`, `rst_n=0` for 10 project
+  clocks, applied by a small RTL sequencer so it is exact to the clock. The reference
+  keeps the first 8 frames from reset; compare mode records the same span.
+- The recorder samples `uo_out` on every project clock from the first reset clock and
+  sends the bytes to the host over the UART.
+- **The project clock is gated by the recorder's FIFO** *(my call)*: when the FIFO is
+  nearly full the project's clock stops, and it resumes when there is room. A Tiny
+  Tapeout project is fully synchronous, so its outputs per clock are the same at any
+  speed. This gives a complete, gap-free record of any length with no DDR3 and no
+  Ethernet, which removes the two largest openXC7 risks from stage 1. Eight frames are
+  about 3.4 MB, roughly half a minute at 1 Mbaud.
+- What this does and does not show: compare mode proves the project computes the right
+  pixels on the FPGA. It does not exercise the project at full speed; that rests on the
+  toolchain's timing report for the project clock, which the build checks and records.
+  An at-speed recorder using the DDR3 is a possible later addition.
+- The host turns the bytes into a vgacap stream: `VGCH` header in external-clock mode
+  and `RAW ` chunks (`samples_per_word=4`, first-sample-MSB flag, as the RP2350 capture
+  writes). No samples can be lost, so no `TIME` overrun chunk is expected; a UART framing
+  or length error makes the run inconclusive.
+- The sampler itself is plain Verilog with no vendor primitives and is contributed to
+  `vgacap/rtl/` as the first piece of a shared capture library, by a reviewed change on a
+  branch in the local `vgacap` checkout (agreed with the capture project, which owns the
+  run-length encoder). The clock gate, FIFO and UART framing are LiteX/Migen in this repo.
+- A host-side script loads the bitstream, collects the bytes, writes the stream and
+  produces a verdict.
+
+**Reference until the shared one exists** *(my call)*: `tt-harness-fpga-vga` has not yet
+produced reference files or verdict code, and `vgacap` has no frame hash yet. This
+project does not wait. Its own Verilator simulation of the same project under the same
+stimulus writes a vgacap stream, both streams are cut into frames by `vgacap`'s existing
+`libvgaframe`, and the frames are compared pixel for pixel. When the shared reference
+files and hash land, the comparison switches to them and the local reference remains as
+a cross-check.
+
+**Boards.** The Welland Arty A7-35T boards are on Raspberry Pi 4 hosts reached through
+`tweed.welland.mithis.com`, loaded with `openFPGALoader -b arty`, UART on
+`/dev/ttyUSB1`; see `docs/hardware/site-welland.md`, `docs/verify-hardware.md` and
+`docs/hardware/rpi-hat-pmod.md` in `fpgas.online-test-designs`, and docs.fpgas.online.
+Those documents are from October 2026 and ports have moved since, so the first Arty task
+is a read-only survey of which boards are live. Compare mode needs only JTAG and the
+UART. Use at most two boards, one run at a time per board, a claim file per board in
+`~/github/TinyTapeout/tmp/board-claims/`, and stop if `status.json` shows another client.
 
 ### Dependencies on other projects
 
@@ -234,8 +278,9 @@ Kept to one code dependency and two data formats:
   tested against the real `gamepad_pmod` receiver; the QSPI slave against a model of the
   firmware's transactions; and the whole core is simulated with real pool designs, with
   captured frames compared to the reference.
-- **Arty hardware**: the eight pool designs, both toolchains, compared by the shared
-  verdict logic. A frame with missing samples is inconclusive, never a mismatch.
+- **Arty hardware**: the eight pool designs, both toolchains, in compare mode. A run
+  with missing or malformed data is inconclusive, never a mismatch. The firmware and
+  gamepad paths are exercised in demo mode and checked over the UART.
 - **Game Bub**: bitstreams and core packages build on both toolchains and pass
   simulation. Anything not run on a real unit is labelled unverified in the docs.
 - **Sweep**: every design with a usable reference and no external-hardware dependency,
@@ -284,5 +329,7 @@ Steps 2 to 4 and step 6 can overlap.
 - Whether stock firmware accepts a core implementing only the minimal protocol, and what
   the Home button and overlay do with it.
 - Real QSPI throughput.
-- Whether LiteX's DDR3 and Ethernet cores meet timing on Arty with openXC7.
+- Which Welland Arty boards are currently live.
+- Whether nextpnr-xilinx handles the gated project clock (BUFGCE) and the project-clock
+  MMCM as LiteX emits them.
 - Whether the reference testbench and `libvgaframe` cut frames at identical pixels.
