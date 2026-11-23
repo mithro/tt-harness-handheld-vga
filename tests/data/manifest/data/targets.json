@@ -1,0 +1,60 @@
+{
+  "targets": [
+    {
+      "id": "tt07/tt_um_tinytapeout_dvd_screensaver",
+      "shuttle": "tt07",
+      "macro": "tt_um_tinytapeout_dvd_screensaver",
+      "address": "130",
+      "repo": "https://github.com/TinyTapeout/tt07-dvd-screensaver",
+      "commit": "3c59c2f366595854edc1f8a9477f8304e6eaf832",
+      "top_module": "tt_um_tinytapeout_dvd_screensaver",
+      "source_files": [
+        "tt_um_tinytapeout_dvd_screensaver.v",
+        "bitmap_rom.v",
+        "vga_sync_generator.v",
+        "palette.v"
+      ],
+      "clock_hz": 25175000,
+      "pmods": [
+        "tiny-vga"
+      ]
+    },
+    {
+      "id": "ttihp26a/tt_um_urish_rings",
+      "shuttle": "ttihp26a",
+      "macro": "tt_um_urish_rings",
+      "address": "366",
+      "repo": "https://github.com/urish/tt-rings",
+      "commit": "d8bf0a3e1c049adfc136ede790e4ff8c02a8f59c",
+      "top_module": "tt_um_urish_rings",
+      "source_files": [
+        "project.v",
+        "hvsync_generator.v"
+      ],
+      "clock_hz": 0,
+      "pmods": [
+        "tiny-vga"
+      ]
+    },
+    {
+      "id": "tt06/tt_um_toivoh_retro_console",
+      "shuttle": "tt06",
+      "macro": "tt_um_toivoh_retro_console",
+      "address": "458",
+      "repo": "https://github.com/toivoh/tt06-retro-console",
+      "commit": "0ba2cb6a3082c664f4839961a3639472d2e525c6",
+      "top_module": "tt_um_toivoh_retro_console",
+      "source_files": [
+        "project.v",
+        "ppu.v",
+        "anemonesynth.v",
+        "sb_io.v"
+      ],
+      "clock_hz": 50350000,
+      "pmods": [
+        "tiny-vga",
+        "uart-pmod"
+      ]
+    }
+  ]
+}
