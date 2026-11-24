@@ -99,7 +99,8 @@ def feedback_source(bitstream: Path) -> str:
     """What the bitstream connects to the MMCM's CLKFBIN (the source of the mux's set pip).
 
     `CMT_LR_LOWER_B_CLKFBOUT2IN` is the MMCM's own CLKFBOUT, the dedicated feedback;
-    `CMT_L_LOWER_B_CLK_IN3_INT` is a pin of the fabric interconnect. Needs `programmed_mmcm`
+    `CMT_L_LOWER_B_CLK_IN3_INT` is a pin of the fabric interconnect, which nextpnr-xilinx
+    0.8.2 ties to VCC (the MMCM then never locks). Needs `programmed_mmcm`
     to have decoded the bitstream.
     """
     fasm = bitstream.with_suffix(".decoded.fasm").read_text()
@@ -123,8 +124,9 @@ for name, cell in ctx.cells:
 def rewrite_feedback(job: cb.Build) -> None:
     """Rewrite an open-flow build's FASM so CLKFBIN takes CLKFBOUT, and remake the bitstream.
 
-    nextpnr-xilinx 0.8.2 disconnects CLKFBIN of an MMCM with COMPENSATION="INTERNAL" and
-    feeds the pin from the fabric interconnect, where Vivado selects the dedicated
+    nextpnr-xilinx 0.8.2 takes CLKFBIN of an MMCM whose COMPENSATION is "INTERNAL" (or
+    absent) off its net and ties it to VCC through the fabric interconnect
+    (`xilinx/pack_clocking_xc7.cc`, lines 98 to 104), where Vivado selects the dedicated
     CLKFBOUT-to-CLKFBIN connection. This edits that one multiplexer in the FASM (and drops
     the interconnect pip that fed it) and runs `fasm2frames` and `xc7frames2bit` again.
     """

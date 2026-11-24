@@ -6,8 +6,8 @@ BUFG, gated BUFGCE) at an MMCM setting given at build time, and in the oscillato
 
 - `F`: a `FreqMeter` on the free-running BUFG output, 1 s gate (100,000,000 oscillator cycles);
 - `G`: a second `FreqMeter` on the gated BUFGCE output, same gate. `ProjectClock` enables that
-  buffer with `enable & locked` (enable is tied high here), so G equals F only if the clock
-  was enabled for the whole gate;
+  buffer with `enable & locked` (enable is tied high here), so G is within a count of F only
+  if the clock was enabled for the whole gate. One `Gate` is shared by the three meters;
 - `H`: a `HighTimeMeter` on a replica of the free-running clock's waveform, the number of
   oscillator cycles in the gate at which the clock was high (see "Duty cycle" below);
 - `L`, `U`: LOCKED through a synchroniser, and a saturating count of its falling edges since
