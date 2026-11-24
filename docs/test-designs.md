@@ -106,8 +106,10 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
   14695981039346656037 (0xcbf29ce484222325). A standard FNV-1a over the correct pixels
   mismatches every line. Reported by the `tt-harness-fpga-vga` project on 2026-11-23,
   which reproduced the published hashes exactly using the mistyped basis, so the pixels
-  agree. Whether the constant or the file header gets fixed is the videos project's
-  call; check which before comparing. The videos testbench's clock counter is the
+  agree. Resolved on 2026-11-24: the videos project kept the
+  hashes and documented the constant. Each `frame_hashes.txt` now carries a
+  `hash_offset_basis` line (0x14650fb0739d0383); pass that value to the FNV routine when
+  comparing. Pushed to `mithro/tinytapeout-vga-videos` main (148ccf5..87cea85). The videos testbench's clock counter is the
   per-clock sample index plus 1.
 - `tt-harness-fpga-vga`'s own reference files use standard FNV-1a 64. Its
   `reference.json` schema is settling: id, clock_hz, clock_declared, reset_clocks, ui_in,
