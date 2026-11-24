@@ -11,6 +11,7 @@ The findings are written up in docs/results/2026-11-spike-b-project-clock.md.
 
 from __future__ import annotations
 
+import functools
 import re
 from pathlib import Path
 
@@ -46,16 +47,28 @@ def _frac_eighths(value: float) -> int:
     return round((value - int(value)) * 8)
 
 
-@pytest.fixture(scope="module", params=BOARDS)
-def open_job(request) -> cb.Build:
+@functools.cache
+def _open(name: str) -> cb.Build:
+    board = cb.BOARDS[name]
     _need_open()
-    return cb.openxc7_build(request.param, BUILD / f"{request.param.name}-openxc7")
+    return cb.openxc7_build(board, BUILD / f"{board.name}-openxc7")
 
 
-@pytest.fixture(scope="module", params=BOARDS)
-def vivado_job(request) -> cb.Build:
+@functools.cache
+def _vivado(name: str) -> cb.Build:
+    board = cb.BOARDS[name]
     _need_vivado()
-    return cb.vivado_build(request.param, BUILD / f"{request.param.name}-vivado")
+    return cb.vivado_build(board, BUILD / f"{board.name}-vivado")
+
+
+@pytest.fixture(params=BOARDS)
+def open_job(request) -> cb.Build:
+    return _open(request.param.name)
+
+
+@pytest.fixture(params=BOARDS)
+def vivado_job(request) -> cb.Build:
+    return _vivado(request.param.name)
 
 
 # Settings ----------------------------------------------------------------------------------
@@ -170,3 +183,40 @@ def test_vivado_gamebub_button_pullups(vivado_job: cb.Build) -> None:
         assert len(pulled) == 12
     else:
         assert pulled == []
+
+
+# Open flow against Vivado -------------------------------------------------------------------
+
+# What differs between the two flows' encodings of CLKOUT0_DIVIDE_F = 35.75 (an odd integer
+# part with a fraction), decoded back from the bitstreams with bit2fasm: field -> (open, vivado).
+# The fraction itself (FRAC, FRAC_EN) is identical; the integer counter and the waveform
+# fields are not. Even integer parts (36.75) and a fractional CLKFBOUT_MULT_F encode
+# identically. Which encoding is right on silicon is not known without hardware: see
+# docs/results/2026-11-spike-b-project-clock.md.
+KNOWN_DIFFERENCES = {
+    "CLKOUT0_CLKOUT1_HIGH_TIME": (16, 17),
+    "CLKOUT0_CLKOUT2_FRAC_WF_R": (1, 0),
+    "CLKOUT5_CLKOUT2_FRACTIONAL_FRAC_WF_F": (1, 0),
+    "CLKOUT5_CLKOUT2_FRACTIONAL_PHASE_MUX_F": (3, 7),
+    "CLKOUT5_CLKOUT2_FRACTIONAL_NO_COUNT": (0, 1),
+}
+
+
+@pytest.mark.toolchain
+@pytest.mark.vivado
+def test_open_and_vivado_encode_the_fractional_divider_differently() -> None:
+    board = cb.GAMEBUB
+    jobs = {"open": _open(board.name), "vivado": _vivado(board.name)}
+    decoded = {}
+    for tag, job in jobs.items():
+        out = BUILD / f"{board.name}-{tag}.decoded.fasm"
+        cb.decode_bitstream(job.bitstream, board.parts[job.toolchain], out)
+        decoded[tag] = cb.mmcm_values(out.read_text())
+    keys = sorted(set(decoded["open"]) | set(decoded["vivado"]))
+    diff = {
+        k: (decoded["open"].get(k, 0), decoded["vivado"].get(k, 0))
+        for k in keys
+        if decoded["open"].get(k, 0) != decoded["vivado"].get(k, 0)
+    }
+    assert diff == KNOWN_DIFFERENCES
+    assert decoded["open"]["CLKOUT0_CLKOUT2_FRAC"] == decoded["vivado"]["CLKOUT0_CLKOUT2_FRAC"] == 6

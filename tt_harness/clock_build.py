@@ -589,3 +589,26 @@ def decode_bitstream(bit: Path, part: str, out: Path) -> Path:
 def generate_setting(board: Board) -> MmcmSetting:
     """The MMCM setting the design uses on `board`."""
     return solve(board.clk_hz, CLOCK_HZ)
+
+
+def mmcm_values(fasm: str) -> dict[str, int]:
+    """MMCME2_ADV features as integers: the bit slices of one field are summed
+    (`FIELD[3:0] = ..`, `FIELD[2]` and `FIELD` all add into `FIELD`), so differently sliced
+    encodings of the same value compare equal."""
+    out: dict[str, int] = {}
+    for line in fasm.splitlines():
+        if ".MMCME2_ADV." not in line:
+            continue
+        name = line.split(".MMCME2_ADV.")[1].strip()
+        m = re.match(r"(\w+?)(?:\[(\d+)(?::(\d+))?\])?(?: = \d+'b(\w+))?$", name)
+        if m is None:
+            raise ValueError(f"cannot read FASM line {line!r}")
+        base, hi, lo, val = m.groups()
+        if val is not None:
+            v = int(val, 2) << int(lo)
+        elif hi is not None:
+            v = 1 << int(hi)
+        else:
+            v = 1
+        out[base] = out.get(base, 0) + v
+    return out
