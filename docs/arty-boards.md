@@ -86,3 +86,19 @@ key, no password needed) found:
   and for processes holding the serial ports before each use.
 
 pi7 is the first choice for test runs.
+
+### Deciding whether a board is in use
+
+A login is not evidence of use: sessions stay open when nobody is active (owner's
+instruction, 2026-11-24). Before treating a board as busy, look for activity:
+
+- `w` for each session's idle time, and the last-activity time of each terminal
+  (`stat -c %y /dev/pts/N`);
+- processes holding the serial ports or running `openFPGALoader`, `picocom`, `tio`;
+- how recently anything changed in the home directory.
+
+Rechecked this way, pi3's other session turned out to be idle: opened three minutes after
+the host booted, a `tmux` session with a bare shell, no terminal activity in the three
+hours since, and nothing holding the serial ports. pi3 is therefore usable too. If a
+session shows activity within the last several minutes, or a tool is running, leave the
+board alone and use another.
