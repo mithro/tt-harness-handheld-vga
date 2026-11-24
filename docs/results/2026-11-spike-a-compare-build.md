@@ -286,3 +286,125 @@ $flatten\project.$<repo>/work/sources/ttihp0p3/tt_um_algofoogle_fun_vga_clock/7c
 | `gamepad_pmod_demo` | Vivado | 0 | none |
 | `2048_vga_game` | openXC7 | 2 | none |
 | `2048_vga_game` | Vivado | 0 | none |
+
+## Timing per domain
+
+Every domain and clock pair of every successful build, as `BuildResult.timing` has it.
+Read it with "What "timing met" means": the same word covers different checks in the two
+toolchains.
+
+- `kind`: `sys`, `pclk`, `project` (a clock the project makes) or `cross` (a clock pair).
+- `root_kind`, for a project clock: `register`, `derived` or `unclassified`.
+- "Requirement" for a clock pair is the setup requirement (Vivado) or the harness budget
+  the data-path delay was checked against (openXC7). For a clock it is the requirement of
+  its worst path.
+- "Achieved MHz" is the rate the clock could run at with its worst setup path just closing.
+  For `pclk` it is a figure for the compare build's stepped clock. It is some indication
+  of the design's speed in this FPGA, and no more: the path from the design's outputs is to
+  the recorder, not to pins, and the inputs are constants.
+- openXC7 has no hold figures ("n/a"). Vivado's `(async_default)` row is its recovery and
+  removal check of the reset from `sys` into a project-clock domain, for which the build
+  reads no requirement.
+
+### `tt07/tt_um_tinytapeout_dvd_screensaver`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | `pclk` | pclk | - | yes | no | 16.67 | 106.00 | 60.000 | 50.554 | n/a | met |
+| openXC7 | `pclk->sys` | cross | - | yes | no | - | - | 10.000 | 9.090 | n/a | met |
+| openXC7 | `sys` | sys | - | yes | no | 100.00 | 221.68 | 10.000 | 5.489 | n/a | met |
+| openXC7 | `sys->pclk` | cross | - | yes | no | - | - | 10.000 | 4.320 | n/a | met |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 96.14 | 60.000 | 49.598 | 0.234 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 14.954 | 1.180 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 211.42 | 10.000 | 5.270 | 0.187 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 16.909 | 8.024 | met |
+
+### `tt08/tt_um_tinytapeout_logo_screensaver`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | `pclk` | pclk | - | yes | no | 16.67 | 96.28 | 60.000 | 49.602 | n/a | met |
+| openXC7 | `pclk->sys` | cross | - | yes | no | - | - | 10.000 | 9.080 | n/a | met |
+| openXC7 | `sys` | sys | - | yes | no | 100.00 | 203.87 | 10.000 | 5.095 | n/a | met |
+| openXC7 | `sys->pclk` | cross | - | yes | no | - | - | 10.000 | 4.390 | n/a | met |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 89.03 | 60.000 | 48.768 | 0.192 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 15.246 | 1.053 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 232.56 | 10.000 | 5.700 | 0.168 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 17.283 | 8.317 | met |
+
+### `ttihp26a/tt_um_urish_rings`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | no timing result: failed |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 189.90 | 60.000 | 54.734 | 0.231 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 8.215 | 1.025 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 214.68 | 10.000 | 5.342 | 0.093 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 16.057 | 9.391 | met |
+| Vivado | `sys->pclk (async_default)` | cross | - | yes | no | - | - | n/a | 17.401 | 8.914 | met |
+
+### `ttihp0p3/tt_um_algofoogle_fun_vga_clock`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | no timing result: failed |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 123.26 | 60.000 | 51.887 | 0.147 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 7.792 | 1.172 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 237.76 | 10.000 | 5.794 | 0.199 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 16.015 | 7.665 | met |
+
+### `ttihp25a/tt_um_algofoogle_vga`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | no timing result: failed |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 149.34 | 60.000 | 53.304 | 0.191 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 8.685 | 1.131 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 239.75 | 10.000 | 5.829 | 0.161 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 15.571 | 8.340 | met |
+
+### `ttsky26a/tt_um_algofoogle_dottee`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | `pclk` | pclk | - | yes | no | 16.67 | 73.37 | 60.000 | 46.358 | n/a | met |
+| openXC7 | `pclk->sys` | cross | - | yes | no | - | - | 10.000 | 9.020 | n/a | met |
+| openXC7 | `project:project.uo_out[3]` | project | register | yes | no | 16.67 | 315.96 | 60.000 | 56.823 | n/a | met |
+| openXC7 | `project:project.uo_out[3]->pclk` | cross | - | yes | no | - | - | 50.000 | 36.680 | n/a | met |
+| openXC7 | `sys` | sys | - | yes | no | 100.00 | 216.78 | 10.000 | 5.387 | n/a | met |
+| openXC7 | `sys->pclk` | cross | - | yes | no | - | - | 10.000 | 5.570 | n/a | met |
+| openXC7 | `sys->project:project.uo_out[3]` | cross | - | yes | no | - | - | 10.000 | 5.240 | n/a | met |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 72.90 | 60.000 | 46.283 | 0.167 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 15.699 | 1.010 | met |
+| Vivado | `project:project/hvsync_gen/vsync_reg/Q` | project | register | yes | no | 8.33 | 442.67 | 120.000 | 117.741 | 0.292 | met |
+| Vivado | `project:project/hvsync_gen/vsync_reg/Q->pclk` | cross | - | yes | no | - | - | 60.000 | 44.255 | 0.523 | met |
+| Vivado | `project:project/hvsync_gen/vsync_reg/Q->sys` | cross | - | yes | no | - | - | 20.000 | 15.087 | 1.399 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 237.47 | 10.000 | 5.789 | 0.121 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 16.758 | 8.448 | met |
+| Vivado | `sys->project:project/hvsync_gen/vsync_reg/Q (async_default)` | cross | - | yes | no | - | - | n/a | 18.795 | 8.016 | met |
+
+### `ttsky25a/tt_um_gamepad_pmod_demo`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | `pclk` | pclk | - | yes | no | 16.67 | 91.33 | 60.000 | 49.039 | n/a | met |
+| openXC7 | `pclk->sys` | cross | - | yes | no | - | - | 10.000 | 9.020 | n/a | met |
+| openXC7 | `sys` | sys | - | yes | no | 100.00 | 176.34 | 10.000 | 4.329 | n/a | met |
+| openXC7 | `sys->pclk` | cross | - | yes | no | - | - | 10.000 | 4.920 | n/a | met |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 181.98 | 60.000 | 54.505 | 0.167 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 15.630 | 0.950 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 238.04 | 10.000 | 5.799 | 0.132 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 17.031 | 8.757 | met |
+
+### `ttihp25a/tt_um_2048_vga_game`
+
+| Toolchain | Domain | kind | root_kind | signed_off | half_cycle | Constraint MHz | Achieved MHz | Requirement ns | Setup slack ns | Hold slack ns | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| openXC7 | `pclk` | pclk | - | yes | no | 16.67 | 73.64 | 60.000 | 46.408 | n/a | met |
+| openXC7 | `pclk->sys` | cross | - | yes | no | - | - | 10.000 | 9.050 | n/a | met |
+| openXC7 | `sys` | sys | - | yes | no | 100.00 | 197.59 | 10.000 | 4.939 | n/a | met |
+| openXC7 | `sys->pclk` | cross | - | yes | no | - | - | 10.000 | 3.040 | n/a | met |
+| Vivado | `pclk` | pclk | - | yes | no | 16.67 | 158.40 | 60.000 | 53.687 | 0.022 | met |
+| Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 15.521 | 1.096 | met |
+| Vivado | `sys` | sys | - | yes | no | 100.00 | 217.44 | 10.000 | 5.401 | 0.118 | met |
+| Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 16.013 | 8.316 | met |
