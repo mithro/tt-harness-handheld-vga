@@ -44,7 +44,15 @@ from migen.genlib.cdc import MultiReg
 
 from tt_harness import tools, verilate
 from tt_harness.boards.gamebub import platform as gamebub_platform
-from tt_harness.build import NEXTPNR_FMAX, BuildError, TimingDomain, TimingError
+from tt_harness.build import (
+    CHIPDB,
+    NEXTPNR_FMAX,
+    PRJXRAY_DB,
+    VIVADO_CHECKS,
+    BuildError,
+    TimingDomain,
+    TimingError,
+)
 from tt_harness.core.clocking import MmcmSetting, ProjectClock, solve
 
 CLOCK_HZ = 25_175_000
@@ -53,10 +61,6 @@ TOP = "top"
 SYS_BUFG = "sys_bufg"
 STEP_TIMEOUT_S = 3600
 JOBS = 16
-
-OPENXC7 = tools.TOOLCHAINS / "openxc7"
-PRJXRAY_DB = OPENXC7 / "squashfs-root" / "opt" / "nextpnr-xilinx" / "external" / "prjxray-db"
-CHIPDB = tools.TOOLCHAINS / "chipdb"
 
 
 @dataclass(frozen=True)
@@ -431,21 +435,6 @@ _SLACK_LINE = re.compile(
     re.MULTILINE,
 )
 _VIVADO_CHECK = re.compile(r"^\d+\. checking (\w+) \((\d+)\)\s*$", re.MULTILINE)
-# check_timing items that leave part of the design untimed. no_input_delay and
-# no_output_delay concern the asynchronous buttons and the LED / test point pins, not a clock
-# domain (build.py excludes them for the same reason); their counts are reported.
-VIVADO_CHECKS = (
-    "no_clock",
-    "constant_clock",
-    "pulse_width_clock",
-    "unconstrained_internal_endpoints",
-    "multiple_clock",
-    "generated_clocks",
-    "loops",
-    "partial_input_delay",
-    "partial_output_delay",
-    "latch_loops",
-)
 
 
 def vivado_script(board: Board, out_dir: Path, top_v: Path, xdc: Path) -> Path:
