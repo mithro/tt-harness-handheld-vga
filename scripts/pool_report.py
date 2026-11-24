@@ -103,6 +103,7 @@ def builds() -> None:
                 use.get("luts"),
                 use.get("ffs"),
                 use.get("cells", {}).get("CARRY4", 0),
+                use.get("cells", {}).get("DSP48E1", 0),
                 placed,
                 f"{d['seconds']:.0f} s",
             ]
@@ -123,6 +124,7 @@ def builds() -> None:
                 "LUTs",
                 "FFs",
                 "CARRY4",
+                "DSP48E1",
                 placed_head,
                 "Time",
                 "Sources read as",
@@ -190,7 +192,7 @@ def limits() -> None:
             if d is None:
                 continue
             if not d["ok"]:
-                rows.append([_short(pid), TOOL[tc], f"build failed: {d['error']}"])
+                rows.append([_short(pid), TOOL[tc], "-", f"build failed ({d['error_kind']})"])
                 continue
             own = [x for x in d["limitations"] if x not in STANDING]
             standing = sum(1 for x in d["limitations"] if x in STANDING)

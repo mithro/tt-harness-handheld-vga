@@ -333,7 +333,17 @@ def main() -> int:
             p.add_argument("--known-hosts", type=Path, required=True)
     args = parser.parse_args()
     args.toolchain = args.toolchain or list(build.TOOLCHAINS)
-    return args.func(args)
+    # A terminal line on every path, an uncaught exception or an interrupt included, so
+    # that whoever watches the log can tell "ended" from "still running".
+    rc: int | str = "exception"
+    try:
+        rc = args.func(args)
+        return rc
+    except KeyboardInterrupt:
+        rc = "interrupted"
+        raise
+    finally:
+        _say(f"pool_run {args.command} finished rc={rc}")
 
 
 if __name__ == "__main__":
