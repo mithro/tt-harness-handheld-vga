@@ -259,8 +259,10 @@ def test_project_clock_instantiates_solver_setting(clk_in_hz, clock_hz):
     assert ports["CLKIN1"] == "clk_in"
     assert ports["CLKFBIN"] == ports["CLKFBOUT"]
     assert ports["LOCKED"] == "locked"
-    # CLKFBOUT feeds CLKFBIN directly, so compensation is internal.
-    assert params["COMPENSATION"] == '"INTERNAL"'
+    # CLKFBOUT feeds CLKFBIN directly. The compensation must be an explicit ZHOLD: with
+    # INTERNAL, or with no parameter, nextpnr-xilinx 0.8.2 ties CLKFBIN to VCC and the MMCM
+    # never locks (docs/results/2026-11-spike-b-project-clock.md).
+    assert params["COMPENSATION"] == '"ZHOLD"'
     # DRP inputs tied with their full widths, so no width-mismatch warnings.
     assert ports["DADDR"] == "7'd0"
     assert ports["DI"] == "16'd0"

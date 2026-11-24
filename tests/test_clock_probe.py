@@ -249,7 +249,7 @@ def test_generated_verilog_has_the_mmcm_parameters_asked_for(name: str) -> None:
     assert float(params["CLKFBOUT_MULT_F"]) == mult
     assert float(params["CLKOUT0_DIVIDE_F"]) == div
     assert float(params["CLKIN1_PERIOD"]) == 10.0
-    assert params["COMPENSATION"] == '"INTERNAL"'
+    assert params["COMPENSATION"] == '"ZHOLD"'
     # One MMCM, the three clock buffers, and the falling-edge flop of the waveform replica.
     assert len(re.findall(r"^MMCME2_ADV\b", v, re.MULTILINE)) == 1
     assert len(re.findall(r"^BUFG\b", v, re.MULTILINE)) == 2
@@ -300,19 +300,20 @@ def test_clock_probe_open_flow_build() -> None:
 
 
 @pytest.mark.toolchain
-def test_clock_probe_open_flow_known_defect_feedback_is_tied_off() -> None:
-    """A KNOWN DEFECT, pinned so that its cure is noticed. This is not the wanted state.
+def test_clock_probe_open_flow_uses_the_dedicated_feedback() -> None:
+    """The open-flow bitstream feeds the MMCM's CLKFBIN from its own CLKFBOUT.
 
-    Measured on the board (docs/results/2026-11-spike-b-project-clock.md): this bitstream's
-    MMCM never locks. nextpnr-xilinx 0.8.2 takes CLKFBIN off the feedback net and ties it to
-    VCC through the interconnect when COMPENSATION is INTERNAL (or absent), where a working
-    bitstream selects `CMT_LR_LOWER_B_CLKFBOUT2IN`, as the Vivado test below asserts. When
-    the open-flow build is fixed (plan 1, Task 7d) this test must fail, and is then to be
-    inverted to assert `CLKFBOUT2IN`.
+    Until Task 7d this test pinned the opposite, a known defect: with COMPENSATION INTERNAL
+    nextpnr-xilinx 0.8.2 tied CLKFBIN to VCC (`CMT_L_LOWER_B_CLK_IN3_INT`) and the MMCM
+    never locked on the board. The build itself now refuses such a bitstream
+    (`clock_build.feedback_gate`); this reads the decoded bitstream once more by name.
     """
     job = _open_build()
-    probe_build.programmed_mmcm(job.bitstream)  # decodes the bitstream
-    assert probe_build.feedback_source(job.bitstream) == "CMT_L_LOWER_B_CLK_IN3_INT"
+    assert job.facts["feedback"] == "CMT_LR_LOWER_B_CLKFBOUT2IN"
+    probe_build.programmed_mmcm(job.bitstream)
+    assert probe_build.feedback_source(job.bitstream) == "CMT_LR_LOWER_B_CLKFBOUT2IN"
+    fasm = (job.out_dir / "top.fasm").read_text()
+    assert "CLK_IN3_INT" not in fasm
 
 
 @pytest.mark.vivado

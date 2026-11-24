@@ -2,17 +2,17 @@
 """Builds of the Arty clock probe (`arty_clock_probe`), and what their bitstreams program.
 
 `build` makes one probe with either toolchain through `tt_harness.clock_build` and its timing
-gate. `programmed_mmcm` and `feedback_source` decode a bitstream with `bit2fasm`. The
-diagnostic variants at the end exist to find out why an open-flow MMCM does not lock; they
-are never the measurement itself.
+gate and feedback gate. `programmed_mmcm` and `feedback_source` say what a bitstream
+programs. (Task 7c's diagnostic variants, a FASM rewrite and a pre-pack ZHOLD, were removed
+in Task 7d, when `ProjectClock` itself got COMPENSATION="ZHOLD".)
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from tt_harness import clock_build as cb
+from tt_harness import mmcm_fasm
 from tt_harness.boards import arty_clock_probe as probe
 
 # Builds -----------------------------------------------------------------------------------------
@@ -96,73 +96,10 @@ def programmed_mmcm(bitstream: Path) -> dict[str, int]:
 
 
 def feedback_source(bitstream: Path) -> str:
-    """What the bitstream connects to the MMCM's CLKFBIN (the source of the mux's set pip).
+    """The source of the MMCM's CLKFBIN in a bitstream `programmed_mmcm` has decoded.
 
-    `CMT_LR_LOWER_B_CLKFBOUT2IN` is the MMCM's own CLKFBOUT, the dedicated feedback;
-    `CMT_L_LOWER_B_CLK_IN3_INT` is a pin of the fabric interconnect, which nextpnr-xilinx
-    0.8.2 ties to VCC (the MMCM then never locks). Needs `programmed_mmcm`
-    to have decoded the bitstream.
+    `CMT_LR_LOWER_B_CLKFBOUT2IN` is the MMCM's own CLKFBOUT, the dedicated feedback
+    (`tt_harness.mmcm_fasm`); every build made here has passed `clock_build.feedback_gate`,
+    so this is for reporting and for bitstreams built elsewhere.
     """
-    fasm = bitstream.with_suffix(".decoded.fasm").read_text()
-    found = re.findall(r"^CMT_\S+\.CMT_LR_LOWER_B_MMCM_CLKFBIN\.(\S+)$", fasm, re.MULTILINE)
-    return ",".join(found) or "none"
-
-
-# Diagnostic variants of the open-flow build (never the measurement itself) ----------------------
-
-FEEDBACK_PIP = re.compile(
-    r"^(CMT_\S+)\.CMT_LR_LOWER_B_MMCM_CLKFBIN\.CMT_L_LOWER_B_CLK_IN3_INT$", re.MULTILINE
-)
-PREPACK_ZHOLD = """
-for name, cell in ctx.cells:
-    if cell.type == "MMCME2_ADV":
-        cell.setParam("COMPENSATION", "ZHOLD")
-        print(f"tt-harness compensation: {name} ZHOLD")
-"""
-
-
-def rewrite_feedback(job: cb.Build) -> None:
-    """Rewrite an open-flow build's FASM so CLKFBIN takes CLKFBOUT, and remake the bitstream.
-
-    nextpnr-xilinx 0.8.2 takes CLKFBIN of an MMCM whose COMPENSATION is "INTERNAL" (or
-    absent) off its net and ties it to VCC through the fabric interconnect
-    (`xilinx/pack_clocking_xc7.cc`, lines 98 to 104), where Vivado selects the dedicated
-    CLKFBOUT-to-CLKFBIN connection. This edits that one multiplexer in the FASM (and drops
-    the interconnect pip that fed it) and runs `fasm2frames` and `xc7frames2bit` again.
-    """
-    fasm_path = job.out_dir / f"{cb.TOP}.fasm"
-    fasm, count = FEEDBACK_PIP.subn(
-        r"\1.CMT_LR_LOWER_B_MMCM_CLKFBIN.CMT_LR_LOWER_B_CLKFBOUT2IN", fasm_path.read_text()
-    )
-    if count != 1:
-        raise cb.BuildError(
-            f"expected one CLKFBIN pip from the interconnect, found {count}", job.log
-        )
-    fasm = re.sub(r"^CMT_\S+\.CMT_L_LOWER_B_CLK_IN3_INT\.\S+\n", "", fasm, flags=re.MULTILINE)
-    fasm_path.write_text(fasm)
-    part = job.board.parts["openxc7"]
-    db = cb.PRJXRAY_DB / "artix7"
-    frames = job.out_dir / f"{cb.TOP}.frames"
-    cb._run(
-        job,
-        "fasm2frames",
-        [str(cb.tool("fasm2frames")), "--part", part, "--db-root", str(db), str(fasm_path)],
-        job.out_dir,
-        stdout=frames,
-    )
-    cb._run(
-        job,
-        "xc7frames2bit",
-        [
-            str(cb.tool("xc7frames2bit")),
-            "--part_file",
-            str(db / part / "part.yaml"),
-            "--part_name",
-            part,
-            "--frm_file",
-            str(frames),
-            "--output_file",
-            str(job.bitstream),
-        ],
-        job.out_dir,
-    )
+    return mmcm_fasm.feedback_source(bitstream.with_suffix(".decoded.fasm").read_text())[1]
