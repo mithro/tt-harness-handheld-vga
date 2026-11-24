@@ -301,3 +301,69 @@ def test_project_clock_gates_through_bufgce_with_synchronised_enable():
     # Resolve a comb alias for the first stage's input, if Migen introduced one.
     src = aliases.get(src, src)
     assert re.fullmatch(r"\(?\s*enable\s*&\s*locked\s*\)?", src), src
+
+
+# An explicit setting (Task 7c: settings the solver would not choose) -------------------------
+
+
+def test_explicit_setting_computes_the_exact_output():
+    s = clocking.explicit_setting(100_000_000, 2, 18.0, 35.75)
+    assert (s.divclk, s.mult, s.div, s.fractional) == (2, 18.0, 35.75, True)
+    assert s.vco_hz == 900e6
+    assert s.achieved_hz == pytest.approx(25_174_825.1748, abs=1e-3)
+    assert s.clock_hz == 25_174_825
+    # The solver's own choice, given explicitly, is the solver's setting but for the request.
+    a = clocking.explicit_setting(100_000_000, 1, 9.0, 35.75)
+    b = solve(100_000_000, 25_175_000)
+    assert (a.divclk, a.mult, a.div, a.vco_hz, a.achieved_hz) == (
+        b.divclk,
+        b.mult,
+        b.div,
+        b.vco_hz,
+        b.achieved_hz,
+    )
+    assert not clocking.explicit_setting(100_000_000, 1, 9.0, 36.0).fractional
+
+
+@pytest.mark.parametrize(
+    "divclk,mult,div,word",
+    [
+        (1, 5.0, 20.0, "VCO"),  # 500 MHz
+        (1, 13.0, 20.0, "VCO"),  # 1300 MHz
+        (11, 64.0, 20.0, "PFD"),  # 9.09 MHz
+        (1, 9.0, 35.7, "0.125"),
+        (1, 9.05, 36.0, "0.125"),
+        (1, 9.0, 1.5, "CLKOUT0_DIVIDE_F"),  # fractional below 2
+        (1, 9.0, 129.0, "CLKOUT0_DIVIDE_F"),
+        (0, 9.0, 36.0, "DIVCLK_DIVIDE"),
+        (1, 9.0, 1.0, "output"),  # 900 MHz is above the buffer limit
+    ],
+)
+def test_explicit_setting_refuses_what_the_mmcm_cannot_do(divclk, mult, div, word):
+    with pytest.raises(ClockError, match=word):
+        clocking.explicit_setting(100_000_000, divclk, mult, div)
+
+
+def test_project_clock_takes_an_explicit_setting():
+    from migen import Module, Signal
+    from migen.fhdl.verilog import convert
+
+    setting = clocking.explicit_setting(100_000_000, 2, 18.0, 35.75)
+
+    class Top(Module):
+        def __init__(self):
+            self.clk_in = Signal()
+            self.submodules.pc = clocking.ProjectClock(
+                None, self.clk_in, 100_000_000, 25_175_000, setting=setting
+            )
+
+    top = Top()
+    assert top.pc.setting is setting
+    v = str(convert(top, ios={top.clk_in, top.pc.enable, top.pc.clk, top.pc.locked}, name="top"))
+    params, _ = _instance(v, "MMCME2_ADV")
+    assert _verilog_int(params["DIVCLK_DIVIDE"]) == 2
+    assert float(params["CLKFBOUT_MULT_F"]) == 18.0
+    assert float(params["CLKOUT0_DIVIDE_F"]) == 35.75
+
+    with pytest.raises(ValueError, match="input clock"):
+        clocking.ProjectClock(None, Signal(), 50_000_000, 25_175_000, setting=setting)

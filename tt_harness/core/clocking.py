@@ -177,12 +177,51 @@ def solve(clk_in_hz: int, clock_hz: int, tolerance: float = 0.001) -> MmcmSettin
     return setting
 
 
+def explicit_setting(clk_in_hz: int, divclk: int, mult: float, div: float) -> MmcmSetting:
+    """The `MmcmSetting` for given MMCM parameters, for settings `solve` would not choose.
+
+    The parameters are checked against the same limits `solve` searches within, and a
+    `ClockError` names the one that is broken. `clock_hz` is the achieved frequency rounded
+    to a whole hertz and `error_ppm` is relative to that.
+    """
+    if not FIN_MIN_HZ <= clk_in_hz <= FIN_MAX_HZ:
+        raise ClockError(f"input clock {clk_in_hz} Hz is outside the MMCM input range")
+    if type(divclk) is not int or not DIVCLK_RANGE[0] <= divclk <= DIVCLK_RANGE[1]:
+        raise ClockError(f"DIVCLK_DIVIDE {divclk!r} is not an integer in {DIVCLK_RANGE}")
+    m8, d8 = Fraction(mult) * 8, Fraction(div) * 8
+    if m8.denominator != 1 or d8.denominator != 1:
+        raise ClockError(
+            f"CLKFBOUT_MULT_F {mult} and CLKOUT0_DIVIDE_F {div} must be in 0.125 steps"
+        )
+    m8, d8 = int(m8), int(d8)
+    if not MULT8_RANGE[0] <= m8 <= MULT8_RANGE[1]:
+        raise ClockError(f"CLKFBOUT_MULT_F {mult} is outside 2.000 to 64.000")
+    if not DIV8_RANGE[0] <= d8 <= DIV8_RANGE[1] or (d8 % 8 and d8 < DIV8_FRACTIONAL_MIN):
+        raise ClockError(
+            f"CLKOUT0_DIVIDE_F {div} is outside 1.000 to 128.000 (2.000 up when fractional)"
+        )
+    pfd = Fraction(clk_in_hz) / divclk
+    if not PFD_MIN_HZ <= pfd <= PFD_MAX_HZ:
+        raise ClockError(f"PFD frequency {float(pfd):.0f} Hz is outside the MMCM range")
+    vco = pfd * m8 / 8
+    if not VCO_MIN_HZ <= vco <= VCO_MAX_HZ:
+        raise ClockError(f"VCO frequency {float(vco):.0f} Hz is outside the MMCM range")
+    out = vco * 8 / d8
+    if out > OUT_MAX_HZ:
+        raise ClockError(f"output {float(out):.0f} Hz is above the buffer maximum {OUT_MAX_HZ} Hz")
+    clock_hz = round(out)
+    key = (abs(out - clock_hz), None)
+    return _setting(clk_in_hz, clock_hz, (key, divclk, m8, d8, vco, out))
+
+
 class ProjectClock(Module):
     """The project clock: an MMCME2_ADV at `solve(clk_in_hz, clock_hz)`, gated by a BUFGCE.
 
     Inputs: `enable` (any domain), `reset` (MMCM reset, active high; tie low or leave).
     Outputs: `clk` (the gated project clock), `locked` (MMCM LOCKED, asynchronous).
-    Attribute: `setting`, the `MmcmSetting` instantiated.
+    Attribute: `setting`, the `MmcmSetting` instantiated. A `setting` given to the constructor
+    (see `explicit_setting`) is used as it is and `clock_hz` is then not consulted; the
+    free-running copy of the clock is the clock of the domain `<name>_free`.
 
     Lock. CE is driven by `enable & locked`, synchronised, so `clk` only runs while the
     MMCM is locked and stops (two output clocks later) if lock is lost. The harness must
@@ -202,9 +241,23 @@ class ProjectClock(Module):
     may be None when the module is only converted to Verilog.
     """
 
-    def __init__(self, platform, clk_in, clk_in_hz: int, clock_hz: int, name: str = "project"):
+    def __init__(
+        self,
+        platform,
+        clk_in,
+        clk_in_hz: int,
+        clock_hz: int,
+        name: str = "project",
+        setting: MmcmSetting | None = None,
+    ):
         self.platform = platform
-        self.setting = s = solve(clk_in_hz, clock_hz)
+        if setting is None:
+            setting = solve(clk_in_hz, clock_hz)
+        elif setting.clk_in_hz != clk_in_hz:
+            raise ValueError(
+                f"the setting is for an input clock of {setting.clk_in_hz} Hz, not {clk_in_hz}"
+            )
+        self.setting = s = setting
 
         self.enable = Signal()
         self.reset = Signal()
