@@ -385,3 +385,24 @@ task uses the PS1 Arty for the final measurements.
 - [ ] **Step 5:** rebuild the Arty and Game Bub clock designs and the probe settings A and B with both toolchains; every one passes the gate and timing.
 - [ ] **Step 6 (hardware):** on the Arty, measure the real (non-variant) open-flow probe for settings A and B for at least 60 gates each, and Vivado A for 10 gates as a regression: expected counts within one of ideal, LOCKED always, no lock losses, gated count within one of the free-running count.
 - [ ] **Step 7:** update the results document: a dated "After Task 7d" section with the measurements, what changed, and what is still open (filter table and POWER_REG differences; duty cycle; one board, room temperature; the Game Bub build decoded but not measured).
+
+---
+
+### Task 9c: Glitch-free harness signals into the project (added 2026-11-24)
+
+Added after Task 9b's hardware run found one `mismatch` (urish_rings, openXC7): the compare
+build's `rst_n` is a combinational comparison of the clock counter fed straight to the project,
+and a glitch on it pulsed the project's asynchronous clear
+(`docs/results/2026-11-spike-a-compare-build.md`, "After Task 9b"). This task uses the PS1 Arty
+for the final runs.
+
+**Files:**
+- Modify: `tt_harness/core/stimulus.py`, `tt_harness/compare/recorder.py`, `tt_harness/compare/top.py`, `tt_harness/build.py`, their tests, `docs/results/2026-11-spike-a-compare-build.md`
+
+- [ ] **Step 1 (failing tests first):** a unit test on the compare top's Migen fragment that every signal driven into the project other than `clk` is a constant or the direct output of a `sync` register (no combinational logic between a register and a project input); recorder tests that pin the exact step timeline at settle 2 and 3: pclk high for exactly S+1 system cycles, sample at rise+S, `rst_n` and `clock_index` change at rise+S+2, next rise at 2S+2.
+- [ ] **Step 2:** `rst_n` comes from a system-domain register updated on the same edge as `clock_index` (value `clock_index + 1 >= reset_clocks` at the advance; reset value 0 when `reset_clocks > 0`). No added cycle: the step timeline and the recorded bytes are unchanged, and the compare-top simulation still equals every reference.
+- [ ] **Step 3 (gate):** both flows fail the build unless the net driving the project's `rst_n` (and any other non-constant, non-clock project input) is driven directly by a flip-flop: in the open flow from the pre-pack netlist, in Vivado from the implemented design. Unit-tested with a saved bad case (the combinational comparator) and a good one.
+- [ ] **Step 4:** no new timing exceptions. Confirm from one real Vivado build that the existing multicycles give recovery 30 ns and removal −10 ns on the project's asynchronous clear pins at settle 3, and state what the open flow times on those pins.
+- [ ] **Step 5:** rebuild all sixteen pool bitstreams; all pass the gates and timing.
+- [ ] **Step 6:** run all sixteen on the board, with urish_rings/openXC7 and both dottee bitstreams run twice; expected every run `exact`. Check for other users first and yield to them.
+- [ ] **Step 7:** results document: a dated "After Task 9c" section; the earlier sections stay as the record.
