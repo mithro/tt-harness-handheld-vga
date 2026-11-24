@@ -293,7 +293,7 @@ class ClockProbe(Module):
         self.sync.project_free += rose.eq(~rose)
         self.specials += Instance(
             "FDRE",
-            name="replica_fall",
+            name=REPLICA_FALL,
             p_IS_C_INVERTED=1,
             i_C=ClockSignal("project_free"),
             i_CE=1,
@@ -317,6 +317,18 @@ class ClockProbe(Module):
 
 # Builds -----------------------------------------------------------------------------------------
 
+REPLICA_FALL = "replica_fall"
+# nextpnr-xilinx 0.8.2 takes a flip-flop's clock inversion from a parameter IS_CLK_INVERTED,
+# which no 7-series flip-flop has, and ignores the FDRE's own IS_C_INVERTED: without this the
+# falling-edge flop of the waveform replica is built as a rising-edge one (no CLKINV in the
+# FASM) and the replica is a constant 1. Vivado reads IS_C_INVERTED from the Verilog.
+PREPACK_CLKINV = f"""
+for name, cell in ctx.cells:
+    if name == {REPLICA_FALL!r}:
+        cell.setParam("IS_CLK_INVERTED", "1")
+        print(f"tt-harness clkinv: {{name}} type {{cell.type}}")
+"""
+
 
 def build(name: str, toolchain: str, out_dir: Path, gate_cycles: int = GATE_CYCLES) -> cb.Build:
     """Build the probe for the setting `name` with `toolchain` and pass the timing gate.
@@ -330,7 +342,9 @@ def build(name: str, toolchain: str, out_dir: Path, gate_cycles: int = GATE_CYCL
         return ClockProbe(platform, s, gate_cycles)
 
     if toolchain == "openxc7":
-        job = cb.openxc7_build(cb.ARTY, out_dir, top=top)
+        job = cb.openxc7_build(cb.ARTY, out_dir, top=top, prepack_extra=PREPACK_CLKINV)
+        if f"tt-harness clkinv: {REPLICA_FALL} " not in job.facts["nextpnr"]:
+            raise cb.BuildError(f"the pre-pack script did not find {REPLICA_FALL}", job.log)
         job.facts["domains"] = cb.parse_nextpnr(job.facts["nextpnr"], cb.ARTY, s, job.log)
     elif toolchain == "vivado":
         job = cb.vivado_build(cb.ARTY, out_dir, top=top)

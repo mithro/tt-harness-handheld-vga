@@ -233,8 +233,11 @@ def tool(name: str) -> Path:
     return path
 
 
-def openxc7_build(board: Board, out_dir: Path, top=None) -> Build:
-    """Yosys, nextpnr-xilinx, fasm2frames, xc7frames2bit. Raises `BuildError` on a tool failure."""
+def openxc7_build(board: Board, out_dir: Path, top=None, prepack_extra: str = "") -> Build:
+    """Yosys, nextpnr-xilinx, fasm2frames, xc7frames2bit. Raises `BuildError` on a tool failure.
+
+    `prepack_extra` is Python appended to the nextpnr pre-pack script (`PREPACK`).
+    """
     out_dir = out_dir.resolve()
     top_v, xdc, setting = generate(board, "openxc7", out_dir, top)
     job = Build(board, "openxc7", out_dir, setting, out_dir / "build.log")
@@ -257,6 +260,7 @@ def openxc7_build(board: Board, out_dir: Path, top=None) -> Build:
     prepack = out_dir / "clocks.py"
     prepack.write_text(
         PREPACK.format(input_mhz=board.clk_hz / 1e6, project_mhz=setting.achieved_hz / 1e6)
+        + prepack_extra
     )
     chipdb = CHIPDB / f"{board.chipdb_part}.bin"
     if not chipdb.is_file():
