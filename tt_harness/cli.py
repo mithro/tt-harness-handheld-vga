@@ -10,8 +10,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from tt_harness import __version__, build, fetch, manifest, prescreen, reference, verdict
+from tt_harness.compare.recorder import frame_length
 from tt_harness.core.stimulus import RESET_CLOCKS
 from tt_harness.host import frame
+from tt_harness.host import run as hw
 from tt_harness.tools import REPO
 
 
@@ -121,6 +123,72 @@ def build_parser() -> argparse.ArgumentParser:
         help="shared reference files (default: $TT_REFERENCE_DIR)",
     )
     verdict_p.set_defaults(func=_cmd_verdict)
+
+    rc_p = sub.add_parser(
+        "run-compare",
+        help="build, run on a real board, record and compare with the reference; print JSON",
+        description=(
+            "Build the compare bitstream (or reuse the one already built for the same "
+            "settings), load it on a board through its host over SSH, record the UART frame "
+            "and print the verdict JSON. Exit codes as `verdict`; a busy board, a failed "
+            "build or a failed run is an error (2)."
+        ),
+    )
+    rc_p.add_argument("project", metavar="SHUTTLE/MACRO")
+    rc_p.add_argument("--host", required=True, help="the board host (SSH)")
+    rc_p.add_argument("--port", type=_positive_int, required=True, help="its SSH port")
+    rc_p.add_argument("--uart", required=True, help="the board's /dev/serial/by-id/... path")
+    rc_p.add_argument("--user", default="pi", help="SSH user (default: pi)")
+    rc_p.add_argument("--board", default="arty", choices=sorted(build.BOARDS))
+    rc_p.add_argument("--toolchain", default="vivado", choices=build.TOOLCHAINS)
+    rc_p.add_argument(
+        "--clocks", type=_positive_int, default=6_000_000, help="project clocks to record"
+    )
+    rc_p.add_argument("--baud", type=_positive_int, default=1_000_000, help="UART baud rate")
+    rc_p.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="seconds the receiver waits for the frame (default: from --clocks and --baud)",
+    )
+    rc_p.add_argument("--rebuild", action="store_true", help="build even if a build exists")
+    rc_p.add_argument(
+        "--known-hosts",
+        type=Path,
+        default=None,
+        help="accept only host keys in this file (default: as the user's ssh configuration)",
+    )
+    rc_p.add_argument(
+        "--jobs", type=_positive_int, default=build.MAX_JOBS, help="cores the tools may use"
+    )
+    rc_p.add_argument(
+        "--build-dir",
+        type=Path,
+        default=None,
+        help="default: <repo>/build/compare/<board>-<toolchain>/<shuttle>/<macro>",
+    )
+    rc_p.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="the recording (default: <repo>/work/runs/<shuttle>/<macro>/<toolchain>.bin)",
+    )
+    rc_p.add_argument(
+        "--videos-repo",
+        type=Path,
+        default=None,
+        help="tinytapeout-vga-videos checkout (default: $TT_VIDEOS_REPO)",
+    )
+    rc_p.add_argument(
+        "--cache", type=Path, default=REPO / "work" / "sources", help="default: <repo>/work/sources"
+    )
+    rc_p.add_argument(
+        "--reference-dir",
+        type=Path,
+        default=None,
+        help="shared reference files (default: $TT_REFERENCE_DIR)",
+    )
+    rc_p.set_defaults(func=_cmd_run_compare)
     return parser
 
 
@@ -260,8 +328,19 @@ def _cmd_verdict(args: argparse.Namespace) -> int:
         message = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
         print(f"tt-harness verdict: {' '.join(str(message).split())}", file=sys.stderr)
         return 2
+    doc = _verdict_doc(project, ref, rec, screen)
+    print(json.dumps(doc))
+    return _VERDICT_EXIT[doc["verdict"]]
+
+
+def _verdict_doc(
+    project: manifest.Project,
+    ref: verdict.Reference,
+    rec: frame.Recording,
+    screen: prescreen.Prescreen,
+) -> dict:
     result = verdict.compare(rec, ref.samples[: ref.clocks], screen.flagged)
-    doc = {
+    return {
         "id": project.id,
         "verdict": result.kind,
         "first_diff_clock": result.first_diff_clock,
@@ -283,8 +362,152 @@ def _cmd_verdict(args: argparse.Namespace) -> int:
         },
         "reference": {"path": str(ref.path), "sha256": ref.sha256},
     }
+
+
+def _existing_build(
+    project: manifest.Project, board: str, clocks: int, baud: int, out_dir: Path
+) -> Path | None:
+    """The bitstream in `out_dir` if it was built for exactly these settings, else None.
+
+    A build is taken as matching when the board top generated now, which carries the
+    project, its inputs, `clocks` and the baud divider, is byte for byte the one in
+    `out_dir`, and the bitstream there is not older than it. `build_compare` leaves no
+    bitstream behind when a build fails.
+    """
+    board_mod = build.BOARDS[board]
+    top_v = out_dir / f"{board_mod.MODULE_NAME}.v"
+    bitstream = out_dir / f"{board_mod.MODULE_NAME}.bit"
+    if not top_v.is_file() or not bitstream.is_file():
+        return None
+    if bitstream.stat().st_mtime < top_v.stat().st_mtime:
+        return None
+    fresh = out_dir / f"{board_mod.MODULE_NAME}.check.v"
+    try:
+        top = board_mod.Top(project, baud, clocks, settle=build.SETTLE)
+        same = board_mod.to_verilog(top, fresh).read_bytes() == top_v.read_bytes()
+    finally:
+        fresh.unlink(missing_ok=True)
+    return bitstream if same else None
+
+
+def _cmd_run_compare(args: argparse.Namespace) -> int:
+    step = "board"
+    try:
+        board = hw.Board(host=args.host, port=args.port, uart=args.uart, user=args.user)
+        hw.check_board(board)
+        step = "reference"
+        # The reference first, as `verdict` does: without one there is nothing to run for.
+        ref = verdict.load_reference(
+            args.reference_dir or verdict.default_reference_dir(), args.project
+        )
+        step = "manifest"
+        projects = manifest.load(args.videos_repo or manifest.default_videos_repo())
+        project = manifest.get(projects, args.project)
+        _check_stimulus(ref, project)
+        if args.clocks < ref.clocks:
+            raise ValueError(
+                f"{project.id}: --clocks {args.clocks} is less than the reference span "
+                f"{ref.clocks}; the recording could not cover it"
+            )
+        step = "fetch"
+        sources = fetch.fetch(project, args.cache, args.videos_repo)
+        step = "pre-screen"
+        screen = prescreen.check(sources)
+        step = "build"
+        build_dir = args.build_dir or (
+            REPO
+            / "build"
+            / "compare"
+            / f"{args.board}-{args.toolchain}"
+            / project.shuttle
+            / project.macro
+        )
+        bitstream = None
+        if not args.rebuild:
+            bitstream = _existing_build(project, args.board, args.clocks, args.baud, build_dir)
+        reused = bitstream is not None
+        if bitstream is None:
+            bitstream = build.build_compare(
+                project,
+                sources,
+                args.board,
+                args.toolchain,
+                build_dir,
+                args.clocks,
+                baud=args.baud,
+                jobs=args.jobs,
+            ).bitstream
+        print(
+            f"tt-harness run-compare: {'reusing' if reused else 'built'} {bitstream}",
+            file=sys.stderr,
+        )
+        step = "run"
+        out = args.out or (
+            REPO / "work" / "runs" / project.shuttle / project.macro / f"{args.toolchain}.bin"
+        )
+        # Ten bit times per byte, a quarter more, and time for the load.
+        frame_s = frame_length(args.clocks) * 10 / args.baud
+        timeout_s = args.timeout if args.timeout is not None else frame_s * 1.25 + 30
+        runner = hw.SshRunner(board, known_hosts=args.known_hosts)
+        hw.record(board, bitstream, args.clocks, args.baud, out, timeout_s, runner=runner)
+        step = "decode"
+        data = out.read_bytes()
+        rec = frame.decode(data)
+        meta = json.loads(hw.meta_path(out).read_text())
+    except hw.BoardBusy as e:
+        print(f"tt-harness run-compare: {args.project}: board busy:", file=sys.stderr)
+        for reason in e.reasons:
+            print(f"  {reason}", file=sys.stderr)
+        return 2
+    except build.TimingError as e:
+        print(f"tt-harness run-compare: {args.project}: timing: {e}", file=sys.stderr)
+        return 2
+    except (
+        KeyError,
+        OSError,
+        ValueError,
+        fetch.FetchError,
+        prescreen.PrescreenError,
+        build.BuildError,
+        hw.RunError,
+    ) as e:
+        message = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+        text = " ".join(str(message).split())
+        print(f"tt-harness run-compare: {args.project}: {step}: {text}", file=sys.stderr)
+        return 2
+    doc = _verdict_doc(project, ref, rec, screen)
+    receiver = meta.get("receiver", {})
+    doc["run"] = {
+        "host": board.host,
+        "port": board.port,
+        "uart": board.uart,
+        "board": args.board,
+        "toolchain": args.toolchain,
+        "baud": args.baud,
+        "bitstream": str(bitstream),
+        "bitstream_sha256": meta["bitstream_sha256"],
+        "bitstream_reused": reused,
+        "recording": str(out),
+        "bytes_received": len(data),
+        "load_s": meta.get("load_s"),
+        "receive_s": meta.get("receive_s"),
+        "receiver_stopped": receiver.get("stopped"),
+        "uart_errors": _uart_errors(receiver),
+    }
     print(json.dumps(doc))
-    return _VERDICT_EXIT[result.kind]
+    return _VERDICT_EXIT[doc["verdict"]]
+
+
+def _uart_errors(receiver: dict) -> dict | None:
+    """How far the kernel's serial error counters moved during the reception, if known."""
+    before, after = receiver.get("icount_before"), receiver.get("icount_after")
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return None
+    return {
+        name: after[name] - before[name]
+        for name in ("frame", "overrun", "parity", "brk", "buf_overrun")
+        if name in before and name in after
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
