@@ -365,3 +365,23 @@ constant-driven clock pin as a project clock. This task may use the PS1 Arty for
 - [ ] **Step 6:** rebuild all eight pool designs with both toolchains; expected sixteen bitstreams with every domain met. Any failure is investigated and reported, not worked around; if a design still misses the open flow's budget at settle 3, report the figure.
 - [ ] **Step 7:** run all sixteen on the board; expected sixteen `exact`. Record pre-header byte counts.
 - [ ] **Step 8:** update the results document: a dated section "After Task 9b" with the new tables, what changed, and what is still open; keep the original results as the record of what happened first.
+
+---
+
+### Task 7d: Close the open flow's MMCM feedback loop (added 2026-11-24)
+
+Added after Task 7c measured that every open-flow `ProjectClock` bitstream never locks on
+hardware (`docs/results/2026-11-spike-b-project-clock.md`, "Measured on hardware"):
+nextpnr-xilinx 0.8.2 ties CLKFBIN to VCC when `COMPENSATION` is `INTERNAL` or absent. This
+task uses the PS1 Arty for the final measurements.
+
+**Files:**
+- Modify: `tt_harness/core/clocking.py`, `tt_harness/clock_build.py`, `tests/test_clocking.py`, `tests/test_clock_probe.py`, `tests/test_clock_build.py`, `docs/results/2026-11-spike-b-project-clock.md`
+
+- [ ] **Step 1:** `ProjectClock` instantiates the MMCM with an explicit `COMPENSATION="ZHOLD"`, with a comment citing nextpnr-xilinx 0.8.2 `xilinx/pack_clocking_xc7.cc` lines 98-104. CLKFBOUT stays wired directly to CLKFBIN.
+- [ ] **Step 2 (Vivado check):** one Vivado build of the Arty clock design: no DRC error or critical warning about the feedback or compensation; record what Vivado reports for COMPENSATION and the decoded CLKFBIN source. Only if Vivado rejects it or does not select the dedicated feedback: make the value depend on the toolchain (`INTERNAL` for Vivado, `ZHOLD` for openXC7), passed in explicitly by the build, and say why.
+- [ ] **Step 3 (gate):** `clock_build` decodes every bitstream it builds (both toolchains, both boards) and fails the build unless the MMCM's CLKFBIN source is the dedicated feedback (`…MMCM_CLKFBIN.CMT_LR_LOWER_B_CLKFBOUT2IN` or the equivalent name for that tile; never a `CLK_IN*_INT` source). Unit-tested with saved FASM fragments of a good and the known-bad bitstream. The open-versus-Vivado comparison also covers the CMT tile's routing features, not only `.MMCME2_ADV.` site features.
+- [ ] **Step 4:** invert `test_clock_probe_open_flow_known_defect_feedback_is_tied_off` into a test that the open-flow build uses the dedicated feedback.
+- [ ] **Step 5:** rebuild the Arty and Game Bub clock designs and the probe settings A and B with both toolchains; every one passes the gate and timing.
+- [ ] **Step 6 (hardware):** on the Arty, measure the real (non-variant) open-flow probe for settings A and B for at least 60 gates each, and Vivado A for 10 gates as a regression: expected counts within one of ideal, LOCKED always, no lock losses, gated count within one of the free-running count.
+- [ ] **Step 7:** update the results document: a dated "After Task 7d" section with the measurements, what changed, and what is still open (filter table and POWER_REG differences; duty cycle; one board, room temperature; the Game Bub build decoded but not measured).
