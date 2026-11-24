@@ -344,3 +344,24 @@ use the PS1 Arty, like Task 10.
 - [ ] **Step 4:** Run all eight bitstreams on the board (`ssh -p 10722 pi@ps1.fpgas.online`, UART `/dev/serial/by-id/usb-Digilent_Digilent_USB_Device_210319A764F5-if01-port0`), ten 1 s readings each. Expected frequency for A and B is 25,174,825 Hz, C 24,489,796 Hz, D 25,000,000 Hz, each within the oscillator's tolerance (the Arty's oscillator is ±50 ppm class; the Pi's UART timing is irrelevant because the gate is the FPGA's own oscillator, so the reading is a pure ratio and should be within a few counts of the ideal). Record LOCKED and lock losses. If cheap, also measure the duty cycle of the free-running output for A and B in both flows (sample the measured clock with the 100 MHz clock over many cycles and report the fraction high; asynchronous sampling gives the duty cycle statistically) since the open flow's encoding is expected to change it.
 - [ ] **Step 5:** Update `docs/results/2026-11-spike-b-project-clock.md` with a "Measured on hardware" section: the table of readings, and a plain conclusion for each open question: is the open-flow frequency right for an odd integer part; does the MMCM lock and stay locked with the wrong filter table; what the duty cycle is. State what one board at room temperature for ten seconds does and does not show about lock stability. Then, based on the measurement, say whether the solver needs any toolchain-specific rule.
 - [ ] **Step 6:** Leave the board clean. Commit.
+
+---
+
+### Task 9b: Make the open flow build the whole pool (added 2026-11-24)
+
+Added after Task 9 found that openXC7 builds five of the eight pool designs
+(`docs/results/2026-11-spike-a-compare-build.md`): the harness's cross-domain allowance refuses
+three, two of which also need DSP inference turned off; and the open-flow clock scan reports a
+constant-driven clock pin as a project clock. This task may use the PS1 Arty for the final runs.
+
+**Files:**
+- Modify: `tt_harness/compare/recorder.py`, `tt_harness/build.py`, `tt_harness/project_clocks.py` if needed, `tests/test_build.py` and fixtures, `docs/results/2026-11-spike-a-compare-build.md`
+
+- [ ] **Step 1 (settle):** the compare build's default settle becomes 3 system cycles (it was 2). The step is then: pclk rises at t0, sample at t0+3, falls at t0+4, `clock_index` changes at t0+5, next rise at t0+8; pclk period 80 ns; the real project-to-system requirement 30 ns; the open flow's budget 20 ns with the allowance unchanged. Every constraint derived from settle (the generated clock's `-divide_by`, the multicycle values, project-clock periods and max/min delays, the open flow's per-clock frequencies and budgets) must follow from the one parameter; find any place that assumes 2 or 60 ns. The owner's chosen option; an allowance based on measured skew was the alternative and is not taken.
+- [ ] **Step 2 (DSP):** the open flow synthesises without DSP inference (`synth_xilinx -nodsp`), recorded in `BuildResult.limitations` in fixed wording saying why (nextpnr-xilinx 0.8.2 cannot route the constant cascade inputs of inferred DSP48E1 cells). Vivado is unchanged.
+- [ ] **Step 3 (clock scan):** the pre-pack scan ignores a net on a clock pin when it is driven by a constant (and a cell clock pin tied off); test with the two saved logs/netlists that showed `…CLK$const`, and a unit test.
+- [ ] **Step 4 (tests build elsewhere):** real-build tests write under the pytest temporary directory, never into the default `build/compare` tree that the CLI and pool script use.
+- [ ] **Step 5 (pre-header bytes):** the receiver records how many bytes arrived before the frame header and their values (up to 16) in the run's JSON, and `run-compare` prints the count; unit-tested with the fake runner.
+- [ ] **Step 6:** rebuild all eight pool designs with both toolchains; expected sixteen bitstreams with every domain met. Any failure is investigated and reported, not worked around; if a design still misses the open flow's budget at settle 3, report the figure.
+- [ ] **Step 7:** run all sixteen on the board; expected sixteen `exact`. Record pre-header byte counts.
+- [ ] **Step 8:** update the results document: a dated section "After Task 9b" with the new tables, what changed, and what is still open; keep the original results as the record of what happened first.
