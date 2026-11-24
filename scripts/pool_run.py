@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -313,7 +314,11 @@ def cmd_hw(args: argparse.Namespace) -> int:
     return worst
 
 
-def main() -> int:
+def _terminated(signum: int, _frame) -> None:
+    raise SystemExit(128 + signum)
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     for name, func in (("build", cmd_build), ("hw", cmd_hw)):
@@ -331,19 +336,27 @@ def main() -> int:
             p.add_argument("--port", type=int, required=True)
             p.add_argument("--uart", required=True)
             p.add_argument("--known-hosts", type=Path, required=True)
-    args = parser.parse_args()
-    args.toolchain = args.toolchain or list(build.TOOLCHAINS)
-    # A terminal line on every path, an uncaught exception or an interrupt included, so
-    # that whoever watches the log can tell "ended" from "still running".
+    # A terminal line on every path (a usage error, an uncaught exception, an interrupt and
+    # SIGTERM included), so that whoever watches the log can tell "ended" from "still
+    # running". SIGTERM becomes SystemExit so that the `finally` runs.
+    command = "?"
     rc: int | str = "exception"
+    previous = signal.signal(signal.SIGTERM, _terminated)
     try:
+        args = parser.parse_args(argv)
+        command = args.command
+        args.toolchain = args.toolchain or list(build.TOOLCHAINS)
         rc = args.func(args)
         return rc
     except KeyboardInterrupt:
         rc = "interrupted"
         raise
+    except SystemExit as e:
+        rc = f"exit {e.code}"
+        raise
     finally:
-        _say(f"pool_run {args.command} finished rc={rc}")
+        signal.signal(signal.SIGTERM, previous)
+        _say(f"pool_run {command} finished rc={rc}")
 
 
 if __name__ == "__main__":
