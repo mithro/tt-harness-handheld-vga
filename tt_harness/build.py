@@ -55,10 +55,15 @@ constraints for each root class, and why, edge by edge:
     periods either way (the least it can be), hold -1 system period from sys (a sys-side
     change comes one system cycle after a pclk falling edge, later after a rising one) and
     0 to sys.
-- `unclassified` (a latch, an asynchronous set or clear, a cell not clocked by pclk, ...):
-  the `derived` constraints, as an assumption: the build completes, the domain has
-  `signed_off` False and the result lists it in `limitations`. If pclk does not reach the
-  root at all it is a primary clock with pclk's waveform.
+- `unclassified` (a latch, an asynchronous set or clear, pclk through logic, a cell not
+  clocked by pclk, ...): the `derived` constraints, as an assumption: the build completes,
+  the domain has `signed_off` False and the result lists it in `limitations` with what was
+  assumed. Wherever pclk reaches the root (a flip-flop with an asynchronous reset on pclk,
+  say) it is still a clock generated from pclk, so pclk's insertion delay is in its
+  latency. Only if pclk does not reach the root at all is it a primary clock with pclk's
+  waveform; it then has no insertion delay relative to pclk and sys, and its cross-domain
+  figures are indicative only (a root made by sys-domain logic also has its edges at
+  sys-side times, not on pclk edges).
 
 openXC7 constrains every project clock at the pclk frequency. nextpnr-xilinx 0.8.2 times
 cells on a clock's falling edge as if on its rising edge, so a clock with users on both
@@ -140,10 +145,7 @@ LIMIT_CROSS_BUDGET = (
 LIMIT_LOCAL_CLOCKS = "openXC7: project clocks are on local routing with unmeasured skew"
 # Per-build entries, with the toolchain named as in the standing facts.
 TOOL_NAMES = {"openxc7": "openXC7", "vivado": "Vivado"}
-LIMIT_NOT_SIGNED_OFF = (
-    "{tool}: project clock {clock} is not signed off: {reason}; it was timed as a clock with "
-    "edges on either pclk edge, which is an assumption"
-)
+LIMIT_NOT_SIGNED_OFF = "{tool}: project clock {clock} is not signed off: {reason}; {assumption}"
 LIMIT_GATE = (
     "{tool}: project clock {clock} is a gate of {n} flip-flops; a glitch at the gate is not timed"
 )
@@ -194,6 +196,7 @@ class TimingDomain:
     # and how many flip-flops the root is a gate of (`tt_harness.project_clocks`).
     root_kind: pc.RootKind | None = None
     root_reason: str | None = None
+    root_assumption: str | None = None  # what its timing rests on when not signed off
     root_gate_of: int | None = None
     # False when the clock's timing model is an assumption rather than derived from the
     # netlist (an "unclassified" root). Such a domain can be `met` and still not be signed
@@ -318,7 +321,9 @@ def _edge_clock(text: str) -> tuple[str, str] | None:
     return edge, name.strip()
 
 
-_NO_ROOT_FACTS = pc.Classified(pc.UNCLASSIFIED, "the build did not report what drives it", False, 0)
+_NO_ROOT_FACTS = pc.Classified(
+    pc.UNCLASSIFIED, "the build did not report what drives it", False, 0, pc.ASSUME_EDGES
+)
 
 
 def _root_fields(root: pc.Classified) -> dict:
@@ -326,6 +331,7 @@ def _root_fields(root: pc.Classified) -> dict:
     return {
         "root_kind": root.kind,
         "root_reason": root.reason,
+        "root_assumption": root.assumption,
         "root_gate_of": root.gate_of,
         "signed_off": root.signed_off,
     }
@@ -1704,7 +1710,9 @@ def build_compare(
         clock = key.removeprefix(PROJECT)
         if not d.signed_off:
             limitations.append(
-                LIMIT_NOT_SIGNED_OFF.format(tool=tool, clock=clock, reason=d.root_reason)
+                LIMIT_NOT_SIGNED_OFF.format(
+                    tool=tool, clock=clock, reason=d.root_reason, assumption=d.root_assumption
+                )
             )
         elif d.root_kind == pc.REGISTER and (d.root_gate_of or 0) > 1:
             limitations.append(LIMIT_GATE.format(tool=tool, clock=clock, n=d.root_gate_of))

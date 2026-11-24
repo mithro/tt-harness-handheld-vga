@@ -1315,6 +1315,51 @@ def test_build_compare_flags_a_clock_that_is_not_signed_off(
     assert "NOT SIGNED OFF" in result.log.read_text()
 
 
+@pytest.mark.parametrize(
+    "contributor, limitation",
+    [
+        (
+            "FDCE pclk rising direct async",
+            (
+                "openXC7: project clock project.div is not signed off: a FDCE with an asynchronous "
+                "set or clear drives it; its edges are modelled on pclk edges, but an asynchronous "
+                "set or clear can move one"
+            ),
+        ),
+        (
+            "FDRE sys rising direct no-async",
+            (
+                "openXC7: project clock project.div is not signed off: a flip-flop clocked by sys "
+                "drives it; it was timed as a primary clock with pclk's waveform and no modelled "
+                "insertion delay relative to pclk and sys, so its cross-domain setup and hold "
+                "figures are indicative only"
+            ),
+        ),
+        (
+            "FDRE pclk falling through-logic no-async",
+            (
+                "openXC7: project clock project.div is not signed off: a flip-flop clocked by pclk "
+                "through logic, whose other inputs are not examined, drives it; it was timed as a "
+                "clock with edges on either pclk edge, which is an assumption"
+            ),
+        ),
+    ],
+)
+def test_build_compare_says_what_is_assumed_for_each_unsigned_clock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contributor: str, limitation: str
+) -> None:
+    report = MINI.replace("FDRE pclk rising direct no-async", contributor)
+    report = report.replace("45.00 ns", "4.50 ns")
+    _fake_flow(monkeypatch, "openxc7", report)
+    screen = prescreen.Prescreen(0, 0, 1, True, Path("prescreen.log"))
+    monkeypatch.setattr(build.prescreen, "check", lambda sources, out_dir=None: screen)
+    s = _counter()
+    result = build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
+    d = result.timing[DIV]
+    assert d.root_kind == "unclassified" and not d.signed_off
+    assert [item for item in result.limitations if "not signed off" in item] == [limitation]
+
+
 def test_build_compare_limitations_for_a_signed_off_gate_clock(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1482,6 +1527,45 @@ def test_real_build_vivado_clocks_off_the_pclk_rising_edge() -> None:
             f"Vivado: project clock {lq_root} is not signed off: a LDCE, not a flip-flop, "
             "drives it; it was timed as a clock with edges on either pclk edge, which is an "
             "assumption"
+        )
+    ]
+
+
+ASYNCCLK = ("asyncclk", "tt_um_test_asyncclk")  # a clock made by an async-reset register
+
+
+@pytest.mark.vivado
+@pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
+def test_real_build_vivado_async_reset_register_clock_is_generated_from_pclk() -> None:
+    _, result = _local_build(ASYNCCLK, "vivado")
+    out = result.bitstream.parent
+    (root,) = result.project_clocks
+    (name,) = _vivado_names(result).values()
+    d = result.timing[f"{build.PROJECT}{root}"]
+    assert d.root_kind == "unclassified" and not d.signed_off
+    assert d.constraint_mhz == pytest.approx(PLAN.pclk_mhz)
+    # A generated clock of pclk, not a primary clock on the register's output.
+    tcl = (out / "project-clocks.tcl").read_text()
+    assert f"create_generated_clock -name {name} -divide_by 1" in tcl
+    assert "create_clock" not in tcl
+    # pclk -> the clock: hold is checked on the same pclk edge, with both clocks' insertion
+    # delays in the check. The clock's delay includes pclk's own (a primary clock on the
+    # register output had 0.3 to 0.6 ns), so it is longer than the source's.
+    hold = _pair_requirements(out, "pclk", name, "hold")
+    assert hold and all(req == 0.0 for req, _ in hold), hold
+    setup = _pair_requirements(out, "pclk", name, "setup")
+    assert setup and all(req == 30.0 for req, _ in setup), setup
+    report = (out / f"pclk-to-{name}-hold.rpt").read_text()
+    dcd = [float(x) for x in re.findall(r"Destination Clock Delay \(DCD\):\s+([\d.]+)ns", report)]
+    scd = [float(x) for x in re.findall(r"Source Clock Delay\s+\(SCD\):\s+([\d.]+)ns", report)]
+    assert dcd and scd and len(dcd) == len(scd)
+    assert all(s > 2.0 for s in scd), scd
+    assert all(d > s for d, s in zip(dcd, scd, strict=True)), (dcd, scd)
+    assert [item for item in result.limitations if "not signed off" in item] == [
+        (
+            f"Vivado: project clock {root} is not signed off: a FDCE with an asynchronous set "
+            "or clear drives it; its edges are modelled on pclk edges, but an asynchronous set "
+            "or clear can move one"
         )
     ]
 

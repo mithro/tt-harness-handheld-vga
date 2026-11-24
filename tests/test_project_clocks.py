@@ -108,10 +108,11 @@ def test_fallclk_roots() -> None:
         (["FDRE_1 pclk falling direct no-async"], "derived"),
         (["FDRE pclk falling direct no-async"], "derived"),
         (["FDRE pclk rising direct no-async", "FDRE pclk falling direct no-async"], "derived"),
-        # pclk reaches the flip-flop through logic: its sense is not known.
-        (["FDRE pclk rising through-logic no-async"], "derived"),
-        # pclk itself used as data in the gate.
-        (["clock pclk rising through-logic no-async"], "derived"),
+        # pclk reaches the flip-flop through logic, or is itself an input of the gate: the
+        # gate's other inputs are not examined, so its edges cannot be placed.
+        (["FDRE pclk rising through-logic no-async"], "unclassified"),
+        (["FDRE pclk falling through-logic no-async"], "unclassified"),
+        (["clock pclk rising through-logic no-async"], "unclassified"),
         (["LDCE pclk rising direct no-async"], "unclassified"),
         (["FDCE pclk rising direct async"], "unclassified"),
         (["FDRE sys rising direct no-async"], "unclassified"),
@@ -285,3 +286,87 @@ def test_command_line_writes_the_constraints(tmp_path: Path) -> None:
         env={},
     )
     assert out.read_text() == _tcl(PROBE)
+
+
+# What is assumed for a root that is not signed off ---------------------------------------------
+
+ASYNC = (
+    "tt-harness clock root: project/adiv_reg/Q\n"
+    "tt-harness clock contributor: project/adiv_reg/Q FDCE pclk rising direct async\n"
+)
+
+
+def test_async_flop_on_pclk_is_a_generated_clock_of_pclk() -> None:
+    # The usual reset idiom, `always @(posedge clk or negedge rst_n)`, used as a clock: pclk
+    # reaches the root, so it carries pclk's insertion delay; it is still not signed off.
+    c = _classify(ASYNC)["project/adiv_reg/Q"]
+    assert c.kind == "unclassified" and not c.signed_off
+    assert c.from_pclk
+    assert c.reason == "a FDCE with an asynchronous set or clear drives it"
+    assert c.assumption == pc.ASSUME_ASYNC
+    assert c.assumption == (
+        "its edges are modelled on pclk edges, but an asynchronous set or clear can move one"
+    )
+    lines = _tcl(ASYNC).splitlines()
+    assert (
+        f"create_generated_clock -name project_clk0 -divide_by 1 -source {BUFG} $tt_root(0)"
+    ) in lines
+    assert not any(ln.startswith("create_clock") for ln in lines)
+    for a, b in [("pclk", "project_clk0"), ("project_clk0", "pclk")]:
+        pair = f"-from [get_clocks {a}] -to [get_clocks {b}]"
+        assert f"set_max_delay 30.000 {pair}" in lines
+        assert f"set_min_delay 0.000 {pair}" in lines
+
+
+def test_ripple_stage_on_an_async_flop_clock_is_still_from_pclk() -> None:
+    text = ASYNC + (
+        "tt-harness clock root: r\n"
+        "tt-harness clock contributor: r FDRE root:project/adiv_reg/Q rising direct no-async\n"
+    )
+    c = _classify(text)["r"]
+    assert c.kind == "unclassified" and c.from_pclk
+    assert c.assumption == pc.ASSUME_EDGES
+    assert "create_clock" not in _tcl(text)
+
+
+@pytest.mark.parametrize(
+    "contributors, assumption, from_pclk",
+    [
+        (["LDCE pclk rising direct no-async"], pc.ASSUME_EDGES, True),
+        (["FDRE pclk rising through-logic no-async"], pc.ASSUME_EDGES, True),
+        (["clock pclk rising through-logic no-async"], pc.ASSUME_EDGES, True),
+        (["FDPE pclk falling direct async"], pc.ASSUME_ASYNC, True),
+        # An async flip-flop beside a latch: the wider assumption is the one stated.
+        (
+            ["FDCE pclk rising direct async", "LDCE pclk rising direct no-async"],
+            pc.ASSUME_EDGES,
+            True,
+        ),
+        # pclk does not reach these: a primary clock, with no insertion delay modelled.
+        (["FDRE sys rising direct no-async"], pc.ASSUME_PRIMARY, False),
+        (["FDCE sys rising direct async"], pc.ASSUME_PRIMARY, False),
+        (["port none rising direct no-async"], pc.ASSUME_PRIMARY, False),
+        ([], pc.ASSUME_PRIMARY, False),
+    ],
+)
+def test_what_is_assumed_for_an_unclassified_root(
+    contributors: list[str], assumption: str, from_pclk: bool
+) -> None:
+    c = _one(*contributors)
+    assert c.kind == "unclassified"
+    assert c.from_pclk is from_pclk
+    assert c.assumption == assumption
+
+
+def test_signed_off_roots_assume_nothing() -> None:
+    assert all(c.assumption is None for c in _classify(PROBE).values())
+    assert _one("FDRE pclk falling direct no-async").assumption is None
+    assert "no modelled insertion delay relative to pclk and sys" in pc.ASSUME_PRIMARY
+    assert "indicative only" in pc.ASSUME_PRIMARY
+
+
+def test_through_logic_reason_names_the_gate() -> None:
+    c = _one("FDRE pclk falling through-logic no-async")
+    assert c.reason == (
+        "a flip-flop clocked by pclk through logic, whose other inputs are not examined, drives it"
+    )

@@ -22,13 +22,18 @@ at half its period (`tt_harness.build` has the scheme):
   ripple stage). A gate of several such flip-flops is in this class too; `gate_of` counts
   them, because a gate of more than one can glitch, which no timing model covers.
 - `derived`: edges on pclk rising or falling edges. Every contributor is a flip-flop on a
-  traced clock, but one is on pclk's falling edge, on pclk through logic (sense unknown), on
-  the falling edge of a `register` root (those edges are pclk rising edges too; the class
-  is the conservative one), or on a `derived` root.
-- `unclassified`: anything else (a latch, a memory, an asynchronous set or clear, a cell
+  traced clock, but one is directly on pclk's falling edge, on the falling edge of a
+  `register` root (those edges are pclk rising edges too; the class is the conservative
+  one), or on a `derived` root.
+- `unclassified`: anything else (a latch, a memory, an asynchronous set or clear, a
+  flip-flop that pclk reaches through logic or a gate with pclk itself as an input (the
+  gate's other inputs are not examined, and one from sys moves the edge off pclk's), a cell
   clocked by sys or by nothing known, a top-level input, a loop of roots, nothing at all).
-  Its edges cannot be placed; it is timed with the `derived` model as an assumption and is
-  not signed off.
+  Its edges cannot be placed, and it is not signed off. `Classified.assumption` says what
+  its timing rests on: where pclk reaches the root it is timed with the `derived` model, a
+  clock generated from pclk (`ASSUME_EDGES`; `ASSUME_ASYNC` when the only doubt is an
+  asynchronous set or clear, which can move an edge off pclk's); where pclk does not reach
+  it, as a primary clock with pclk's waveform and no insertion delay (`ASSUME_PRIMARY`).
 
 `vivado_constraints` writes the Tcl for one build (see `tt_harness.build` for why each
 command is what it is). Vivado runs this file as a program between collecting the roots and
@@ -56,6 +61,14 @@ FLIP_FLOPS = frozenset(
 )
 CLOCK_AS_DATA = "clock"
 
+# What the timing of a root that is not signed off rests on, in fixed wording.
+ASSUME_EDGES = "it was timed as a clock with edges on either pclk edge, which is an assumption"
+ASSUME_ASYNC = "its edges are modelled on pclk edges, but an asynchronous set or clear can move one"
+ASSUME_PRIMARY = (
+    "it was timed as a primary clock with pclk's waveform and no modelled insertion delay "
+    "relative to pclk and sys, so its cross-domain setup and hold figures are indicative only"
+)
+
 _CONTRIBUTOR = re.compile(
     r"^(?P<root>\S+) (?P<cell>\S+) (?P<clock>\S+) (?P<edge>rising|falling) "
     r"(?P<path>direct|through-logic) (?P<async>async|no-async)$"
@@ -79,6 +92,8 @@ class Classified:
     # from pclk can be defined on it.
     from_pclk: bool
     gate_of: int  # number of contributors
+    # What the timing rests on when the root is not signed off (one of the ASSUME_ texts).
+    assumption: str | None = None
 
     @property
     def signed_off(self) -> bool:
@@ -117,7 +132,7 @@ def classify(roots: dict[str, tuple[Contributor, ...]]) -> dict[str, Classified]
     """The class of every root (see the module docstring)."""
     loop = "it is in a loop of clocks made by the project"
     done: dict[str, Classified] = {
-        name: Classified(UNCLASSIFIED, loop, False, len(found))
+        name: Classified(UNCLASSIFIED, loop, False, len(found), ASSUME_PRIMARY)
         for name, found in roots.items()
         if _in_loop(name, roots)
     }
@@ -126,15 +141,26 @@ def classify(roots: dict[str, tuple[Contributor, ...]]) -> dict[str, Classified]
         """(class this contributor allows, why, pclk reaches it)."""
         edge = "falling" if c.falling else "rising"
         if c.cell == CLOCK_AS_DATA and c.clock == "pclk":
-            return DERIVED, "pclk itself is an input of its logic", True
+            why = "pclk itself is an input of its logic, whose other inputs are not examined"
+            return UNCLASSIFIED, why, True
         if c.cell not in FLIP_FLOPS:
             what = "a top-level input" if c.cell == "port" else f"a {c.cell}, not a flip-flop,"
             return UNCLASSIFIED, f"{what} drives it", c.clock == "pclk"
         if c.asynchronous:
-            return UNCLASSIFIED, f"a {c.cell} with an asynchronous set or clear drives it", False
+            # Whatever clocks it, the set or clear can move an edge; pclk reaches the root
+            # when its clock is pclk or a root that pclk reaches.
+            reaches = c.clock == "pclk"
+            if c.clock.startswith("root:") and c.clock.removeprefix("root:") in roots:
+                reaches = one(c.clock.removeprefix("root:")).from_pclk
+            why = f"a {c.cell} with an asynchronous set or clear drives it"
+            return UNCLASSIFIED, why, reaches
         if c.clock == "pclk":
             if not c.direct:
-                return DERIVED, "a flip-flop on pclk through logic drives it", True
+                why = (
+                    "a flip-flop clocked by pclk through logic, whose other inputs are not "
+                    "examined, drives it"
+                )
+                return UNCLASSIFIED, why, True
             if c.falling:
                 return DERIVED, "a flip-flop on the falling edge of pclk drives it", True
             return REGISTER, "", True
@@ -165,7 +191,8 @@ def classify(roots: dict[str, tuple[Contributor, ...]]) -> dict[str, Classified]
         found = [contributor(c) for c in roots[name]]
         order = (UNCLASSIFIED, DERIVED, REGISTER)
         if not found:
-            result = Classified(UNCLASSIFIED, "nothing sequential drives it", False, 0)
+            why = "nothing sequential drives it"
+            result = Classified(UNCLASSIFIED, why, False, 0, ASSUME_PRIMARY)
         else:
             # The least certain contributor decides; its reason is the one reported.
             kind, reason, _ = min(found, key=lambda f: order.index(f[0]))
@@ -173,7 +200,17 @@ def classify(roots: dict[str, tuple[Contributor, ...]]) -> dict[str, Classified]
                 n = len(found)
                 what = "a flip-flop" if n == 1 else f"a gate of {n} flip-flops"
                 reason = f"{what} clocked on pclk rising edges drives it"
-            result = Classified(kind, reason, any(f[2] for f in found), len(found))
+            from_pclk = any(f[2] for f in found)
+            assumption = None
+            if kind == UNCLASSIFIED:
+                doubts = [f[1] for f in found if f[0] == UNCLASSIFIED]
+                if not from_pclk:
+                    assumption = ASSUME_PRIMARY
+                elif all("with an asynchronous set or clear" in why for why in doubts):
+                    assumption = ASSUME_ASYNC
+                else:
+                    assumption = ASSUME_EDGES
+            result = Classified(kind, reason, from_pclk, len(found), assumption)
         done[name] = result
         return result
 
