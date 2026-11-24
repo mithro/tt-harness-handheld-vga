@@ -20,7 +20,8 @@ from tt_harness import build, pool
 # TT_POOL_WORK names another results directory (an earlier run kept aside, say).
 WORK = Path(os.environ.get("TT_POOL_WORK", pool.DEFAULT_WORK))
 TOOL = {"openxc7": "openXC7", "vivado": "Vivado"}
-STANDING = (build.LIMIT_NO_HOLD, build.LIMIT_CROSS_BUDGET)
+# The entries every openXC7 build carries (LIMIT_NO_DSP since Task 9b).
+STANDING = (build.LIMIT_NO_HOLD, build.LIMIT_CROSS_BUDGET, build.LIMIT_NO_DSP)
 
 
 def _load(pid: str, name: str) -> dict | None:

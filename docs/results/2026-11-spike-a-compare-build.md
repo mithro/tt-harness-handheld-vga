@@ -13,6 +13,10 @@ under `tmp/`, `work/` and `build/`, which are git-ignored and exist only on the 
 that ran this; each section names its files, and the figures that matter are copied into
 this document.
 
+The sections up to "Conclusion" are the record of that first run and are left as they were
+written. The build was then changed to act on what it found, and the whole pool was built
+and run again: see "After Task 9b" at the end, which is the current state.
+
 ## How it was run
 
 | Step | Command | Results | Log |
@@ -253,8 +257,10 @@ stands for the worktree path in the log.)
 - (a) A settle of 3 system cycles. The real requirement becomes 30 ns and the budget
   20 ns. It costs no run time: stepping is limited by the UART, one project clock per
   byte, not by the settle.
-- (b) An allowance based on the measured skew, about 3 to 4 ns, instead of a whole system
-  period.
+- (b) An allowance based on the measured skew, about 3 ns (2.8 to 3.3 measured), instead
+  of a whole system period. Its cost: that figure was measured by a different toolchain on
+  a different placement, so the open flow's budget would rest on a number the open flow
+  cannot check for its own result.
 - (c) Leave it, and accept that designs with slow unregistered outputs are refused by the
   open flow and can be checked with Vivado only.
 
