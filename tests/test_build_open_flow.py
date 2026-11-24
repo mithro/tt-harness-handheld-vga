@@ -284,9 +284,10 @@ def test_real_build_vivado_unregistered_dsp_is_not_a_project_clock(build_root: P
     assert result.project_clocks == ()
     assert set(result.timing) == {"sys", "pclk", "sys->pclk", "pclk->sys"}
     assert all(d.met and d.signed_off for d in result.timing.values())
-    log = result.log.read_text()
-    assert "tt-harness tied-off clock pin: " in log
-    assert "tt-harness clock root:" not in log
+    # Lines the run printed (the log also echoes the script's own text, behind "## ").
+    printed = [ln for ln in result.log.read_text().splitlines() if ln.startswith("tt-harness ")]
+    assert any(ln.startswith("tt-harness tied-off clock pin: ") for ln in printed)
+    assert not any(ln.startswith("tt-harness clock root:") for ln in printed)
     assert "DSP48E1" in (out / "utilization.rpt").read_text()
     assert (out / "clock-roots.txt").read_text() == ""
 
