@@ -277,7 +277,7 @@ _NEXTPNR_CLOCK_MAP = re.compile(
     re.MULTILINE,
 )
 # The clock-name column is padded to the longest name, inside the quotes or after them.
-_NEXTPNR_FMAX = re.compile(
+NEXTPNR_FMAX = re.compile(
     r"^(?:Info|ERROR|Warning): Max frequency for clock\s+'\s*(?P<name>.+?)\s*':\s+"
     r"(?P<achieved>[\d.]+) MHz \((?P<verdict>PASS|FAIL) at (?P<target>[\d.]+) MHz\)\s*$",
     re.MULTILINE,
@@ -376,7 +376,7 @@ def parse_nextpnr(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDoma
     report = text[routed:]
 
     timing: dict[str, TimingDomain] = {}
-    for m in _NEXTPNR_FMAX.finditer(report):
+    for m in NEXTPNR_FMAX.finditer(report):
         net = m.group("name")
         clock = nets.get(net)
         if clock is None:
@@ -499,7 +499,7 @@ _VIVADO_REQUIREMENT = re.compile(
 _VIVADO_NO_PATHS = re.compile(r"^tt-harness no paths: (?P<a>\S+) -> (?P<b>\S+)$", re.MULTILINE)
 
 
-def _table_rows(text: str, title: str) -> list[list[str]]:
+def table_rows(text: str, title: str) -> list[list[str]]:
     """The rows of a `report_timing_summary` table, split on whitespace."""
     start = text.find(f"| {title}\n")
     if start < 0:
@@ -518,7 +518,7 @@ def _table_rows(text: str, title: str) -> list[list[str]]:
     return rows
 
 
-def _ns(text: str) -> float | None:
+def ns_value(text: str) -> float | None:
     return None if text == "NA" else float(text)
 
 
@@ -585,7 +585,7 @@ def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomai
     requirements = {(m["a"], m["b"]): float(m["ns"]) for m in _VIVADO_REQUIREMENT.finditer(text)}
     no_paths = {(m["a"], m["b"]) for m in _VIVADO_NO_PATHS.finditer(text)}
     periods = {}
-    for row in _table_rows(text, "Clock Summary"):
+    for row in table_rows(text, "Clock Summary"):
         name, period = row[0], float(row[-2])
         if name not in names:
             raise TimingError(f"unconstrained: unexpected clock {name} in the design", log)
@@ -596,16 +596,16 @@ def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomai
         periods[name] = period
 
     timing: dict[str, TimingDomain] = {}
-    for row in _table_rows(text, "Intra Clock Table"):
+    for row in table_rows(text, "Intra Clock Table"):
         name = row[0]
         if name not in periods:
             raise TimingError(f"clock {name} in the intra-clock table has no period", log)
         if len(row) == 13:
-            wns, whs, wpws = _ns(row[1]), _ns(row[5]), _ns(row[9])
+            wns, whs, wpws = ns_value(row[1]), ns_value(row[5]), ns_value(row[9])
         elif len(row) == 5:
             # Vivado leaves the setup and hold columns empty for a clock with no paths of
             # its own and fills in only its pulse width.
-            wns, whs, wpws = None, None, _ns(row[1])
+            wns, whs, wpws = None, None, ns_value(row[1])
         else:
             raise TimingError(f"cannot read the intra-clock row for {name}: {row}", log)
         if (wns is None) != (whs is None):
@@ -655,11 +655,11 @@ def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomai
             requirement_ns=requirement,
         )
 
-    for row in _table_rows(text, "Inter Clock Table"):
-        pair(row[0], row[1], _ns(row[2]), _ns(row[6]), "", True)
-    for row in _table_rows(text, "Other Path Groups Table"):
+    for row in table_rows(text, "Inter Clock Table"):
+        pair(row[0], row[1], ns_value(row[2]), ns_value(row[6]), "", True)
+    for row in table_rows(text, "Other Path Groups Table"):
         # Recovery and removal of asynchronous resets, e.g. a project's `negedge rst_n`.
-        pair(row[1], row[2], _ns(row[3]), _ns(row[7]), f" ({row[0].strip('*')})", False)
+        pair(row[1], row[2], ns_value(row[3]), ns_value(row[7]), f" ({row[0].strip('*')})", False)
 
     absent = sorted(k for k in names.values() if k not in timing)
     if absent:

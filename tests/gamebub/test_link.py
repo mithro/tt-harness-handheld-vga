@@ -133,6 +133,38 @@ def test_cpu_acknowledges_forwarded_command():
     assert valid_after_ack == 0
 
 
+def test_held_cmd_ack_does_not_clear_a_new_command_silently():
+    """cmd_ack is a strobe acted on at its rising edge: a level held high across the arrival
+    of a forwarded command must not capture and then clear it without a trace."""
+
+    def body(model, dut):
+        yield dut.link.cmd_ack.eq(1)  # held high from before the command arrives
+        yield from sim.wait_ticks(8)
+        with pytest.raises(FirmwareError):
+            yield from model.command([0x0405, 11, 12])
+        valid = yield from read_sys(dut.link.cmd_valid)
+        words = []
+        for w in dut.link.cmd_words:
+            words.append((yield w))
+        # A second command while the level is still held: kept first, flagged overrun.
+        with pytest.raises(FirmwareError):
+            yield from model.command([0x0406, 13])
+        overrun = yield from read_sys(dut.link.cmd_overrun)
+        still_valid = yield dut.link.cmd_valid
+        # A real acknowledge is a new rising edge.
+        yield dut.link.cmd_ack.eq(0)
+        yield from sim.wait_ticks(8)
+        yield dut.link.cmd_ack.eq(1)
+        cleared = yield from read_sys(dut.link.cmd_valid)
+        return valid, words, overrun, still_valid, cleared
+
+    _, (valid, words, overrun, still_valid, cleared) = run_link(body)
+    assert valid == 1
+    assert words[:3] == [0x0405, 11, 12]
+    assert (overrun, still_valid) == (1, 1)
+    assert cleared == 0
+
+
 def test_forwarded_command_overrun_keeps_first_and_flags():
     def ack(dut):
         yield dut.link.cmd_ack.eq(1)
