@@ -1,26 +1,24 @@
 tt-harness clock root: project/hvsync_gen/vsync_reg/Q
 tt-harness clock contributor: project/hvsync_gen/vsync_reg/Q FDRE pclk rising direct no-async
 tt-harness project clock: project_clk0 on project/hvsync_gen/vsync_reg/Q kind register
-tt-harness requirement: pclk -> pclk setup 60.000 ns
+tt-harness requirement: pclk -> pclk setup 80.000 ns
 tt-harness no paths: pclk -> project_clk0
-tt-harness requirement: pclk -> sys setup 20.000 ns
-tt-harness requirement: project_clk0 -> pclk setup 60.000 ns
-tt-harness requirement: project_clk0 -> project_clk0 setup 120.000 ns
-tt-harness requirement: project_clk0 -> sys setup 20.000 ns
-tt-harness requirement: sys -> pclk setup 20.000 ns
-tt-harness requirement: sys -> project_clk0 setup 20.000 ns
+tt-harness requirement: pclk -> sys setup 30.000 ns
+tt-harness requirement: project_clk0 -> pclk setup 80.000 ns
+tt-harness requirement: project_clk0 -> project_clk0 setup 160.000 ns
+tt-harness requirement: project_clk0 -> sys setup 30.000 ns
+tt-harness requirement: sys -> pclk setup 30.000 ns
+tt-harness requirement: sys -> project_clk0 setup 30.000 ns
 tt-harness requirement: sys -> sys setup 10.000 ns
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2025.2 (lin64) Build 6299465 Fri Nov 14 12:34:56 MST 2025
-| Date         : Tue Nov 24 15:18:42 2026
-| Host         : big-storage running 64-bit Debian GNU/Linux 13 (trixie)
-| Command      : report_timing_summary -max_paths 10 -report_unconstrained -file /home/tim/github/TinyTapeout/tt-harness-handheld-vga/.claude/worktrees/agent-a5c2219fc750cb778/build/compare/arty-vivado/ttsky26a/tt_um_algofoogle_dottee/timing.rpt
+| Date         : Tue Nov 24 19:42:32 2026
 | Design       : arty_compare
 | Device       : 7a35ti-csg324
 | Speed File   : -1L  PRODUCTION 1.23 2018-06-13
 | Design State : Routed
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 Timing Summary Report
 
@@ -150,7 +148,7 @@ Table of Contents
 
     WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
     -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
-      5.789        0.000                      0                  395        0.121        0.000                      0                  395        4.500        0.000                       0                   180  
+      5.127        0.000                      0                  396        0.168        0.000                      0                  396        4.500        0.000                       0                   181  
 
 
 All user specified timing constraints are met.
@@ -164,8 +162,8 @@ All user specified timing constraints are met.
 Clock             Waveform(ns)         Period(ns)      Frequency(MHz)
 -----             ------------         ----------      --------------
 sys               {0.000 5.000}        10.000          100.000         
-  pclk            {0.000 30.000}       60.000          16.667          
-    project_clk0  {0.000 60.000}       120.000         8.333           
+  pclk            {0.000 40.000}       80.000          12.500          
+    project_clk0  {0.000 80.000}       160.000         6.250           
 
 
 ------------------------------------------------------------------------------------------------
@@ -175,9 +173,9 @@ sys               {0.000 5.000}        10.000          100.000
 
 Clock                 WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
 -----                 -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
-sys                     5.789        0.000                      0                  221        0.121        0.000                      0                  221        4.500        0.000                       0                   114  
-  pclk                 46.283        0.000                      0                  122        0.167        0.000                      0                  122       29.500        0.000                       0                    54  
-    project_clk0      117.741        0.000                      0                   12        0.292        0.000                      0                   12       59.500        0.000                       0                    12  
+sys                     5.127        0.000                      0                  222        0.168        0.000                      0                  222        4.500        0.000                       0                   115  
+  pclk                 65.126        0.000                      0                  122        0.191        0.000                      0                  122       39.500        0.000                       0                    54  
+    project_clk0      157.764        0.000                      0                   12        0.262        0.000                      0                   12       79.500        0.000                       0                    12  
 
 
 ------------------------------------------------------------------------------------------------
@@ -187,10 +185,10 @@ sys                     5.789        0.000                      0               
 
 From Clock    To Clock          WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints  
 ----------    --------          -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------  
-pclk          sys                15.699        0.000                      0                    7        1.010        0.000                      0                    7  
-project_clk0  sys                15.087        0.000                      0                    1        1.399        0.000                      0                    1  
-sys           pclk               16.758        0.000                      0                   48        8.448        0.000                      0                   48  
-project_clk0  pclk               44.255        0.000                      0                   59        0.523        0.000                      0                   59  
+pclk          sys                25.669        0.000                      0                    7        0.985        0.000                      0                    7  
+project_clk0  sys                25.171        0.000                      0                    1        1.384        0.000                      0                    1  
+sys           pclk               25.763        0.000                      0                   48        8.390        0.000                      0                   48  
+project_clk0  pclk               63.094        0.000                      0                   59        0.306        0.000                      0                   59  
 
 
 ------------------------------------------------------------------------------------------------
@@ -200,7 +198,7 @@ project_clk0  pclk               44.255        0.000                      0     
 
 Path Group         From Clock         To Clock               WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints  
 ----------         ----------         --------               -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------  
-**async_default**  sys                project_clk0            18.795        0.000                      0                   12        8.016        0.000                      0                   12  
+**async_default**  sys                project_clk0            27.892        0.000                      0                   12        8.104        0.000                      0                   12  
 
 
 ------------------------------------------------------------------------------------------------
@@ -222,3 +220,4 @@ Path Group    From Clock    To Clock
 (none)        sys                         
 
 
+------------------------------------------------------------------------------------------------
