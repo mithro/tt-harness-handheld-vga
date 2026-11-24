@@ -328,7 +328,7 @@ The same Arty (host `pi7`), 10:29 to 10:34 UTC, room temperature. These are the 
 - In every gate of all three captures G equals F. Over the 60 gates the counts of A and of B each sum to within 0.49 of sixty times the ideal.
 - Gate 0, the start-up: F 25,174,587 (A) and 25,174,589 (B), G 25,174,248 and 25,174,223, as in Task 7c; and H is now a real count in gate 0 (51,729,949 and 51,562,987), where the per-meter gates could report 0.
 - All lines whole, checksums good, gate numbers consecutive, UART error counters unchanged.
-- Vivado's H is 71 of 143 phases here and was 72 of 143 in Task 7c: the two neighbours of 71.5, which is 50%. The build is a different placement (the probe changed), so the fixed phase between the two clocks moved; this is the method's one-step resolution, not a change of duty cycle.
+- Vivado's H is 71 of 143 phases here and was 72 of 143 in Task 7c: the two neighbours of 71.5, which is 50%. The build is a different placement (the probe changed), which can move the fixed phase between the two clocks by a fraction of a step; that explanation was not tested. Either reading is 50% within the method's one-step resolution.
 - The filter table is still the hard-coded 0x3d4: wrong for A (MULT 9; Vivado 0x394) and right for B (MULT 18). Both locked and stayed locked for the minute.
 
 ### Still open
