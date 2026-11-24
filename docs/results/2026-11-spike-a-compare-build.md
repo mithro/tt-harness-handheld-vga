@@ -86,3 +86,65 @@ the samples compared with the first 1,300,000 clocks of the shared reference, ab
 - `tt_um_gamepad_pmod_demo` and `tt_um_2048_vga_game` show one static picture with idle
   inputs, and the compare stimulus holds the inputs fixed, so their `exact` proves only that
   still image, here and on hardware.
+
+## What "timing met" means
+
+A build is accepted only if every clock and clock pair in its timing report is constrained
+and met (`tt_harness.build.check`). What that covers differs between the toolchains, and in
+neither case is it the design at its real clock rate.
+
+The compare build has a 100 MHz system clock (`sys`) and a stepped project clock (`pclk`),
+a register toggled by the recorder and put on a BUFG. With a settle time of S = 2 system
+cycles, `pclk`'s shortest real period is 2 x (S + 1) x 10 ns = 60 ns (16.67 MHz), and that
+is the period it is constrained at. On the board `pclk` steps once per UART byte, 100 kHz
+at 1,000,000 baud. A sys-side change has S system cycles (20 ns) to reach the next project
+clock edge, and `uo_out` has S system cycles from a project clock edge to the sample.
+
+- **Vivado**: setup and hold, with the clock network's real insertion delays, for `sys` at
+  10 ns, for `pclk` at the stepped clock's 60 ns period (not at the project's 25 MHz), and
+  for the paths between them over the 20 ns the recorder really allows (multicycle paths of
+  S system cycles, both ways). Clocks a project makes from its own flip-flops are generated
+  clocks of `pclk` with the requirements `tt_harness/build.py` derives edge by edge. This is
+  a sign-off of the compare build as a circuit; it is not a statement that the project
+  would work at 25 MHz.
+- **openXC7**: setup only. nextpnr-xilinx 0.8.2 does no hold analysis at all. Within a clock
+  it checks setup against the constraint (`sys` 100 MHz, `pclk` and project clocks
+  16.67 MHz, doubled when a clock is used on both edges, because it times falling-edge
+  cells as rising). Between clocks it has no requirement of its own: it reports the largest
+  data-path delay, without the clocks' insertion delays, and the harness checks that figure
+  against a budget of its own, the 20 ns less one system period set aside for the
+  unmeasured difference in clock arrival, so 10 ns between `sys` and `pclk`. That budget
+  assumes the clocks arrive within 10 ns of each other. Clocks a project makes are on
+  ordinary routing, with a skew the tool does not report.
+
+The limitations each successful build reports, verbatim (`BuildResult.limitations`):
+
+- every openXC7 build: "openXC7: nextpnr-xilinx performs no hold analysis"
+- every openXC7 build: "openXC7: cross-domain checks are harness budgets on nextpnr's
+  data-path delays, assuming clock-insertion skew under 10 ns (one system period)"
+- an openXC7 build of a design that makes a clock: "openXC7: project clocks are on local
+  routing with unmeasured skew"
+- the per-design entries are in the table under "Builds" below.
+
+## Known gaps
+
+Known, and not fixed by this task:
+
+1. **Gated or multiplexed stepped clock in Vivado.** Vivado carries `pclk` through a
+   project's own combinational gate or multiplexer by itself, so flip-flops clocked that way
+   are timed as plain `pclk`, with no project clock reported and no flag in the result.
+2. **A design that never uses `rst_n` or its inputs as data is refused.** Such a design has
+   no path from `sys` to `pclk`, and the gate requires that pair: the build fails with
+   "unconstrained: clock domain(s) sys->pclk absent from the timing report".
+3. **Bare "met" for paths of a clock that is not signed off.** The result line of a clock
+   pair involving a project clock with `signed_off` false prints "met" without saying that
+   it rests on an assumption; only the clock's own line and `limitations` say so.
+4. **Inputs are held fixed.** The compare stimulus holds `ui_in` and `uio_in` at the
+   reference's values (0 and 0 for the whole pool) after a 10-clock reset. Input-driven
+   behaviour and the gamepad are not exercised; `tt_um_gamepad_pmod_demo` and
+   `tt_um_2048_vga_game` are checked as one still picture.
+5. **`uio` outputs are not recorded on hardware.** The frame carries `uo_out` only; audio on
+   `uio[7]` (`tt_um_algofoogle_dottee`) is not compared.
+6. **Nothing runs the project at its real clock speed.** The project clock is stepped at
+   100 kHz on the board and timed at 16.67 MHz at most.
+7. **One board, one run per bitstream.** See "Hardware" for the count.
