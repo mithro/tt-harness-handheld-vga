@@ -60,7 +60,7 @@ from migen.genlib.cdc import MultiReg
 from tt_harness import clock_build as cb
 from tt_harness.compare.recorder import _UartTx
 from tt_harness.core.clocking import MmcmSetting, ProjectClock, explicit_setting
-from tt_harness.core.freq_meter import FreqMeter, HighTimeMeter, sampling_phases
+from tt_harness.core.freq_meter import FreqMeter, Gate, HighTimeMeter, sampling_phases
 
 CLK_HZ = cb.ARTY.clk_hz
 GATE_CYCLES = 100_000_000
@@ -257,15 +257,17 @@ class ProbeCore(Module):
         self.locked = Signal()
         self.level = Signal()
         self.tx = Signal()
-        self.submodules.free = free = FreqMeter(gate_cycles, free_domain)
-        self.submodules.gated = gated = FreqMeter(gate_cycles, gated_domain)
-        self.submodules.high = high = HighTimeMeter(gate_cycles)
+        # One gate for the three meters, so that the line holds three counts of one gate.
+        self.submodules.gate = gate = Gate(gate_cycles)
+        self.submodules.free = free = FreqMeter(gate, free_domain)
+        self.submodules.gated = gated = FreqMeter(gate, gated_domain)
+        self.submodules.high = high = HighTimeMeter(gate)
         self.submodules.lock = lock = LockMonitor()
         self.submodules.sender = sender = LineSender(uart_divider)
         self.comb += [
             lock.locked.eq(self.locked),
             high.level.eq(self.level),
-            # The three meters have identical gates that start together at configuration.
+            # The three meters share the gate: their `valid`s are the same clock.
             sender.strobe.eq(free.valid),
             sender.free.eq(free.count),
             sender.gated.eq(gated.count),

@@ -53,16 +53,33 @@ def sampling_phases(f_signal: Fraction, f_sample: Fraction) -> int:
     return (Fraction(f_signal) / Fraction(f_sample)).denominator
 
 
-class _Gate(Module):
-    """`tick` is high for one system clock in every `gate_cycles`."""
+class Gate(Module):
+    """`tick` is high for one system clock in every `gate_cycles`.
+
+    Meters that must report the same gate share one `Gate`. Separate gate counters with the
+    same reset value are not a substitute: flip-flops are not all released on the same clock
+    edge after configuration, so two such counters can start a clock apart, and a reader
+    that takes every meter's count on one meter's `valid` then gets a count that is one gate
+    old (0 in the first gate) from the others.
+    """
 
     def __init__(self, gate_cycles: int) -> None:
         if type(gate_cycles) is not int or gate_cycles < 2:
             raise ValueError(f"gate_cycles must be an integer of at least 2, not {gate_cycles!r}")
+        self.gate_cycles = gate_cycles
         self.tick = Signal()
-        left = Signal(max=gate_cycles, reset=gate_cycles - 1)
+        self.left = left = Signal(max=gate_cycles, reset=gate_cycles - 1)
         self.comb += self.tick.eq(left == 0)
         self.sync += If(self.tick, left.eq(gate_cycles - 1)).Else(left.eq(left - 1))
+
+
+def _own_or_shared(meter: Module, gate: int | Gate) -> Gate:
+    """`gate` itself if it is a `Gate`; otherwise a new one, owned by `meter`."""
+    if isinstance(gate, Gate):
+        return gate
+    own = Gate(gate)
+    meter.submodules += own
+    return own
 
 
 class FreqMeter(Module):
@@ -72,11 +89,13 @@ class FreqMeter(Module):
     `valid`, high for one system clock when `count` changes. The first gate after
     configuration starts at configuration. The measured clock is the clock of the domain
     named `meas_domain`, which the parent module provides; it may stop (the count is then
-    0) and has no reset.
+    0) and has no reset. `gate_cycles` is the gate's length, or a `Gate` shared with other
+    meters (which its owner adds as a submodule).
     """
 
-    def __init__(self, gate_cycles: int, meas_domain: str = "meas", width: int = 32) -> None:
-        self.gate_cycles = gate_cycles
+    def __init__(self, gate_cycles: int | Gate, meas_domain: str = "meas", width: int = 32) -> None:
+        self.gate = gate = _own_or_shared(self, gate_cycles)
+        self.gate_cycles = gate.gate_cycles
         self.count = Signal(width)
         self.valid = Signal()
 
@@ -96,7 +115,6 @@ class FreqMeter(Module):
         self.sync += current.eq(
             sum(reduce(xor, [gray_sys[j] for j in range(i, width)]) << i for i in range(width))
         )
-        self.submodules.gate = gate = _Gate(gate_cycles)
         self.sync += [
             self.valid.eq(gate.tick),
             If(gate.tick, self.count.eq(current - previous), previous.eq(current)),
@@ -107,11 +125,13 @@ class HighTimeMeter(Module):
     """System clocks per gate at which the asynchronous input `level` was sampled high.
 
     Outputs `count` and `valid` as `FreqMeter`. `level` goes through a two-flop synchroniser.
+    `gate_cycles` is the gate's length or a shared `Gate`, as for `FreqMeter`.
     """
 
-    def __init__(self, gate_cycles: int, width: int = 32) -> None:
-        if gate_cycles >= 2**width:
-            raise ValueError(f"a gate of {gate_cycles} cycles does not fit {width} bits")
+    def __init__(self, gate_cycles: int | Gate, width: int = 32) -> None:
+        self.gate = gate = _own_or_shared(self, gate_cycles)
+        if gate.gate_cycles >= 2**width:
+            raise ValueError(f"a gate of {gate.gate_cycles} cycles does not fit {width} bits")
         self.level = Signal()
         self.count = Signal(width)
         self.valid = Signal()
@@ -119,7 +139,6 @@ class HighTimeMeter(Module):
         sample = Signal()
         self.specials += MultiReg(self.level, sample, odomain="sys", n=2)
         running = Signal(width)
-        self.submodules.gate = gate = _Gate(gate_cycles)
         self.sync += [
             self.valid.eq(gate.tick),
             If(gate.tick, self.count.eq(running + sample), running.eq(0)).Else(

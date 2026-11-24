@@ -202,6 +202,35 @@ def test_core_reports_both_clocks_the_level_and_the_lock() -> None:
     assert good[1].high == gate and good[3].high == 0
 
 
+def test_core_line_holds_counts_of_one_gate_despite_start_up_skew() -> None:
+    """The three counts of a line are of the same gate, whenever each meter started.
+
+    On the board flip-flops are not all released on the same clock after configuration, so
+    meters with gate counters of their own can run a clock apart: the line, sent on the
+    first meter's `valid`, then carried a count one gate old from another (H = 0 in gate 0
+    was seen). Here the high-time meter's gate is restarted five clocks late to mimic that.
+    With one shared gate the restart moves all three together.
+    """
+    gate = 1100
+    dut = probe.ProbeCore(gate, DIVIDER, "free", "gated")
+
+    def drive():
+        yield dut.locked.eq(1)
+        yield dut.level.eq(1)
+        for _ in range(5):
+            yield
+        yield dut.high.gate.left.eq(gate - 1)
+
+    clocks = {"sys": SYS, "free": 14, "gated": 14}
+    good, bad = probe.parse_capture(uart_bytes(dut, dut.tx, 2 * gate + 1060, [drive()], clocks))
+    assert bad == [] and [r.gate for r in good] == [0, 1]
+    # Gate 0 is a whole gate of a level that was high throughout, less the synchroniser.
+    assert gate - 6 <= good[0].high <= gate + 6, good
+    assert good[1].high == gate
+    assert all(abs(r.free - r.gated) <= 1 for r in good), good
+    assert dut.free.gate is dut.gated.gate is dut.high.gate is dut.gate
+
+
 # Generated Verilog -----------------------------------------------------------------------------
 
 
