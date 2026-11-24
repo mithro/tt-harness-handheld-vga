@@ -9,7 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from tt_harness import __version__, fetch, manifest, prescreen, reference, verdict
+from tt_harness import __version__, build, fetch, manifest, prescreen, reference, verdict
 from tt_harness.core.stimulus import RESET_CLOCKS
 from tt_harness.host import frame
 from tt_harness.tools import REPO
@@ -57,6 +57,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="default: <repo>/work/reference/<shuttle>/<macro>",
     )
     ref_p.set_defaults(func=_cmd_reference)
+
+    bc_p = sub.add_parser(
+        "build-compare", help="build the compare bitstream for a design and check its timing"
+    )
+    bc_p.add_argument("project", metavar="SHUTTLE/MACRO")
+    bc_p.add_argument("--board", required=True, choices=sorted(build.BOARDS))
+    bc_p.add_argument("--toolchain", required=True, choices=build.TOOLCHAINS)
+    bc_p.add_argument(
+        "--clocks", type=_positive_int, default=6_000_000, help="project clocks to record"
+    )
+    bc_p.add_argument("--baud", type=_positive_int, default=1_000_000, help="UART baud rate")
+    bc_p.add_argument(
+        "--no-vivado-nettype-rewrite",
+        dest="vivado_nettype_rewrite",
+        action="store_false",
+        help="fail instead of letting Vivado read `default_nettype wire` copies (Synth 8-6735)",
+    )
+    bc_p.add_argument(
+        "--jobs", type=_positive_int, default=build.MAX_JOBS, help="cores the tools may use"
+    )
+    bc_p.add_argument(
+        "--videos-repo",
+        type=Path,
+        default=None,
+        help="tinytapeout-vga-videos checkout (default: $TT_VIDEOS_REPO)",
+    )
+    bc_p.add_argument(
+        "--cache", type=Path, default=REPO / "work" / "sources", help="default: <repo>/work/sources"
+    )
+    bc_p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="default: <repo>/build/compare/<board>-<toolchain>/<shuttle>/<macro>",
+    )
+    bc_p.set_defaults(func=_cmd_build_compare)
 
     verdict_p = sub.add_parser(
         "verdict",
@@ -122,6 +158,58 @@ def _cmd_reference(args: argparse.Namespace) -> int:
         )
         return 1
     print(dump)
+    return 0
+
+
+def _cmd_build_compare(args: argparse.Namespace) -> int:
+    step = "manifest"
+    try:
+        projects = manifest.load(args.videos_repo or manifest.default_videos_repo())
+        project = manifest.get(projects, args.project)
+        step = "fetch"
+        sources = fetch.fetch(project, args.cache)
+        for warning in sources.warnings:
+            print(f"tt-harness build-compare: warning: {warning}", file=sys.stderr)
+        out_dir = args.out_dir or (
+            REPO
+            / "build"
+            / "compare"
+            / f"{args.board}-{args.toolchain}"
+            / project.shuttle
+            / project.macro
+        )
+        step = "build"
+        result = build.build_compare(
+            project,
+            sources,
+            args.board,
+            args.toolchain,
+            out_dir,
+            args.clocks,
+            baud=args.baud,
+            jobs=args.jobs,
+            vivado_nettype_rewrite=args.vivado_nettype_rewrite,
+        )
+    except build.TimingError as e:
+        print(f"tt-harness build-compare: {args.project}: timing: {e}", file=sys.stderr)
+        return 1
+    except (
+        KeyError,
+        ValueError,
+        FileNotFoundError,
+        fetch.FetchError,
+        build.BuildError,
+    ) as e:
+        text = e.args[0] if isinstance(e, KeyError) else e
+        print(f"tt-harness build-compare: {args.project}: {step}: {text}", file=sys.stderr)
+        return 1
+    # build_compare itself warns on stderr about rewritten sources and disagreements.
+    for name, d in sorted(result.timing.items()):
+        print(f"{name}: {build.describe(d)}, {'met' if d.met else 'NOT MET'}", file=sys.stderr)
+    print(f"sources read as {result.language}", file=sys.stderr)
+    for item in result.limitations:
+        print(f"limitation: {item}", file=sys.stderr)
+    print(result.bitstream)
     return 0
 
 

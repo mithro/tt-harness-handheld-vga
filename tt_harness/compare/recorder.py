@@ -153,8 +153,10 @@ class StepRecorder(Module):
     def __init__(self, sys_clk_freq: int, baud: int, clocks: int, settle: int = 2) -> None:
         if not 0 <= clocks < 2**32:
             raise ValueError(f"clocks must be 0..2**32-1, got {clocks}")
-        if settle < 1:
-            raise ValueError(f"settle must be at least 1 system cycle, got {settle}")
+        if settle < 2:
+            # settle=1 samples one system cycle after pclk rises, before a project behind a
+            # clock buffer has updated: the recording would be skewed by one clock.
+            raise ValueError(f"settle must be at least 2 system cycles, got {settle}")
         if sys_clk_freq <= 0 or baud <= 0:
             raise ValueError(f"sys_clk_freq and baud must be positive, got {sys_clk_freq}, {baud}")
         divider = round(sys_clk_freq / baud)

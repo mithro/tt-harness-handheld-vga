@@ -248,6 +248,14 @@ def test_zero_clocks_sends_header_and_empty_crc() -> None:
     assert not _rises(run.pclk)
 
 
+def test_rejects_settle_below_two() -> None:
+    # With settle=1 the sample is taken one system cycle after pclk rises, before a project
+    # behind a clock buffer has updated, which skews the recording by one clock.
+    with pytest.raises(ValueError, match="settle must be at least 2"):
+        StepRecorder(sys_clk_freq=20, baud=10, clocks=1, settle=1)
+    StepRecorder(sys_clk_freq=20, baud=10, clocks=1, settle=2)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
