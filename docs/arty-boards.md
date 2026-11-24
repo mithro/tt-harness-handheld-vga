@@ -42,3 +42,25 @@ ssh -t -J tweed.welland.mithis.com pi@10.21.<s>.<p> 'picocom -b 115200 /dev/seri
   JB; one: JA to JC, JB to JB, JC to JD; one reads nothing). Arty JA is free on all.
 
 Raw logs of the survey are in `tmp/arty-survey/` (not committed).
+
+## Survey of the PS1 site, 2026-11-24: three hosts are up
+
+Checked from outside, without logging in: each host's public page, whether its SSH port
+answers with a banner, and whether its camera stream playlist is being updated.
+
+| Host | SSH port on `ps1.fpgas.online` | Camera stream | State |
+|---|---|---|---|
+| pi3 | 10322 answers (OpenSSH banner) | live, segments seconds old | up |
+| pi7 | 10722 answers | live, segments seconds old | up |
+| pi21 | 12122 answers | live, segments seconds old | up |
+| pi2, pi5, pi9, pi11, pi13 | no route to host | 404 | down |
+| pi23 | timed out | 404 | down |
+| pi17 | no page (404) | n/a | not registered |
+
+- The site's notes list pi2, pi3, pi5, pi7, pi9, pi11, pi13 and pi17 as Arty A7-35T hosts;
+  pi21 and pi23 are not in that list, so pi21's board type is unconfirmed.
+- "Up" means the Raspberry Pi answers and its camera is streaming. Whether the Arty is
+  attached and programmable was not checked, because that needs a login.
+- Access is by SSH as user `pi` on the port above (the site's own instructions; the
+  password is shown in the login banner) or through each host's web page, which has a
+  file upload. This is the public service: other people may be using a board at any time.
