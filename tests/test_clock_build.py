@@ -19,6 +19,7 @@ import pytest
 
 from tt_harness import clock_build as cb
 from tt_harness import tools
+from tt_harness.core.clocking import explicit_setting
 
 REPO = Path(__file__).resolve().parent.parent
 BUILD = REPO / "build" / "clock"
@@ -80,6 +81,41 @@ def test_settings_are_the_fractional_solution() -> None:
         assert (s.divclk, s.mult, s.div) == (1, mult, 35.75)
         assert s.fractional
         assert s.achieved_hz == pytest.approx(25_174_825.17, rel=1e-8)
+
+
+def _vivado_facts(feedback_ns: float, project_ns: float = 39.722) -> str:
+    """The lines `parse_vivado` reads, as a Vivado run of the Arty design would print them."""
+    checks = "".join(f"{n}. checking {c} (0)\n" for n, c in enumerate(cb.VIVADO_CHECKS, 1))
+    return checks + (
+        "tt-harness clock: clk100 period 10.000 generated 0\n"
+        f"tt-harness clock: pc_clkfb period {feedback_ns:.3f} generated 1\n"
+        f"tt-harness clock: pc_clkout_raw period {project_ns:.3f} generated 1\n"
+        "tt-harness slack: clk100 setup 4.747\n"
+        "tt-harness slack: clk100 hold 0.074\n"
+        "tt-harness slack: pc_clkfb setup none\n"
+        "tt-harness slack: pc_clkfb hold none\n"
+        "tt-harness slack: pc_clkout_raw setup 18.562\n"
+        "tt-harness slack: pc_clkout_raw hold 0.106\n"
+    )
+
+
+def test_vivado_gate_expects_the_feedback_clock_at_the_phase_detector_period(tmp_path) -> None:
+    """CLKFBOUT's clock has the input period times DIVCLK_DIVIDE: 20 ns for DIVCLK 2."""
+    log = tmp_path / "build.log"
+    divclk1 = explicit_setting(100_000_000, 1, 9.0, 35.75)
+    divclk2 = explicit_setting(100_000_000, 2, 18.0, 35.75)
+    for setting, feedback_ns in ((divclk1, 10.0), (divclk2, 20.0)):
+        domains = cb.parse_vivado(_vivado_facts(feedback_ns), cb.ARTY, setting, log)
+        assert sorted(domains) == ["input", "project"]
+        assert all(d.met for d in domains.values())
+    # The other period is a generated clock the design should not have.
+    for setting, feedback_ns in ((divclk1, 20.0), (divclk2, 10.0)):
+        with pytest.raises(cb.TimingError, match="unexpected generated clock pc_clkfb"):
+            cb.parse_vivado(_vivado_facts(feedback_ns), cb.ARTY, setting, log)
+    # A feedback clock that has timing paths is not the feedback pin alone.
+    with_paths = _vivado_facts(20.0).replace("pc_clkfb setup none", "pc_clkfb setup 1.000")
+    with pytest.raises(cb.TimingError, match="unexpected generated clock"):
+        cb.parse_vivado(with_paths, cb.ARTY, divclk2, log)
 
 
 # Open flow ---------------------------------------------------------------------------------

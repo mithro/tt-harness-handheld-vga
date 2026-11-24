@@ -248,6 +248,14 @@ def measure_one(args, facts: dict, runner) -> dict:
 # Reporting --------------------------------------------------------------------------------------
 
 
+def locked_word(gates: list[dict]) -> str:
+    """LOCKED at the ends of the gates, in a word: always, never, or how often."""
+    locked = sum(1 for g in gates if g["locked"] == 1)
+    if locked == len(gates):
+        return "always"
+    return "never" if locked == 0 else f"not always ({locked} of {len(gates)})"
+
+
 def table(rows: list[dict]) -> str:
     head = (
         "| Setting | Toolchain | Ideal count | F min / max | G min / max | LOCKED | Lock losses "
@@ -269,7 +277,7 @@ def table(rows: list[dict]) -> str:
             gate = probe.GATE_CYCLES
             measured = (
                 f"{r['free_min']:,} / {r['free_max']:,} | {r['gated_min']:,} / {r['gated_max']:,} "
-                f"| {'1' if r['locked_all'] else 'not always'} | {r['losses_max']} "
+                f"| {locked_word(r['gates'])} | {r['losses_max']} "
                 f"| {r['high_min'] / gate:.5f} / {r['high_max'] / gate:.5f} ({b['duty_phases']})"
             )
         else:

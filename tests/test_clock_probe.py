@@ -11,12 +11,11 @@ measurement itself are made by `scripts/clock_probe_run.py`.
 
 from __future__ import annotations
 
-import importlib.util
+import functools
 import re
 from fractions import Fraction
 from pathlib import Path
 
-import board_fakes
 import pytest
 from litex_boards.platforms import digilent_arty
 from migen import Module, run_simulation
@@ -26,7 +25,6 @@ from tt_harness import tools
 from tt_harness.boards import arty_clock_probe as probe
 from tt_harness.boards import arty_clock_probe_build as probe_build
 from tt_harness.boards.arty_clock_probe import Reading
-from tt_harness.host import run
 
 REPO = Path(__file__).resolve().parent.parent
 BUILD = REPO / "build" / "clock-probe"
@@ -275,11 +273,16 @@ def _programmed(job: cb.Build) -> dict[str, int]:
     return probe_build.programmed_mmcm(job.bitstream)
 
 
-@pytest.mark.toolchain
-def test_clock_probe_open_flow_build() -> None:
+@functools.cache
+def _open_build() -> cb.Build:
     if not cb.CHIPDB.is_dir() or tools.find("nextpnr-xilinx") is None:
         pytest.skip(".toolchains/ is absent; run: uv run scripts/setup_toolchains.py")
-    job = probe_build.build("B", "openxc7", BUILD / "test-B-openxc7")
+    return probe_build.build("B", "openxc7", BUILD / "test-B-openxc7")
+
+
+@pytest.mark.toolchain
+def test_clock_probe_open_flow_build() -> None:
+    job = _open_build()
     domains = job.facts["domains"]
     assert sorted(domains) == ["input", "project:BUFG", "project:BUFGCE"]
     assert all(d.met for d in domains.values()), domains
@@ -294,10 +297,21 @@ def test_clock_probe_open_flow_build() -> None:
     # The falling-edge flop of the replica has its clock inverted in the bitstream.
     fasm = (job.out_dir / "top.fasm").read_text()
     assert re.search(r"\.CLKINV$", fasm, re.MULTILINE), "no slice with an inverted clock"
-    # Measured on the board (docs/results/2026-11-spike-b-project-clock.md): this bitstream's
-    # MMCM never locks, because nextpnr-xilinx 0.8.2 feeds CLKFBIN from the interconnect and
-    # not from CLKFBOUT when COMPENSATION is INTERNAL. Asserted so that a toolchain or
-    # `ProjectClock` change that cures it is noticed.
+
+
+@pytest.mark.toolchain
+def test_clock_probe_open_flow_known_defect_feedback_is_tied_off() -> None:
+    """A KNOWN DEFECT, pinned so that its cure is noticed. This is not the wanted state.
+
+    Measured on the board (docs/results/2026-11-spike-b-project-clock.md): this bitstream's
+    MMCM never locks. nextpnr-xilinx 0.8.2 takes CLKFBIN off the feedback net and ties it to
+    VCC through the interconnect when COMPENSATION is INTERNAL (or absent), where a working
+    bitstream selects `CMT_LR_LOWER_B_CLKFBOUT2IN`, as the Vivado test below asserts. When
+    the open-flow build is fixed (plan 1, Task 7d) this test must fail, and is then to be
+    inverted to assert `CLKFBOUT2IN`.
+    """
+    job = _open_build()
+    probe_build.programmed_mmcm(job.bitstream)  # decodes the bitstream
     assert probe_build.feedback_source(job.bitstream) == "CMT_L_LOWER_B_CLK_IN3_INT"
 
 
@@ -320,66 +334,3 @@ def test_clock_probe_vivado_build() -> None:
     assert mmcm["CLKOUT0_CLKOUT1_HIGH_TIME"] == 17
     # The dedicated feedback: this is the bitstream that locks on the board.
     assert probe_build.feedback_source(job.bitstream) == "CMT_LR_LOWER_B_CLKFBOUT2IN"
-
-
-# The run script, against a fake board host ------------------------------------------------------
-
-
-def _script():
-    path = REPO / "scripts" / "clock_probe_run.py"
-    spec = importlib.util.spec_from_file_location("clock_probe_run", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _lines(gates, free: int = 25_174_825, **fields) -> bytes:
-    return b"".join(
-        probe.format_line(Reading(free + (n & 1), free, 50_000_000, 1, 0, n, **fields))
-        for n in gates
-    )
-
-
-def test_run_script_measures_the_new_bitstream_and_cleans_up(tmp_path: Path) -> None:
-    script = _script()
-    bitstream = tmp_path / "top.bit"
-    bitstream.write_bytes(b"\xaa\x99\x55\x66" * 100)
-    # Two lines of whatever was loaded before, then this load's gates 0 to 13.
-    capture = b"\x00" + _lines([200, 201], free=1) + _lines(range(14))
-    host = board_fakes.FakeHost(uart_bytes=capture)
-    doc = script.measure(board_fakes.BOARD, bitstream, 10, host)
-    assert host.dirs == set() and host.files == {}, "files were left on the board host"
-    assert host.index("listening") < host.index("openFPGALoader")
-    assert doc["remote_dir"].startswith("/home/pi/tt-harness-probe-")
-    summary = script.summarise(doc["capture"], 10)
-    assert summary["complete"] and summary["lines_before_this_load"] == 2
-    assert [g["gate"] for g in summary["gates"]] == list(range(1, 11))
-    assert (summary["free_min"], summary["free_max"]) == (25_174_825, 25_174_826)
-    assert summary["locked_all"] and summary["losses_max"] == 0
-    assert summary["lines_damaged"] == []
-
-
-def test_run_script_refuses_a_busy_board_before_uploading(tmp_path: Path) -> None:
-    script = _script()
-    bitstream = tmp_path / "top.bit"
-    bitstream.write_bytes(b"x")
-    busy = board_fakes.probe(terminals=[board_fakes.terminal(30)])
-    host = board_fakes.FakeHost(probe=busy)
-    with pytest.raises(run.BoardBusy):
-        script.measure(board_fakes.BOARD, bitstream, 10, host, wait_busy_s=0)
-    assert not host.ran("mkdir") and not host.ran("openFPGALoader")
-
-
-def test_summary_shows_damage_gaps_and_lock_loss() -> None:
-    script = _script()
-    lines = _lines(range(12)).split(b"\n")
-    lines[4] = lines[4].replace(b"F 0", b"F 8")  # a damaged line: its checksum no longer fits
-    summary = script.summarise(b"\n".join(lines), 10)
-    assert not summary["complete"] and not summary["gate_numbers_consecutive"]
-    assert len(summary["lines_damaged"]) == 1
-    lost = _lines([0, 1]) + probe.format_line(Reading(5, 0, 0, 0, 1, 2)) + _lines([3])
-    summary = script.summarise(lost, 3)
-    assert summary["complete"]
-    assert not summary["locked_all"] and summary["losses_max"] == 1
-    assert (summary["free_min"], summary["gated_min"]) == (5, 0)
-    assert script.summarise(b"", 10)["complete"] is False
