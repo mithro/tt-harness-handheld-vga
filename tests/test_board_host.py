@@ -89,3 +89,31 @@ def test_probe_reports_this_machine_without_counting_itself():
     assert abs(doc["now"] - time.time()) < 60
     assert all(p["pid"] != os.getpid() for p in doc["processes"])
     json.dumps(doc)
+
+
+# bytes before the header ----------------------------------------------------------------
+
+
+def test_receive_counts_no_bytes_before_a_header_that_comes_first():
+    info, _ = _receive([frame(PAYLOAD)], frame_length(len(PAYLOAD)))
+    assert info["pre_header_count"] == 0 and info["pre_header_hex"] == ""
+
+
+def test_receive_records_a_stray_byte_before_the_header():
+    info, _ = _receive([b"\x00", frame(PAYLOAD)], frame_length(len(PAYLOAD)))
+    assert info["complete"] and info["crc_ok"] is True
+    assert info["pre_header_count"] == 1 and info["pre_header_hex"] == "00"
+
+
+def test_receive_reports_at_most_sixteen_values_but_the_whole_count():
+    noise = bytes(range(0x80, 0x80 + 40))
+    info, _ = _receive([noise + frame(PAYLOAD)], frame_length(len(PAYLOAD)))
+    assert info["pre_header_count"] == 40
+    assert info["pre_header_hex"] == noise[: board_host.PRE_HEADER_KEPT].hex()
+    assert board_host.PRE_HEADER_KEPT == 16
+    assert info["data"].startswith(noise)  # the recording still has all of them
+
+
+def test_receive_without_a_header_has_no_pre_header_count():
+    info, _ = _receive([b"noise"], frame_length(len(PAYLOAD)), timeout_s=3.0)
+    assert info["pre_header_count"] is None and info["pre_header_hex"] == ""

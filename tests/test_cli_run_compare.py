@@ -14,7 +14,8 @@ import pytest
 from board_fakes import UART, frame
 
 from tt_harness import build, cli, fetch, manifest, prescreen
-from tt_harness.host import run
+from tt_harness.compare.recorder import header
+from tt_harness.host import board_host, run
 
 ID = "tt07/tt_um_tinytapeout_dvd_screensaver"
 REF = bytes((i * 5 + 1) & 0xFF for i in range(3000))
@@ -70,6 +71,7 @@ def env(tmp_path, monkeypatch):
             "receive_s": 3.5,
             "receiver": {
                 "stopped": "complete",
+                **board_host.pre_header(state.uart_bytes, state.uart_bytes.find(header(clocks))),
                 "icount_before": dict(counters, rx=5),
                 "icount_after": dict(counters, rx=3018, overrun=2),
             },
@@ -217,3 +219,26 @@ def test_existing_build_matches_only_the_same_settings(tmp_path):
     older = top_v.stat().st_mtime - 100
     os.utime(bit, (older, older))
     assert cli._existing_build(project, "arty", 5000, 1_000_000, out_dir) is None
+
+
+def test_bytes_before_the_header_are_counted_printed_and_do_not_change_the_verdict(env, capsys):
+    env.uart_bytes = b"\x00" + frame(REF)
+    code, doc, err = _run(env, capsys)
+    assert code == 0 and doc["verdict"] == "exact"
+    assert doc["run"]["pre_header_count"] == 1 and doc["run"]["pre_header_hex"] == "00"
+    assert doc["run"]["bytes_received"] == len(frame(REF)) + 1
+    assert "tt-harness run-compare: bytes before the frame header: 1 (00)" in err
+
+
+def test_a_clean_run_prints_zero_bytes_before_the_header(env, capsys):
+    code, doc, err = _run(env, capsys)
+    assert code == 0 and doc["run"]["pre_header_count"] == 0
+    assert "tt-harness run-compare: bytes before the frame header: 0\n" in err
+
+
+def test_a_recording_without_a_header_has_an_unknown_count(env, capsys):
+    env.uart_bytes = b"\x00\x00\x00"
+    code, doc, err = _run(env, capsys)
+    assert code == 2 and doc["verdict"] == "inconclusive"
+    assert doc["run"]["pre_header_count"] is None
+    assert "bytes before the frame header: unknown" in err

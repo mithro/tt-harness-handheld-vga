@@ -70,6 +70,7 @@ class FakeStream:
         self.host.receiver_rc = 0 if complete else board_host.EXIT_INCOMPLETE
         return {
             "bytes": len(data),
+            **board_host.pre_header(data, at),
             "complete": complete,
             "stopped": "complete" if complete else "timeout",
             "sha256": hashlib.sha256(data).hexdigest(),

@@ -44,6 +44,7 @@ ICOUNT_FIELDS = (
     "buf_overrun",
 )
 EXIT_INCOMPLETE = 3
+PRE_HEADER_KEPT = 16  # values of this many bytes before the header are reported
 
 
 def say(kind: str, doc: dict) -> None:
@@ -164,6 +165,20 @@ def icount(fd: int) -> dict | None:
     return dict(zip(ICOUNT_FIELDS, struct.unpack("11i", raw[:44]), strict=True))
 
 
+def pre_header(data: bytes, header_at: int) -> dict:
+    """What arrived before the frame header: how many bytes, and the first few in hex.
+
+    Without a header (`header_at` negative) nothing is known to be before it: the count is
+    None. The bytes themselves stay in the recording either way.
+    """
+    if header_at < 0:
+        return {"pre_header_count": None, "pre_header_hex": ""}
+    return {
+        "pre_header_count": header_at,
+        "pre_header_hex": bytes(data[: min(header_at, PRE_HEADER_KEPT)]).hex(),
+    }
+
+
 def receive(port, header: bytes, length: int, timeout_s: float, idle_s: float, **hooks) -> dict:
     """Read `port` until `length` bytes starting at `header` have arrived.
 
@@ -216,6 +231,7 @@ def receive(port, header: bytes, length: int, timeout_s: float, idle_s: float, *
         "data": bytes(data),
         "bytes": len(data),
         "header_at": header_at,
+        **pre_header(data, header_at),
         "after_header": len(data) - header_at if header_at >= 0 else 0,
         "wanted": length,
         "complete": complete,

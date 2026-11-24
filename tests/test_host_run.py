@@ -263,3 +263,13 @@ def test_a_sent_file_that_arrives_damaged_is_refused(tmp_path, capsys):
 
 def test_the_script_uploaded_is_the_board_host_module():
     assert Path(board_host.__file__).resolve() == run.REMOTE_SCRIPT.resolve()
+
+
+def test_record_keeps_the_pre_header_bytes_in_the_run_json(bitstream, tmp_path):
+    host = FakeHost(uart_bytes=b"\x00\xfe" + frame(PAYLOAD))
+    out = _record(host, bitstream, tmp_path)
+    receiver = json.loads(run.meta_path(out).read_text())["receiver"]
+    assert receiver["pre_header_count"] == 2 and receiver["pre_header_hex"] == "00fe"
+    assert out.read_bytes().startswith(b"\x00\xfe")
+    clean = _record(FakeHost(uart_bytes=frame(PAYLOAD)), bitstream, tmp_path / "clean")
+    assert json.loads(run.meta_path(clean).read_text())["receiver"]["pre_header_count"] == 0
