@@ -316,3 +316,31 @@ a live Arty A7-35T was found at the PS1 site (`docs/arty-boards.md`). It overrid
 - [ ] **Step 5:** Leave the board as found: no files left, no processes left; the last bitstream loaded stays (there is no "previous" state to restore), and that is recorded.
 - [ ] **Step 6:** Write `docs/results/2026-11-first-hardware-run.md`: board, date, commands, per run the build toolchain, bytes received, time taken, verdict and first differing clock if any; what was and was not shown. Update `docs/arty-boards.md` with anything learned about using the PS1 boards.
 - [ ] **Step 7:** Commit.
+
+---
+
+### Task 7c: Measure the project clock on a real Arty (added 2026-11-24)
+
+Added after Task 7b found that the open flow programs the MMCM differently from Vivado
+(`docs/results/2026-11-spike-b-project-clock.md`): for a fractional CLKOUT0 divider with an odd
+integer part the divider fields differ, and nextpnr-xilinx 0.8.2 hard-codes the lock/filter
+table (right only for a multiplier of 10, 17 or 18). Whether the open-flow clock has the right
+frequency, and whether the MMCM locks, can only be settled on hardware. This task may SSH to and
+use the PS1 Arty, like Task 10.
+
+**Files:**
+- Create: `tt_harness/core/freq_meter.py`, `tt_harness/boards/arty_clock_probe.py`, `tests/test_freq_meter.py`, `tests/test_clock_probe.py`, `scripts/clock_probe_run.py`
+- Modify: `docs/results/2026-11-spike-b-project-clock.md`, `tt_harness/clock_build.py` only if needed
+
+**Interfaces:**
+- Produces:
+  - `FreqMeter(gate_cycles: int)` (Migen): counts rising edges of an asynchronous input clock `clk_meas` during a gate of `gate_cycles` reference (system) clock cycles, using a counter in the measured domain sampled across with a safe crossing (Gray code or a toggle-and-hold handshake); outputs `count: Signal(32)` and `valid` (one pulse per gate) in the system domain. Also `HighTimeMeter`-style duty measurement is optional (see Step 4).
+  - A probe top for the Arty (100 MHz oscillator): one `ProjectClock`-equivalent MMCM with parameters given at build time (`divclk`, `mult`, `div`, so settings other than the solver's can be built), the free-running BUFG output measured by `FreqMeter` with a 1 s gate (100,000,000 system cycles), and a UART line printed once per gate at 115200 baud: `F <count> L <locked> U <lock-losses>\n` where `locked` is the MMCM's LOCKED sampled in the system domain and `lock-losses` counts falling edges of LOCKED since configuration (saturating). Also the gated (BUFGCE) output measured the same way on a second meter: `G <count>`.
+  - `scripts/clock_probe_run.py`: builds a probe for a named setting and toolchain, loads it on the board with the existing `tt_harness.host.run` runner pieces (activity check, cleanup), captures 10 lines of UART, and prints a table.
+
+- [ ] **Step 1:** `tests/test_freq_meter.py` (Migen simulator, two clock domains): a measured clock of a known ratio to the reference gives a count within ±1 of the expected value per gate, for ratios below and above 1 and for a non-integer ratio; a stopped measured clock gives 0; the count is never torn (a deliberately adversarial phase sweep gives only values within ±1).
+- [ ] **Step 2:** Implement `FreqMeter`. `tests/test_clock_probe.py`: the UART line format, the lock-loss counter, and that the generated Verilog has the MMCM parameters asked for.
+- [ ] **Step 3:** Build with both toolchains (marked `toolchain` / `vivado`) for these settings, each from the Arty's 100 MHz: **A** `divclk 1, mult 9, div 35.75` (the Arty's own solver setting: odd divider; wrong filter table in the open flow); **B** `divclk 2, mult 18, div 35.75` (the Game Bub's MMCM numbers: PFD 50 MHz, VCO 900 MHz; filter table right in the open flow); **C** `divclk 1, mult 9, div 36.75` (even-integer control, 24.4898 MHz); **D** an integer control `divclk 1, mult 9, div 36` (25.000 MHz). Timing must be met with every domain constrained, as in Task 7b.
+- [ ] **Step 4:** Run all eight bitstreams on the board (`ssh -p 10722 pi@ps1.fpgas.online`, UART `/dev/serial/by-id/usb-Digilent_Digilent_USB_Device_210319A764F5-if01-port0`), ten 1 s readings each. Expected frequency for A and B is 25,174,825 Hz, C 24,489,796 Hz, D 25,000,000 Hz, each within the oscillator's tolerance (the Arty's oscillator is ±50 ppm class; the Pi's UART timing is irrelevant because the gate is the FPGA's own oscillator, so the reading is a pure ratio and should be within a few counts of the ideal). Record LOCKED and lock losses. If cheap, also measure the duty cycle of the free-running output for A and B in both flows (sample the measured clock with the 100 MHz clock over many cycles and report the fraction high; asynchronous sampling gives the duty cycle statistically) since the open flow's encoding is expected to change it.
+- [ ] **Step 5:** Update `docs/results/2026-11-spike-b-project-clock.md` with a "Measured on hardware" section: the table of readings, and a plain conclusion for each open question: is the open-flow frequency right for an odd integer part; does the MMCM lock and stay locked with the wrong filter table; what the duty cycle is. State what one board at room temperature for ten seconds does and does not show about lock stability. Then, based on the measurement, say whether the solver needs any toolchain-specific rule.
+- [ ] **Step 6:** Leave the board clean. Commit.
