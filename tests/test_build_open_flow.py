@@ -251,6 +251,46 @@ def test_tied_off_line_is_not_read_as_a_clock_by_the_gate() -> None:
     assert build.project_clocks(timing) == ()
 
 
+# Vivado's root discovery has the same rule ---------------------------------------------------
+
+MUL16 = ("mul16", "tt_um_test_mul16")  # one unregistered DSP48E1 in Vivado
+
+
+def test_vivado_root_discovery_skips_a_clock_pin_on_a_constant_net(tmp_path: Path) -> None:
+    tcl = build.vivado_clocks_tcl(PLAN, arty, tmp_path)
+    skip = tcl.index('if {$type eq "GROUND" || $type eq "POWER"} {')
+    assert "set type [get_property -quiet TYPE [get_nets -quiet -of_objects $pin]]" in tcl
+    assert 'puts "tt-harness tied-off clock pin: $pin"' in tcl
+    # The pin is passed over before its driver could become a root.
+    assert tcl.index("foreach pin [get_pins") < skip < tcl.index("lappend tt_roots $drv")
+    assert tcl.index("continue", skip) < tcl.index("set drv [get_pins", skip)
+
+
+def test_vivado_tied_off_line_is_not_read_as_a_project_clock() -> None:
+    line = "tt-harness tied-off clock pin: project/p/CLK\n"
+    timing = build.parse_vivado(line + VIVADO_PASS, PLAN, Path("build.log"))
+    assert build.project_clocks(timing) == ()
+
+
+@pytest.mark.vivado
+@pytest.mark.skipif(build.tools.vivado_settings() is None, reason="Vivado not installed")
+def test_real_build_vivado_unregistered_dsp_is_not_a_project_clock(build_root: Path) -> None:
+    # Before Task 9b the GND cell driving the DSP48E1's CLK pin was taken as a clock root
+    # (`project/GND/G`), constrained as a primary clock, and the gate then refused the build:
+    # "unconstrained: clock domain(s) project:project/GND/G absent from the timing report".
+    sources = _local(*MUL16)
+    out = build_root / "arty-vivado" / "mul16"
+    result = build.build_compare(sources.project, sources, "arty", "vivado", out, 100_000)
+    assert result.project_clocks == ()
+    assert set(result.timing) == {"sys", "pclk", "sys->pclk", "pclk->sys"}
+    assert all(d.met and d.signed_off for d in result.timing.values())
+    log = result.log.read_text()
+    assert "tt-harness tied-off clock pin: " in log
+    assert "tt-harness clock root:" not in log
+    assert "DSP48E1" in (out / "utilization.rpt").read_text()
+    assert (out / "clock-roots.txt").read_text() == ""
+
+
 # Where tests build -----------------------------------------------------------------------------
 
 

@@ -1173,6 +1173,13 @@ set tt_roots {{}}
 foreach pin [get_pins -quiet -filter {{IS_CLOCK}} \\
         -of_objects [get_cells -quiet -hier -filter {{IS_SEQUENTIAL}}]] {{
     if {{[llength [get_clocks -quiet -of_objects $pin]]}} {{ continue }}
+    # A clock pin tied to a constant (an unregistered DSP48E1's CLK, say) is not clocked: its
+    # driver is a GND or VCC cell, not a clock made by the project.
+    set type [get_property -quiet TYPE [get_nets -quiet -of_objects $pin]]
+    if {{$type eq "GROUND" || $type eq "POWER"}} {{
+        puts "tt-harness tied-off clock pin: $pin"
+        continue
+    }}
     set drv [get_pins -quiet -leaf -filter {{DIRECTION == OUT}} -of_objects [get_nets -of_objects $pin]]
     if {{[llength $drv] != 1}} {{ error "tt-harness: clock pin $pin has driver(s) '$drv'" }}
     if {{[lsearch -exact $tt_roots $drv] < 0}} {{ lappend tt_roots $drv }}
