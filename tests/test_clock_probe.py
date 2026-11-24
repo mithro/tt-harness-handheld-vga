@@ -24,6 +24,7 @@ from migen import Module, run_simulation
 from tt_harness import clock_build as cb
 from tt_harness import tools
 from tt_harness.boards import arty_clock_probe as probe
+from tt_harness.boards import arty_clock_probe_build as probe_build
 from tt_harness.boards.arty_clock_probe import Reading
 from tt_harness.host import run
 
@@ -242,14 +243,14 @@ def test_probe_is_a_module_the_clock_build_can_drive() -> None:
 
 def _programmed(job: cb.Build) -> dict[str, int]:
     assert job.bitstream is not None and job.bitstream.is_file()
-    return probe.programmed_mmcm(job.bitstream)
+    return probe_build.programmed_mmcm(job.bitstream)
 
 
 @pytest.mark.toolchain
 def test_clock_probe_open_flow_build() -> None:
     if not cb.CHIPDB.is_dir() or tools.find("nextpnr-xilinx") is None:
         pytest.skip(".toolchains/ is absent; run: uv run scripts/setup_toolchains.py")
-    job = probe.build("B", "openxc7", BUILD / "test-B-openxc7")
+    job = probe_build.build("B", "openxc7", BUILD / "test-B-openxc7")
     domains = job.facts["domains"]
     assert sorted(domains) == ["input", "project:BUFG", "project:BUFGCE"]
     assert all(d.met for d in domains.values()), domains
@@ -270,7 +271,7 @@ def test_clock_probe_open_flow_build() -> None:
 def test_clock_probe_vivado_build() -> None:
     if tools.vivado_settings() is None:
         pytest.skip("Vivado 2025.2 is not installed")
-    job = probe.build("B", "vivado", BUILD / "test-B-vivado")
+    job = probe_build.build("B", "vivado", BUILD / "test-B-vivado")
     domains = job.facts["domains"]
     assert sorted(domains) == ["input", "project"]
     assert all(d.met for d in domains.values()), domains

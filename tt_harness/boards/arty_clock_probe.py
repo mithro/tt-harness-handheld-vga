@@ -53,7 +53,6 @@ from dataclasses import dataclass
 from fractions import Fraction
 from functools import reduce
 from operator import xor
-from pathlib import Path
 
 from migen import Array, ClockDomain, ClockSignal, If, Instance, Module, Signal
 from migen.genlib.cdc import MultiReg
@@ -143,6 +142,9 @@ def parse_capture(data: bytes) -> tuple[list[Reading], list[bytes]]:
         elif line.strip(b"\0\r "):
             bad.append(line)
     return good, bad
+
+
+REPLICA_FALL = "replica_fall"
 
 
 # Gateware ---------------------------------------------------------------------------------------
@@ -320,75 +322,3 @@ class ClockProbe(Module):
             platform.request("user_led", 0).eq(core.lock.locked_sys),
             platform.request("user_led", 1).eq(serial.rx),
         ]
-
-
-# Builds -----------------------------------------------------------------------------------------
-
-REPLICA_FALL = "replica_fall"
-# nextpnr-xilinx 0.8.2 takes a flip-flop's clock inversion from a parameter IS_CLK_INVERTED,
-# which no 7-series flip-flop has, and ignores the FDRE's own IS_C_INVERTED: without this the
-# falling-edge flop of the waveform replica is built as a rising-edge one (no CLKINV in the
-# FASM) and the replica is a constant 1. Vivado reads IS_C_INVERTED from the Verilog.
-PREPACK_CLKINV = f"""
-for name, cell in ctx.cells:
-    if name == {REPLICA_FALL!r}:
-        cell.setParam("IS_CLK_INVERTED", "1")
-        print(f"tt-harness clkinv: {{name}} type {{cell.type}}")
-"""
-
-
-def build(name: str, toolchain: str, out_dir: Path, gate_cycles: int = GATE_CYCLES) -> cb.Build:
-    """Build the probe for the setting `name` with `toolchain` and pass the timing gate.
-
-    Returns the `clock_build.Build`; `facts["domains"]` holds the per-domain timing. Raises
-    `BuildError` or `TimingError` as `clock_build` does.
-    """
-    s = setting(name)
-
-    def top(platform, board):
-        return ClockProbe(platform, s, gate_cycles)
-
-    if toolchain == "openxc7":
-        job = cb.openxc7_build(cb.ARTY, out_dir, top=top, prepack_extra=PREPACK_CLKINV)
-        if f"tt-harness clkinv: {REPLICA_FALL} " not in job.facts["nextpnr"]:
-            raise cb.BuildError(f"the pre-pack script did not find {REPLICA_FALL}", job.log)
-        job.facts["domains"] = cb.parse_nextpnr(job.facts["nextpnr"], cb.ARTY, s, job.log)
-    elif toolchain == "vivado":
-        job = cb.vivado_build(cb.ARTY, out_dir, top=top)
-        job.facts["domains"] = cb.parse_vivado(job.facts["vivado"], cb.ARTY, s, job.log)
-    else:
-        raise ValueError(f"toolchain must be one of {TOOLCHAINS}, not {toolchain!r}")
-    missed = {k: d for k, d in job.facts["domains"].items() if not d.met}
-    if missed:
-        raise cb.TimingError(f"probe {name} {toolchain}: timing not met in {missed}", job.log)
-    return job
-
-
-# The MMCM fields that tie a measurement to what was programmed, in the order reported.
-MMCM_FIELDS = (
-    "DIVCLK_DIVCLK_HIGH_TIME",
-    "DIVCLK_DIVCLK_LOW_TIME",
-    "DIVCLK_DIVCLK_NO_COUNT",
-    "CLKFBOUT_CLKOUT1_HIGH_TIME",
-    "CLKFBOUT_CLKOUT1_LOW_TIME",
-    "CLKOUT0_CLKOUT1_HIGH_TIME",
-    "CLKOUT0_CLKOUT1_LOW_TIME",
-    "CLKOUT0_CLKOUT2_EDGE",
-    "CLKOUT0_CLKOUT2_FRAC_EN",
-    "CLKOUT0_CLKOUT2_FRAC",
-    "CLKOUT0_CLKOUT2_FRAC_WF_R",
-    "CLKOUT5_CLKOUT2_FRACTIONAL_FRAC_WF_F",
-    "CLKOUT5_CLKOUT2_FRACTIONAL_PHASE_MUX_F",
-    "TABLE",
-    "FILTREG1_RESERVED",
-    "LKTABLE",
-    "POWER_REG_POWER_REG_POWER_REG",
-)
-
-
-def programmed_mmcm(bitstream: Path) -> dict[str, int]:
-    """Every MMCME2_ADV feature the bitstream programs, decoded with `bit2fasm`, as integers."""
-    out = bitstream.with_suffix(".decoded.fasm")
-    # The Vivado part (-1L) is not in the prjxray database; it is the same die as the open part.
-    cb.decode_bitstream(bitstream, cb.ARTY.parts["openxc7"], out)
-    return cb.mmcm_values(out.read_text())
