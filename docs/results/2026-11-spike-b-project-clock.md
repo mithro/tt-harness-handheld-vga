@@ -130,7 +130,7 @@ CLK_BUFG_BOT_R_X78Y100.BUFGCTRL.BUFGCTRL_X0Y0.ZINV_CE0
 
 ## 3. COMPENSATION="INTERNAL" with CLKFBOUT wired to CLKFBIN
 
-Accepted by both flows without a warning or DRC about it. Vivado reads it back (`COMPENSATION INTERNAL`) and its DRC report (`drc.rpt`) has one warning, CFGBVS-1 (neither `CFGBVS` nor `CONFIG_VOLTAGE` is set; the platform does not set them, which a real board build should). Vivado's synthesis log has `Synth 8-7071` (unconnected MMCM outputs), `Synth 8-7023` (33 connections, 17 given) and `Netlist 29-345` ("SIM_DEVICE on instance 'BUFGCE' is 'ULTRASCALE'; it is being changed to match ... '7SERIES'"), all harmless. In the openXC7 FASM `COMP.Z_ZHOLD` is set; the Vivado bitstream decodes to the same feature, so both write the same INTERNAL compensation bit.
+Accepted by both flows without a warning or DRC about it. Vivado reads it back (`COMPENSATION INTERNAL`) and its DRC report (`drc.rpt`) had one warning, CFGBVS-1 (fixed in the platform since, see "Changes"; neither `CFGBVS` nor `CONFIG_VOLTAGE` is set; the platform does not set them, which a real board build should). Vivado's synthesis log has `Synth 8-7071` (unconnected MMCM outputs), `Synth 8-7023` (33 connections, 17 given) and `Netlist 29-345` ("SIM_DEVICE on instance 'BUFGCE' is 'ULTRASCALE'; it is being changed to match ... '7SERIES'"), all harmless. In the openXC7 FASM `COMP.Z_ZHOLD` is set; the Vivado bitstream decodes to the same feature, so both write the same INTERNAL compensation bit.
 
 ## 4. Clock constraints
 
@@ -187,7 +187,7 @@ Both flows honour `PULLTYPE=PULLUP`.
 
 ## Changes outside the new files
 
-None to `clocking.py` or `build.py`. The Game Bub platform gained `CFGBVS VCCO` and `CONFIG_VOLTAGE 3.3` for the Vivado toolchain only (as `tt_harness/boards/gamebub/link_build.py` sets them in its build script), with a unit test that the generated XDC carries them, so the CFGBVS-1 DRC warning seen in the Game Bub Vivado build is gone for any build that uses the platform; this was added after the builds above and the warning was not re-observed gone in a Vivado run beyond the test of the generated XDC. The platform's comment says "Task 7b must confirm the open flow actually emits the pull-up in its FASM": it does.
+None to `clocking.py` or `build.py`. The Game Bub platform gained `CFGBVS VCCO` and `CONFIG_VOLTAGE 3.3` for the Vivado toolchain only (as `tt_harness/boards/gamebub/link_build.py` sets them in its build script), with a unit test that the generated XDC carries them, so the CFGBVS-1 DRC warning seen in the Game Bub Vivado build is gone for any build that uses the platform; re-running the Game Bub Vivado build afterwards, `drc.rpt` reports `Checks found: 0`. The platform's comment says "Task 7b must confirm the open flow actually emits the pull-up in its FASM": it does.
 
 ## Notes and loose ends
 
