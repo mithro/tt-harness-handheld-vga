@@ -88,8 +88,9 @@ class McuLink(Module):
     - CPU port: ``cmd_valid`` (out) rises when a command the RTL does not handle arrives
       (it has already been answered with an error); ``cmd_words`` (out, 6 x 32, sys
       registers) then hold that command and its five arguments until ``cmd_ack`` (in)
-      clears ``cmd_valid``. A command forwarded while ``cmd_valid`` is still set is
-      dropped and sets ``cmd_overrun`` (out), which ``cmd_ack`` also clears.
+      clears ``cmd_valid``. ``cmd_ack`` is acted on at its rising edge, so a level held high
+      is one acknowledge, not a standing one. A command forwarded while ``cmd_valid`` is
+      still set is dropped and sets ``cmd_overrun`` (out), which the acknowledge also clears.
 
     CDC assumptions on the sys inputs: ``buttons`` must already be synchronous to sys
     (debounced or synchronised by the board layer). ``buttons`` and the IRQ pending bits
@@ -274,7 +275,10 @@ class McuLink(Module):
         fwd_prev = Signal()
         clear = Signal(IRQ_SOURCES)
         forwarded = Signal()
+        ack_prev = Signal()
+        ack_rise = Signal()
         self.comb += [
+            ack_rise.eq(self.cmd_ack & ~ack_prev),
             If(clr_toggle_sys != clr_prev, clear.eq(clr_mask)),
             forwarded.eq(fwd_toggle_sys != fwd_prev),
         ]
@@ -286,12 +290,13 @@ class McuLink(Module):
             self.irq.eq((pending & enable_sys) != 0),
             # Capture a forwarded command into sys registers only when the port is free;
             # one that arrives while another is pending is dropped and flagged.
+            ack_prev.eq(self.cmd_ack),
             If(
-                forwarded & (~self.cmd_valid | self.cmd_ack),
+                forwarded & (~self.cmd_valid | ack_rise),
                 self.cmd_valid.eq(1),
                 self.cmd_overrun.eq(0),
                 *[c.eq(f) for c, f in zip(self.cmd_words, fwd_words)],
             )
             .Elif(forwarded, self.cmd_overrun.eq(1))
-            .Elif(self.cmd_ack, self.cmd_valid.eq(0), self.cmd_overrun.eq(0)),
+            .Elif(ack_rise, self.cmd_valid.eq(0), self.cmd_overrun.eq(0)),
         ]
