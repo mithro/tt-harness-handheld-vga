@@ -483,7 +483,14 @@ def _check_real(result: build.BuildResult, sources: Sources, toolchain: str) -> 
     for name in result.project_clocks:
         domain = result.timing[f"{build.PROJECT}{name}"]
         assert domain.kind == "project"
-        assert domain.constraint_mhz == pytest.approx(PLAN.pclk_mhz, abs=0.01)
+        # openXC7: the pclk frequency (twice it if half-cycle). Vivado: a register-made clock
+        # has both edges on pclk rising edges (half pclk's frequency), a gate-made one pclk's.
+        allowed = (
+            [PLAN.pclk_mhz * (2 if domain.half_cycle else 1)]
+            if toolchain == "openxc7"
+            else [PLAN.pclk_mhz, PLAN.pclk_mhz / 2]
+        )
+        assert any(domain.constraint_mhz == pytest.approx(f, abs=0.01) for f in allowed)
     # The pre-screen finds a clock made in logic exactly when the tools do.
     screen = prescreen.check(sources)
     assert screen.derived_clocks == result.prescreen_derived_clocks
