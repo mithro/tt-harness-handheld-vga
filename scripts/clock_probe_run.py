@@ -79,7 +79,6 @@ VARIANTS = {
     "": "the build as the toolchain makes it",
     "fbfix": "open flow, FASM edited afterwards: CLKFBIN takes CLKFBOUT as in Vivado's bitstream",
     "zhold": "open flow, COMPENSATION set to ZHOLD in the pre-pack script",
-    "noclkinv": "open flow, without the probe's clock-inversion fix (kept from an early build)",
 }
 
 
@@ -96,8 +95,6 @@ def build_one(name: str, toolchain: str, reuse: bool, variant: str = "") -> dict
             return facts
     s = probe.setting(name)
     started = time.monotonic()
-    if variant == "noclkinv":
-        raise ValueError("the noclkinv variant cannot be rebuilt; use --reuse")
     extra = probe_build.PREPACK_ZHOLD if variant == "zhold" else ""
     job = probe_build.build(name, toolchain, out_dir, prepack_extra=extra)
     if variant == "fbfix":

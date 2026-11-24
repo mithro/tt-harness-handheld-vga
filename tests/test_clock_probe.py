@@ -265,6 +265,11 @@ def test_clock_probe_open_flow_build() -> None:
     # The falling-edge flop of the replica has its clock inverted in the bitstream.
     fasm = (job.out_dir / "top.fasm").read_text()
     assert re.search(r"\.CLKINV$", fasm, re.MULTILINE), "no slice with an inverted clock"
+    # Measured on the board (docs/results/2026-11-spike-b-project-clock.md): this bitstream's
+    # MMCM never locks, because nextpnr-xilinx 0.8.2 feeds CLKFBIN from the interconnect and
+    # not from CLKFBOUT when COMPENSATION is INTERNAL. Asserted so that a toolchain or
+    # `ProjectClock` change that cures it is noticed.
+    assert probe_build.feedback_source(job.bitstream) == "CMT_L_LOWER_B_CLK_IN3_INT"
 
 
 @pytest.mark.vivado
@@ -284,6 +289,8 @@ def test_clock_probe_vivado_build() -> None:
     assert (mmcm["DIVCLK_DIVCLK_HIGH_TIME"], mmcm["DIVCLK_DIVCLK_LOW_TIME"]) == (1, 1)
     assert mmcm["TABLE"] == 0x3D4
     assert mmcm["CLKOUT0_CLKOUT1_HIGH_TIME"] == 17
+    # The dedicated feedback: this is the bitstream that locks on the board.
+    assert probe_build.feedback_source(job.bitstream) == "CMT_LR_LOWER_B_CLKFBOUT2IN"
 
 
 # The run script, against a fake board host ------------------------------------------------------
