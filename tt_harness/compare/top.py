@@ -61,6 +61,12 @@ class CompareTop(Module):
         self.submodules.stimulus = stim = ReferenceStimulus(
             project.ui_in, project.uio_in, reset_clocks
         )
+        # Every signal into the project is a constant or a register output
+        # (`tt_harness.compare.inputs`). `keep` makes the tools preserve these nets by
+        # name, so that the build can check what drives each one in the implemented
+        # netlist (`tt_harness.input_gate`).
+        for signal in (stim.rst_n, stim.ena, stim.ui_in, stim.uio_in):
+            signal.attr.add("keep")
         self.pclk = rec.pclk
         self.project_clk = Signal(name_override="project_clk")
         if clock_buffer is None:

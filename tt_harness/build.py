@@ -102,6 +102,7 @@ scripts, reports, and `<top>.bit` on success.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import sys
@@ -110,10 +111,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from tt_harness import prescreen, tools, verilate
+from tt_harness import input_gate, prescreen, tools, verilate
 from tt_harness import project_clocks as pc
 from tt_harness.boards import arty
 from tt_harness.compare.recorder import DEFAULT_SETTLE
+from tt_harness.compare.top import PROJECT_INSTANCE
 from tt_harness.fetch import Sources
 from tt_harness.manifest import Project
 
@@ -178,6 +180,10 @@ class TimingError(_LoggedError):
     """A clock domain missed timing or was unconstrained."""
 
 
+class InputDriverError(BuildError):
+    """A net into the project is not a constant or driven directly by a flip-flop."""
+
+
 @dataclass(frozen=True)
 class TimingDomain:
     # A clock: its constraint. A clock pair: 1000 / the setup requirement in ns.
@@ -231,6 +237,9 @@ class BuildResult:
     source_rewrites: tuple[tuple[str, int], ...] = ()
     # What this build's timing result does not cover, in fixed wording.
     limitations: tuple[str, ...] = ()
+    # (project input, what drives its net in the implemented netlist): `constant` or a
+    # flip-flop type; anything else fails the build (`tt_harness.input_gate`).
+    input_drivers: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1004,6 +1013,7 @@ class _Job:
     # given modified.
     inputs: dict[str, str] = field(default_factory=dict)
     rewrites: list[tuple[str, int]] = field(default_factory=list)
+    input_drivers: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def top(self) -> str:
@@ -1044,6 +1054,32 @@ def _tool(name: str) -> Path:
     return path
 
 
+def _input_nets(job: _Job) -> dict[str, str]:
+    """The net on each project input, from the generated top."""
+    try:
+        return input_gate.input_nets(job.top_v.read_text(), PROJECT_INSTANCE)
+    except ValueError as e:
+        raise InputDriverError(f"{job.sources.project.id}: {e}", job.log) from e
+
+
+def _gate_inputs(job: _Job, drivers: dict[str, tuple[str, ...]]) -> None:
+    """Record what drives each project input; fail unless each is a constant or a flip-flop."""
+    constants = input_gate.source_constants(job.top_v.read_text(), _input_nets(job))
+    drivers = input_gate.fold_constants(drivers, constants)
+    job.input_drivers[:] = input_gate.summary(drivers)
+    with job.log.open("a") as f:
+        for port, kind in job.input_drivers:
+            f.write(f"tt-harness project input: {port} driven by {kind}\n")
+    bad = input_gate.offenders(drivers)
+    if bad:
+        raise InputDriverError(
+            f"{job.sources.project.id}: project input not glitch-free in the {TOOL_NAMES[job.toolchain]} "
+            f"netlist: {'; '.join(bad)}; every input but the clock must be a constant or be "
+            "driven directly by a flip-flop",
+            job.log,
+        )
+
+
 def _openxc7_implement(job: _Job) -> str:
     """Synthesise, place and route; return the final nextpnr-xilinx log."""
     out = job.out_dir
@@ -1069,6 +1105,9 @@ def _openxc7_implement(job: _Job) -> str:
         + "\n"
     )
     _step(job, "synthesis (yosys)", [str(_tool("yosys")), "-s", str(script)], out)
+    # The netlist nextpnr-xilinx reads before packing.
+    netlist = json.loads((out / (job.top + ".json")).read_text())
+    _gate_inputs(job, input_gate.yosys_drivers(netlist, job.top, _input_nets(job)))
 
     prepack = out / "clocks.py"
     prepack.write_text(
@@ -1475,6 +1514,7 @@ def _vivado_script(job: _Job, files: list[Path], dirs: list[Path]) -> Path:
                 "place_design",
                 "phys_opt_design",
                 "route_design",
+                input_gate.vivado_tcl(_input_nets(job), str(out / input_gate.REPORT_NAME)),
                 f"report_utilization -file {{{out / 'utilization.rpt'}}}",
                 f"report_clocks -file {{{out / 'clocks.rpt'}}}",
                 (
@@ -1592,6 +1632,14 @@ def _vivado_implement(job: _Job) -> str:
             f"(exit {rc}){detail}",
             job.log,
         )
+    inputs_rpt = out / input_gate.REPORT_NAME
+    try:
+        drivers = input_gate.parse_vivado(inputs_rpt.read_text(), _input_nets(job))
+    except (OSError, ValueError) as e:
+        raise InputDriverError(
+            f"{project_id}: cannot tell what drives the project's inputs: {e}", job.log
+        ) from e
+    _gate_inputs(job, drivers)
     timing_rpt = out / "timing.rpt"
     if not timing_rpt.is_file():
         raise BuildError(f"{project_id}: Vivado wrote no timing report", job.log)
@@ -1623,6 +1671,7 @@ _FLOWS = {
 # Outputs of an earlier build in the same directory that must not be mistaken for this one's.
 _STALE = (
     "timing.rpt",
+    input_gate.REPORT_NAME,
     "clocks.rpt",
     "utilization.rpt",
     "nextpnr.log",
@@ -1790,5 +1839,6 @@ def build_compare(
         prescreen_derived_clocks=screen.derived_clocks,
         inputs=dict(job.inputs),
         source_rewrites=tuple(job.rewrites),
+        input_drivers=tuple(job.input_drivers),
         limitations=tuple(limitations),
     )
