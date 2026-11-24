@@ -148,3 +148,141 @@ Known, and not fixed by this task:
 6. **Nothing runs the project at its real clock speed.** The project clock is stepped at
    100 kHz on the board and timed at 16.67 MHz at most.
 7. **One board, one run per bitstream.** See "Hardware" for the count.
+
+## Builds
+
+Sixteen builds, `--clocks 6000000`, 1,000,000 baud, for the Arty A7-35T: **13 succeeded, 3
+failed**. All eight designs build with Vivado. Five build with openXC7; the three that do
+not are described under "The three openXC7 failures". Nothing was changed to make a build
+pass. Log: `tmp/pool-build.log`; per build, `build.log` in the build directory.
+
+Resource use is read from the tools' own reports. For openXC7: cell counts after Yosys
+synthesis (`utilization-yosys.txt`) and the LUT and flip-flop sites nextpnr-xilinx placed
+(`nextpnr.log`, "Device utilisation"; it counts 65,200 LUT sites and as many flip-flop
+sites for this part, and a LUT site can hold two small LUTs or none of a route-through, so
+the two LUT columns differ). For Vivado: `report_utilization` after routing
+(`utilization.rpt`; 20,800 LUTs, 41,600 flip-flops, 8,150 slices). Every figure includes
+the recorder (about 110 flip-flops in `sys`). No design uses block RAM or a latch.
+
+### openXC7
+
+| Design | Build | LUTs | FFs | CARRY4 | DSP48E1 | Placed LUT / FF sites | Time | Sources read as | Project clocks | `default_nettype` rewrites | Bitstream sha256 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `tinytapeout_dvd_screensaver` | ok | 568 | 163 | 33 | 0 | 805 / 163 | 27 s | verilog-2005 | none | none | `d0c073b22605` |
+| `tinytapeout_logo_screensaver` | ok | 579 | 173 | 35 | 0 | 828 / 173 | 29 s | verilog-2005 | none | none | `4100d72c7c86` |
+| `urish_rings` | **failed** (TimingError) | 219 | 141 | 35 | 0 | 501 / 141 | 14 s |
+| `algofoogle_fun_vga_clock` | **failed** (BuildError) | 382 | 183 | 65 | 2 | ? / ? | 16 s |
+| `algofoogle_vga` | **failed** (BuildError) | 314 | 178 | 49 | 2 | ? / ? | 15 s |
+| `algofoogle_dottee` | ok | 488 | 179 | 66 | 0 | 955 / 179 | 24 s | systemverilog | `project.uo_out[3]` | none | `655644f2364c` |
+| `gamepad_pmod_demo` | ok | 278 | 131 | 33 | 0 | 547 / 131 | 20 s | verilog-2005 | none | none | `c1bb7db7bb96` |
+| `2048_vga_game` | ok | 1608 | 485 | 59 | 0 | 2092 / 485 | 91 s | verilog-2005 | none | none | `0fb9945848ad` |
+
+### Vivado
+
+| Design | Build | LUTs | FFs | CARRY4 | DSP48E1 | Occupied slices | Time | Sources read as | Project clocks | `default_nettype` rewrites | Bitstream sha256 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `tinytapeout_dvd_screensaver` | ok | 405 | 163 | 21 | 0 | 135 slices | 149 s | verilog-2005 | none | `palette.v` (1), `tt_um_tinytapeout_dvd_screensaver.v` (1), `vga_sync_generator.v` (1) | `54c2dd566861` |
+| `tinytapeout_logo_screensaver` | ok | 440 | 173 | 21 | 0 | 141 slices | 150 s | verilog-2005 | none | `palette.v` (1), `tt_um_tinytapeout_logo_screensaver.v` (1), `vga_sync_generator.v` (1) | `aecb1bec4bea` |
+| `urish_rings` | ok | 192 | 140 | 16 | 0 | 72 slices | 139 s | verilog-2005 | none | `project.v` (1) | `ed2c38f007e1` |
+| `algofoogle_fun_vga_clock` | ok | 358 | 183 | 38 | 0 | 121 slices | 146 s | verilog-2005 | none | `mv_vga_clock.v` (1), `project.v` (1), `vga_sync.v` (1) | `e03c4d0a7ead` |
+| `algofoogle_vga` | ok | 310 | 178 | 32 | 0 | 104 slices | 140 s | verilog-2005 | none | `mv_vga_clock.v` (1), `project.v` (1), `vga_sync.v` (1) | `d3d5464758b1` |
+| `algofoogle_dottee` | ok | 424 | 179 | 32 | 0 | 134 slices | 145 s | systemverilog | `project/hvsync_gen/vsync_reg/Q` | `audio.v` (1), `hvsync_generator.v` (1), `project.v` (1) | `1d8be5909346` |
+| `gamepad_pmod_demo` | ok | 177 | 131 | 8 | 0 | 60 slices | 116 s | verilog-2005 | none | none | `260288ab7209` |
+| `2048_vga_game` | ok | 204 | 213 | 8 | 0 | 79 slices | 147 s | verilog-2005 | none | `button_debounce.v` (1), `debug_controller.v` (1), `draw_game.v` (1), `galois_lfsr.v` (1), `game_logic.v` (1), `game_row_push_merge.v` (1), `project.v` (1), `vga_sync_generator.v` (1), `welcome_screen.v` (1) | `8008231a31e4` |
+
+- The parts are as the board layer names them: `xc7a35tcsg324-1` for openXC7 and
+  `xc7a35ticsg324-1L` for Vivado.
+- **`default_nettype` rewrites** (Vivado only): seven of the eight designs declare ports in
+  a way Vivado rejects under `` `default_nettype none `` (Synth 8-6735), so Vivado read
+  copies in which that directive, and nothing else, says `wire`. The number in brackets is
+  the directives changed in the file. `tt_um_gamepad_pmod_demo` needed none. openXC7 always
+  reads the fetched files unmodified.
+- **Project clocks**: only `tt_um_algofoogle_dottee` makes one, and both toolchains find it
+  (the vsync register; Yosys names the net `project.uo_out[3]`, Vivado the pin
+  `project/hvsync_gen/vsync_reg/Q`). Both class it `register` ("a flip-flop clocked on pclk
+  rising edges drives it"), signed off, with no user on its falling edge (openXC7: 12
+  cells, all rising). The pre-screen's one derived clock agrees.
+- No domain in any build is `half_cycle`, and none is not signed off.
+- Vivado's netlists are smaller, and for `tt_um_2048_vga_game` much smaller (204 LUTs and
+  213 flip-flops against 1608 and 485). The compare top ties `ui_in` and `uio_in` to
+  constants and leaves `uio_out` unconnected, so logic that only inputs or `uio` could
+  exercise can be removed; Vivado evidently removes far more of it than Yosys. This was
+  not examined further. It does mean the two bitstreams of that design are not the same
+  circuit, and that what hardware checks for it is the logic that matters with idle inputs.
+- The bitstream hashes are of the files this run made. A rebuild does not give the same
+  file: the same openXC7 build of `tt_um_tinytapeout_dvd_screensaver` made minutes apart
+  gave `6f6a7bcd8a95…` and then `d0c073b22605…`. Whether that is a date in the header or a
+  different placement was not looked into.
+
+### The three openXC7 failures
+
+**`ttihp26a/tt_um_urish_rings`: refused by the timing gate.**
+
+```
+timing not met in pclk->sys (requirement 10.000 ns, setup slack -0.680 ns)
+```
+
+- The path is from the design's `hpos` register through its own output logic to the
+  recorder's sample register. `uo_out`'s colour bits are not registered: they come from
+  `hpos`, `vpos` and `frame` through two subtractions, two absolute values, a compare and
+  select, and two additions (`src/project.v` lines 45 to 64). nextpnr reports 10.68 ns for
+  it, 4.0 ns of logic and 6.6 ns of routing, against the harness budget of 10 ns.
+- It is not a placement accident: the same netlist placed with seeds 1 to 5 gives 10.68,
+  10.70, 10.99, 10.61 and 10.40 ns (`tmp/rings_seeds.py`, logs in `tmp/rings-seeds/`; an
+  investigation only, no bitstream was made).
+- nextpnr itself exits 0: it has no requirement on a path between clocks, and the 10 ns is
+  the harness's budget applied to its report afterwards (see "What "timing met" means").
+  So nextpnr does not optimise this path, and the build's retry with other seeds, which
+  runs only when nextpnr reports a clock below its constraint, did not happen.
+- Vivado times the same path against the 20 ns the recorder really allows, clock insertion
+  included, and meets it with 8.215 ns to spare. The design is slow at its outputs, the
+  openXC7 budget is conservative by one system period, and together they miss by 0.68 ns.
+- Consequence: no openXC7 bitstream, so no openXC7 hardware run of this design.
+
+**`ttihp0p3/tt_um_algofoogle_fun_vga_clock` and `ttihp25a/tt_um_algofoogle_vga`:
+nextpnr-xilinx cannot route them.** Both fail the same way:
+
+```
+place and route (nextpnr-xilinx) failed (exit 255): ERROR: Unrouteable $PACKER_GND_NET sink
+$flatten\project.$<repo>/work/sources/ttihp0p3/tt_um_algofoogle_fun_vga_clock/7caa0f8f96be1c97d6b1ef31bdea5e1cb2df0de1/src/project.v:165$mul$420.CARRYCASCIN
+(SITEWIRE/DSP48_X1Y38/CARRYCASCIN)
+```
+
+(`tt_um_algofoogle_vga`: `src/project.v:166$mul$417.CARRYCASCIN`, `DSP48_X0Y46`.)
+
+- Both designs share one line, `wire signed [10:0] product = psubx*psubx + psuby*psuby;`
+  with 5-bit operands. Yosys `synth_xilinx` maps each multiplication to a `DSP48E1` (two
+  per design). nextpnr-xilinx 0.8.2 places them and then cannot route the constant 0 to a
+  DSP48E1's `CARRYCASCIN` pin. They are the only pool designs with a DSP cell.
+- Vivado builds both with no DSP: it makes the multipliers from LUTs and carry chains.
+- Not tried, because it would change the build: Yosys's `synth_xilinx -nodsp`.
+- A second thing seen in these two logs, before the router failed: the harness's clock
+  scan listed the DSP's unused, tied-off clock pin as a clock made by the project,
+  `tt-harness clock: domain project net '…$mul$420.CLK$const' 16.67 MHz (cells 1 rising 1
+  falling 0 latches 0 intra no; …)`. A constant is not a clock. The build ended before the
+  timing gate, so what the gate would have made of it is not known; it should be looked at
+  together with the DSP question.
+- Consequence: no openXC7 bitstream and no openXC7 hardware run of either design.
+
+### Limitations reported per build
+
+"Standing entries" counts the two every openXC7 build carries (quoted above).
+
+| Design | Toolchain | Standing entries | Further entries, verbatim |
+|---|---|---|---|
+| `tinytapeout_dvd_screensaver` | openXC7 | 2 | none |
+| `tinytapeout_dvd_screensaver` | Vivado | 0 | none |
+| `tinytapeout_logo_screensaver` | openXC7 | 2 | none |
+| `tinytapeout_logo_screensaver` | Vivado | 0 | none |
+| `urish_rings` | openXC7 | - | build failed (TimingError) |
+| `urish_rings` | Vivado | 0 | none |
+| `algofoogle_fun_vga_clock` | openXC7 | - | build failed (BuildError) |
+| `algofoogle_fun_vga_clock` | Vivado | 0 | none |
+| `algofoogle_vga` | openXC7 | - | build failed (BuildError) |
+| `algofoogle_vga` | Vivado | 0 | none |
+| `algofoogle_dottee` | openXC7 | 2 | "openXC7: project clocks are on local routing with unmeasured skew" |
+| `algofoogle_dottee` | Vivado | 0 | none |
+| `gamepad_pmod_demo` | openXC7 | 2 | none |
+| `gamepad_pmod_demo` | Vivado | 0 | none |
+| `2048_vga_game` | openXC7 | 2 | none |
+| `2048_vga_game` | Vivado | 0 | none |
