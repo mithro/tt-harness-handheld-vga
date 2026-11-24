@@ -119,9 +119,16 @@ def format_line(r: Reading) -> bytes:
 
 
 def parse_line(line: bytes) -> Reading | None:
-    """The reading of one line, or None if it is not a whole line with a good checksum."""
-    m = LINE.fullmatch(line.rstrip(b"\r\n"))
-    if m is None or reduce(xor, line[: line.index(b"*")]) != int(m[7], 16):
+    """The reading of one line, or None if it is not a whole line with a good checksum.
+
+    Bytes before the `F` (noise from the pin while the FPGA is being configured) are
+    allowed; the line must be whole from there to its end.
+    """
+    text = line.rstrip(b"\r\n")
+    m = LINE.search(text)
+    if m is None or m.end() != len(text):
+        return None
+    if reduce(xor, text[m.start() : m.start(7) - 1]) != int(m[7], 16):
         return None
     return Reading(*(int(m[i], 16) for i in range(1, 7)))
 
