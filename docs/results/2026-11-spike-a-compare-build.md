@@ -87,68 +87,6 @@ the samples compared with the first 1,300,000 clocks of the shared reference, ab
   inputs, and the compare stimulus holds the inputs fixed, so their `exact` proves only that
   still image, here and on hardware.
 
-## What "timing met" means
-
-A build is accepted only if every clock and clock pair in its timing report is constrained
-and met (`tt_harness.build.check`). What that covers differs between the toolchains, and in
-neither case is it the design at its real clock rate.
-
-The compare build has a 100 MHz system clock (`sys`) and a stepped project clock (`pclk`),
-a register toggled by the recorder and put on a BUFG. With a settle time of S = 2 system
-cycles, `pclk`'s shortest real period is 2 x (S + 1) x 10 ns = 60 ns (16.67 MHz), and that
-is the period it is constrained at. On the board `pclk` steps once per UART byte, 100 kHz
-at 1,000,000 baud. A sys-side change has S system cycles (20 ns) to reach the next project
-clock edge, and `uo_out` has S system cycles from a project clock edge to the sample.
-
-- **Vivado**: setup and hold, with the clock network's real insertion delays, for `sys` at
-  10 ns, for `pclk` at the stepped clock's 60 ns period (not at the project's 25 MHz), and
-  for the paths between them over the 20 ns the recorder really allows (multicycle paths of
-  S system cycles, both ways). Clocks a project makes from its own flip-flops are generated
-  clocks of `pclk` with the requirements `tt_harness/build.py` derives edge by edge. This is
-  a sign-off of the compare build as a circuit; it is not a statement that the project
-  would work at 25 MHz.
-- **openXC7**: setup only. nextpnr-xilinx 0.8.2 does no hold analysis at all. Within a clock
-  it checks setup against the constraint (`sys` 100 MHz, `pclk` and project clocks
-  16.67 MHz, doubled when a clock is used on both edges, because it times falling-edge
-  cells as rising). Between clocks it has no requirement of its own: it reports the largest
-  data-path delay, without the clocks' insertion delays, and the harness checks that figure
-  against a budget of its own, the 20 ns less one system period set aside for the
-  unmeasured difference in clock arrival, so 10 ns between `sys` and `pclk`. That budget
-  assumes the clocks arrive within 10 ns of each other. Clocks a project makes are on
-  ordinary routing, with a skew the tool does not report.
-
-The limitations each successful build reports, verbatim (`BuildResult.limitations`):
-
-- every openXC7 build: "openXC7: nextpnr-xilinx performs no hold analysis"
-- every openXC7 build: "openXC7: cross-domain checks are harness budgets on nextpnr's
-  data-path delays, assuming clock-insertion skew under 10 ns (one system period)"
-- an openXC7 build of a design that makes a clock: "openXC7: project clocks are on local
-  routing with unmeasured skew"
-- the per-design entries are in the table under "Builds" below.
-
-## Known gaps
-
-Known, and not fixed by this task:
-
-1. **Gated or multiplexed stepped clock in Vivado.** Vivado carries `pclk` through a
-   project's own combinational gate or multiplexer by itself, so flip-flops clocked that way
-   are timed as plain `pclk`, with no project clock reported and no flag in the result.
-2. **A design that never uses `rst_n` or its inputs as data is refused.** Such a design has
-   no path from `sys` to `pclk`, and the gate requires that pair: the build fails with
-   "unconstrained: clock domain(s) sys->pclk absent from the timing report".
-3. **Bare "met" for paths of a clock that is not signed off.** The result line of a clock
-   pair involving a project clock with `signed_off` false prints "met" without saying that
-   it rests on an assumption; only the clock's own line and `limitations` say so.
-4. **Inputs are held fixed.** The compare stimulus holds `ui_in` and `uio_in` at the
-   reference's values (0 and 0 for the whole pool) after a 10-clock reset. Input-driven
-   behaviour and the gamepad are not exercised; `tt_um_gamepad_pmod_demo` and
-   `tt_um_2048_vga_game` are checked as one still picture.
-5. **`uio` outputs are not recorded on hardware.** The frame carries `uo_out` only; audio on
-   `uio[7]` (`tt_um_algofoogle_dottee`) is not compared.
-6. **Nothing runs the project at its real clock speed.** The project clock is stepped at
-   100 kHz on the board and timed at 16.67 MHz at most.
-7. **One board, one run per bitstream.** See "Hardware" for the count.
-
 ## Builds
 
 Sixteen builds, `--clocks 6000000`, 1,000,000 baud, for the Arty A7-35T: **13 succeeded, 3
@@ -266,7 +204,8 @@ $flatten\project.$<repo>/work/sources/ttihp0p3/tt_um_algofoogle_fun_vga_clock/7c
 
 ### Limitations reported per build
 
-"Standing entries" counts the two every openXC7 build carries (quoted above).
+"Standing entries" counts the two every openXC7 build carries (quoted under
+"What "timing met" means").
 
 | Design | Toolchain | Standing entries | Further entries, verbatim |
 |---|---|---|---|
@@ -408,3 +347,172 @@ toolchains.
 | Vivado | `pclk->sys` | cross | - | yes | no | - | - | 20.000 | 15.521 | 1.096 | met |
 | Vivado | `sys` | sys | - | yes | no | 100.00 | 217.44 | 10.000 | 5.401 | 0.118 | met |
 | Vivado | `sys->pclk` | cross | - | yes | no | - | - | 20.000 | 16.013 | 8.316 | met |
+
+## Hardware
+
+Every bitstream that was built was run on a real board: thirteen runs, one per design and
+toolchain, 6,000,000 project clocks each at 1,000,000 baud. **All thirteen are `exact`**:
+6,000,000 samples byte for byte equal to the shared reference, frame CRC-32 good. The
+three openXC7 builds that failed have no bitstream and were not run.
+
+- Board: Digilent Arty A7-35T on the public fpgas.online PS1 site, host `pi7`
+  (`ps1.fpgas.online` port 10722), Digilent USB serial `210319A764F5`; the board of
+  `docs/results/2026-11-first-hardware-run.md`. The host key matched the fingerprint
+  recorded in `docs/arty-boards.md`, through a known-hosts file given to the runner.
+- When: 2026-11-24, 08:15 to 08:35 UTC (18:45 to 19:05 local), one run after another in one
+  session (`tmp/pool-hw.log`), then one repeat at 08:35 UTC.
+- The runner's activity check passed before every run, and the board was looked at by hand
+  before the session and after it: one other login, a `tmux` shell with no terminal
+  activity since 2026-11-23 10:46 UTC, nothing holding the UART, no loader or serial tool
+  running (`tmp/ps1/check-*.log`).
+
+| Design | Toolchain | Verdict | First differing clock | Bytes received | Frame CRC | UART error counters | Payload sha256 against reference | Load s | Load to last byte s | Whole command s | Started (local) | Bitstream sha256 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `tinytapeout_dvd_screensaver` | openXC7 | **exact** | none | 6000013 | good | all 0 | equal | 2.48 | 62.76 | 90.4 | 18:45:06 | `d0c073b22605` |
+| `tinytapeout_dvd_screensaver` | Vivado | **exact** | none | 6000013 | good | all 0 | equal | 2.48 | 62.77 | 90.4 | 18:46:36 | `54c2dd566861` |
+| `tinytapeout_logo_screensaver` | openXC7 | **exact** | none | 6000013 | good | all 0 | equal | 2.47 | 62.75 | 90.4 | 18:48:07 | `4100d72c7c86` |
+| `tinytapeout_logo_screensaver` | Vivado | **exact** | none | 6000013 | good | all 0 | equal | 2.49 | 62.75 | 90.5 | 18:49:37 | `aecb1bec4bea` |
+| `urish_rings` | openXC7 | not run |
+| `urish_rings` | Vivado | **exact** | none | 6000013 | good | all 0 | equal | 2.49 | 62.74 | 89.8 | 18:51:08 | `ed2c38f007e1` |
+| `algofoogle_fun_vga_clock` | openXC7 | not run |
+| `algofoogle_fun_vga_clock` | Vivado | **exact** | none | 6000014 | good | all 0 | equal | 2.50 | 62.79 | 89.5 | 18:52:37 | `e03c4d0a7ead` |
+| `algofoogle_vga` | openXC7 | not run |
+| `algofoogle_vga` | Vivado | **exact** | none | 6000013 | good | all 0 | equal | 2.46 | 62.73 | 89.9 | 18:54:07 | `d3d5464758b1` |
+| `algofoogle_dottee` | openXC7 | **exact** | none | 6000013 | good | all 0 | equal | 2.49 | 62.78 | 90.9 | 18:55:37 | `655644f2364c` |
+| `algofoogle_dottee` | Vivado | **exact** | none | 6000013 | good | all 0 | equal | 2.46 | 62.72 | 90.8 | 18:57:08 | `1d8be5909346` |
+| `gamepad_pmod_demo` | openXC7 | **exact** | none | 6000013 | good | all 0 | equal | 2.48 | 62.74 | 91.6 | 18:58:39 | `c1bb7db7bb96` |
+| `gamepad_pmod_demo` | Vivado | **exact** | none | 6000013 | good | all 0 | equal | 2.48 | 62.76 | 89.5 | 19:00:10 | `260288ab7209` |
+| `2048_vga_game` | openXC7 | **exact** | none | 6000013 | good | all 0 | equal | 2.50 | 62.78 | 91.5 | 19:01:40 | `0fb9945848ad` |
+| `2048_vga_game` | Vivado | **exact** | none | 6000013 | good | all 0 | equal | 2.46 | 62.73 | 91.9 | 19:03:12 | `8008231a31e4` |
+
+- "Frame CRC" is the decoder's check of the frame (magic, version, length, CRC-32). "UART
+  error counters" are the kernel's for the port over the reception (`TIOCGICOUNT`: frame,
+  overrun, parity, break, buffer overrun). "Payload sha256 against reference" is a check
+  that does not use the verdict code: the SHA-256 of the 6,000,000 payload bytes against
+  the reference's `dump_sha256` (the values in the table under "How it was run").
+- "Load" is the `openFPGALoader` command timed from here. "Load to last byte" is from
+  starting the load to the receiver finishing; the frame itself took 60.06 to 60.07 s from
+  header to last byte in every run. "Whole command" is `tt-harness run-compare` start to finish.
+- **One stray byte, once.** In the Vivado run of `tt_um_algofoogle_fun_vga_clock` the
+  receiver got 6,000,014 bytes: a single `0x00` 0.6 ms before the frame header (first byte
+  at 2.4842 s after the load began, header at 2.4848 s), no error counted. The frame after
+  it was complete and its CRC good; the decoder looks for the header and the verdict is
+  `exact`. The same bitstream run again straight afterwards gave 6,000,013 bytes with the
+  header first, and `exact` again (`hw-vivado-repeat.json`). So it is not a property of the
+  bitstream. It arrived at the moment the FPGA is configured, which points at the UART line
+  as the device starts; that was not established. One in fourteen runs here, none in the
+  four runs of the first hardware session.
+- **Repeatability.** The two designs run in the first hardware session
+  (`tt_um_tinytapeout_logo_screensaver`, `tt_um_algofoogle_dottee`) were rebuilt for this
+  run, so these are different bitstream files from those; all four are `exact` again.
+  With the repeat above, one bitstream has been run twice; every other, once.
+- **`tt_um_algofoogle_dottee`** is the one flagged design (a clock from its own vsync). A
+  difference would have been `nondeterministic`; there was none, with either toolchain. A
+  reviewer's prediction, noted here untested: a design that captures data on the falling
+  edge of a clock it derives from its own logic can legitimately differ between zero-delay
+  simulation and hardware even with timing met. No pool design does that (dottee's derived
+  clock has rising-edge users only), so the pool neither supports nor refutes it.
+- **`tt_um_gamepad_pmod_demo` and `tt_um_2048_vga_game`** match as one still picture with
+  idle inputs; nothing about their games or the gamepad is shown.
+- **`tt_um_urish_rings`, `tt_um_algofoogle_fun_vga_clock`, `tt_um_algofoogle_vga`** ran with
+  the Vivado bitstream only.
+- State left: the last bitstream loaded (`tt_um_algofoogle_fun_vga_clock`, Vivado) stays in
+  the FPGA, idle after its frame. On the board host: no `tt-harness-run-*` directory, no
+  process of ours, the UART unheld, disk use as before (3.2 MB of 458 MB). No `sudo`,
+  nothing installed.
+
+## What "timing met" means
+
+A build is accepted only if every clock and clock pair in its timing report is constrained
+and met (`tt_harness.build.check`). What that covers differs between the toolchains, and in
+neither case is it the design at its real clock rate.
+
+The compare build has a 100 MHz system clock (`sys`) and a stepped project clock (`pclk`),
+a register toggled by the recorder and put on a BUFG. With a settle time of S = 2 system
+cycles, `pclk`'s shortest real period is 2 x (S + 1) x 10 ns = 60 ns (16.67 MHz), and that
+is the period it is constrained at. On the board `pclk` steps once per UART byte, 100 kHz
+at 1,000,000 baud. A sys-side change has S system cycles (20 ns) to reach the next project
+clock edge, and `uo_out` has S system cycles from a project clock edge to the sample.
+
+- **Vivado**: setup and hold, with the clock network's real insertion delays, for `sys` at
+  10 ns, for `pclk` at the stepped clock's 60 ns period (not at the project's 25 MHz), and
+  for the paths between them over the 20 ns the recorder really allows (multicycle paths of
+  S system cycles, both ways). Clocks a project makes from its own flip-flops are generated
+  clocks of `pclk` with the requirements `tt_harness/build.py` derives edge by edge. This is
+  a sign-off of the compare build as a circuit; it is not a statement that the project
+  would work at 25 MHz.
+- **openXC7**: setup only. nextpnr-xilinx 0.8.2 does no hold analysis at all. Within a clock
+  it checks setup against the constraint (`sys` 100 MHz, `pclk` and project clocks
+  16.67 MHz, doubled when a clock is used on both edges, because it times falling-edge
+  cells as rising). Between clocks it has no requirement of its own: it reports the largest
+  data-path delay, without the clocks' insertion delays, and the harness checks that figure
+  against a budget of its own, the 20 ns less one system period set aside for the
+  unmeasured difference in clock arrival, so 10 ns between `sys` and `pclk`. That budget
+  assumes the clocks arrive within 10 ns of each other. Clocks a project makes are on
+  ordinary routing, with a skew the tool does not report.
+
+The limitations each successful build reports, verbatim (`BuildResult.limitations`):
+
+- every openXC7 build: "openXC7: nextpnr-xilinx performs no hold analysis"
+- every openXC7 build: "openXC7: cross-domain checks are harness budgets on nextpnr's
+  data-path delays, assuming clock-insertion skew under 10 ns (one system period)"
+- an openXC7 build of a design that makes a clock: "openXC7: project clocks are on local
+  routing with unmeasured skew"
+- the per-design entries are in the table "Limitations reported per build" above.
+
+## Known gaps
+
+Known, and not fixed by this task:
+
+1. **Gated or multiplexed stepped clock in Vivado.** Vivado carries `pclk` through a
+   project's own combinational gate or multiplexer by itself, so flip-flops clocked that way
+   are timed as plain `pclk`, with no project clock reported and no flag in the result.
+2. **A design that never uses `rst_n` or its inputs as data is refused.** Such a design has
+   no path from `sys` to `pclk`, and the gate requires that pair: the build fails with
+   "unconstrained: clock domain(s) sys->pclk absent from the timing report".
+3. **Bare "met" for paths of a clock that is not signed off.** The result line of a clock
+   pair involving a project clock with `signed_off` false prints "met" without saying that
+   it rests on an assumption; only the clock's own line and `limitations` say so.
+4. **Inputs are held fixed.** The compare stimulus holds `ui_in` and `uio_in` at the
+   reference's values (0 and 0 for the whole pool) after a 10-clock reset. Input-driven
+   behaviour and the gamepad are not exercised; `tt_um_gamepad_pmod_demo` and
+   `tt_um_2048_vga_game` are checked as one still picture.
+5. **`uio` outputs are not recorded on hardware.** The frame carries `uo_out` only; audio on
+   `uio[7]` (`tt_um_algofoogle_dottee`) is not compared.
+6. **Nothing runs the project at its real clock speed.** The project clock is stepped at
+   100 kHz on the board and timed at 16.67 MHz at most.
+7. **One board, one run per bitstream.** See "Hardware" for the count.
+
+## Conclusion
+
+Spike A set out to show that a Tiny Tapeout VGA design can be checked on a real FPGA, clock
+for clock, against a simulation, for a first pool of eight designs and with both an open
+and a vendor toolchain.
+
+What it showed:
+
+- In simulation the compare build reproduces the reference for all eight designs
+  (1,300,000 clocks each).
+- With Vivado all eight build, meet timing under the gate, and on the Arty reproduce the
+  reference exactly over 6,000,000 clocks.
+- With openXC7 five of the eight build and those five are exact on the Arty as well. The
+  other three do not produce a bitstream: one is refused by the harness's own cross-domain
+  budget by 0.68 ns on a path Vivado passes with 8 ns to spare, and two contain multipliers
+  that Yosys maps to DSP48E1 cells nextpnr-xilinx cannot route.
+- No verdict other than `exact` occurred anywhere, so the `mismatch`, `nondeterministic`
+  and `inconclusive` paths were exercised only by the unit tests and by the negative
+  control of the first hardware session, not by a pool design.
+- The UART link at 1,000,000 baud carried fourteen 6 MB frames without an error; one run
+  had a stray byte before the frame, which the framing absorbed.
+
+What remains for the sweep:
+
+- The two openXC7 questions: designs with multipliers (try `-nodsp`, and see what the
+  clock scan makes of a DSP's tied-off clock pin), and whether the 10 ns cross-domain
+  budget should stay as it is for designs with slow, unregistered outputs. Until then
+  openXC7 will refuse some designs that Vivado builds.
+- Everything under "Known gaps": inputs and the gamepad, `uio` and audio, real clock
+  speed, more than one board and more than one run per bitstream.
+- The awkward cases of `docs/test-designs.md` (other clock rates and modes, the QSPI
+  designs), and any design that latches, loops or clocks on a derived falling edge, none
+  of which this pool contains.
