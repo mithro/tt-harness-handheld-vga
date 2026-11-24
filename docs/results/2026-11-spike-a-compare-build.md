@@ -634,6 +634,18 @@ bitstreams are `exact` on the board; the sixteenth, `tt_um_urish_rings` with ope
 compare top that this run uncovered, not fixed here). The sections above are the record
 of the first run; where this section and they disagree, this is the current state.
 
+**What the fifteen `exact` verdicts do and do not show.** The defect can only affect a
+design that uses `rst_n` as an asynchronous reset. Two pool designs do
+(`tt_um_urish_rings`: `always @(posedge clk or negedge rst_n)`; `tt_um_algofoogle_dottee`:
+`always @(posedge vsync, negedge rst_n)`; no other pool source has such a block, and no
+other open-flow netlist has a flip-flop with an asynchronous clear or preset,
+`tmp/9b/async-src.log`, `tmp/9b/async-scan.log`). For those two, an `exact` verdict shows
+that no glitch cleared anything in that build and run, not that the build is free of the
+defect: the rings Vivado build and both dottee builds are exposed to it, here and equally
+in the first run at settle 2, and happened not to fire. The other six designs use `rst_n`
+only synchronously and are immune: the glitch happens just after the clock index changes,
+while `pclk` is low, and has settled long before the next clock edge.
+
 ### What changed
 
 1. **The settle is 3 system cycles, not 2** (`tt_harness.compare.recorder.DEFAULT_SETTLE`,
@@ -668,8 +680,12 @@ of the first run; where this section and they disagree, this is the current stat
    there; that design now builds with no project clock and every `check_timing` section at
    zero (`tmp/9b/vivado-dsp-fixed.log`). No pool design has such a cell in Vivado.
 4. **Tests build under pytest's temporary directory**, never in `build/compare/`, and a
-   test session that creates, removes or modifies a file there fails. The bitstreams in
-   `build/compare/` are again exactly the ones recorded below.
+   test session that creates, removes or modifies a file there fails. The sixteen pool
+   bitstreams in `build/compare/` are exactly the ones recorded below. Four other
+   directories are still there, `build/compare/arty-openxc7/tt00/tt_um_test_{clocks,edges,
+   fallreg,negclk}`: stale builds of test designs left by a test run of the first task
+   (2026-11-24 19:09 to 19:10 local, settle 2, before `-nodsp`). They are not results and
+   were left alone.
 5. **The receiver counts the bytes before the frame header** and keeps the first sixteen
    values; both are in each run's JSON and in the hardware table below, and `run-compare`
    prints the count.
@@ -778,25 +794,29 @@ see the next section.
 
 - The board was checked by hand before and after the session (`tmp/9b/check-*.log`): the
   same idle `tmux` login as before, nothing holding the UART. Another agent of this project
-  used the board for short runs earlier in the day; nothing of it was seen during this
-  session. Afterwards: no `tt-harness-run-*` directory, no process of ours, disk use as
+  used the board for short runs earlier in the day; the runner's activity check never
+  refused a run during this session. Afterwards: no `tt-harness-run-*` directory, no process of ours, disk use as
   before; the last bitstream loaded is a scratch build of `tt_um_urish_rings` (see below),
   idle after its frame.
 - **Bytes before the header.** Fifteen runs: none. The first run of the session
   (`tt_um_tinytapeout_dvd_screensaver`, openXC7): 136 bytes, every one `0x00`, with two
-  breaks and one overrun counted by the kernel. They did not come from this bitstream:
-  the first arrived 0.094 s after the receiver started, before the load had begun (the
-  frame header came at 2.478 s), and two bytes were already waiting when the receiver
-  opened the port. What was in the FPGA before the session (not a compare build of this
-  task) was pulling the UART line low. The receiver looks for the header, the frame after
-  it was whole, and the verdict is `exact`. So a run can start with bytes that belong to
-  whatever was loaded before, and the count now shows it. The two extra runs below also
-  had none, so no run of this session shows the single stray byte of the first run.
+  breaks and one overrun counted by the kernel. They arrived before the load: the first
+  came 0.094 s after the receiver started, the load began after that, and the frame
+  header came at 2.478 s; two more bytes were already waiting when the receiver opened
+  the port. So they did not come from this bitstream. The likely source is whatever was
+  in the FPGA before the session (another agent of this project had used the board
+  since the first run), driving the UART line; that is plausible and not proven, since
+  nothing recorded what was loaded. The receiver already discards what is buffered
+  before it reports that it is listening, but it cannot discard what a design that is
+  still sending delivers after that and before the load. The receiver looks for the
+  header, the frame after it was whole, and the verdict is `exact`; the count now shows
+  such a start. The two extra runs below also had none, so no run of this session shows
+  the single stray byte of the first run.
 - One run took 115 s instead of 90 (`tt_um_urish_rings`, Vivado: the recording step itself
   took 85.6 s, the rest was before it) and one load took 3.9 s instead of 2.5; neither
   was looked into.
 - All sixteen bitstreams are the files now in `build/compare/` (hashes above); the test
-  suite no longer touches that tree.
+  suite no longer builds into that tree.
 
 ### The one mismatch: a glitch on the harness's `rst_n`
 
@@ -804,8 +824,8 @@ see the next section.
 (9.2 %), first at clock 18 (`uo_out` 0xad, reference 0xbd). Vivado's bitstream of the same
 design is `exact`, and so was the simulation of the compare top.
 
-- **What the bytes show.** Only colour bits differ, and every colour edge is displaced by
-  the same amount. A model of the design (`tmp/9b_rings_model.py`; it reproduces the
+- **What the bytes show.** Only colour bits differ, and every colour edge is displaced
+  as one count of `frame` displaces it. A model of the design (`tmp/9b_rings_model.py`; it reproduces the
   reference with no byte wrong) finds the value of the design's `frame` counter that each
   part of a recording shows: the reference and the Vivado recording show 1 through the
   first video frame, then 2, 3, …, 14; the openXC7 recording shows 0, then 1, 2, …, 13
@@ -820,39 +840,57 @@ design is `exact`, and so was the simulation of the compare top.
 - **The harness.** The compare top makes `rst_n` combinationally: `rst_n = (clock_index >=
   10)`, on the recorder's 32-bit clock counter (`tt_harness/core/stimulus.py`). In the
   open-flow netlist that comparison is a carry chain, and its inverted output drives the
-  `CLR` pins of the eight `frame` flip-flops directly (`tmp/9b/rings-rst-cone.log`). When
-  the counter goes from 10 to 11, right after clock 10, the first stage of the chain
-  swaps the input it selects: its select (`clock_index[1:0] == 2'b10`) falls while its
-  data input (`clock_index[0] & clock_index[1]`) rises, through two different LUTs. If the
-  select falls first the chain's output dips, the dip passes the upper stages (they are
-  all in "propagate" for an index of 10 or 11), and `CLR` pulses: `frame` goes back to 0.
-  The second stage does the same swap when the counter goes from 11 to 12, but `frame` is
-  already 0 by then; from 12 on the data inputs of higher stages hold the output, except
-  at the moments the index crosses into a higher stage (16, 256, …), and nothing was seen
-  there: the counter was never more than one behind. A zero-delay simulation has no such
-  pulse.
-- **Confirmed by experiment.** A scratch build, not project code, identical except that
-  `rst_n` comes from a system-clock register (one cycle later, glitch-free), was built with
-  openXC7 and run once on the board: `exact`, 6,000,013 bytes, none before the header
-  (`tmp/9b_regrst.py`, `tmp/9b/regrst-build.log`, `tmp/9b/regrst-run.log`). The data cannot
-  show which clock the count was lost at: the first byte that depends on `frame` is
-  clock 18. The structure of the netlist and this experiment are the evidence.
+  `CLR` pins of the eight `frame` flip-flops directly (`tmp/9b/rings-rst-cone.log`). The
+  output of such a chain can dip for a moment when the counter changes, because the
+  select and the data input of a stage come through different LUTs. A zero-delay
+  simulation has no such pulse.
+- **What is established.** A glitch on that comparator pulsed the asynchronous clear at
+  some moment after the clock-10 edge, where `frame` becomes 1, and before the clock-18
+  sample, the first byte that depends on `frame` (bytes 10 to 17 are the same for
+  `frame` 0 and 1, `tmp/9b/window.log`). It happened once: the counter is never more
+  than one behind, so no later change of the index cleared it again.
+- **Which counter change it was is not determined.** The recording cannot tell, and
+  nothing was built to find out. From the netlist the candidates in that window are:
+  11 to 12, where the second stage's select (one LUT6) falls while its data input (a LUT2
+  and then a LUT5) rises; 10 to 11, where the first stage's select and data input, two
+  LUT2s, swap in the same way; and 15 to 16, where two inputs of the second stage's data
+  LUT change in opposite directions. The first of these has the larger difference in
+  logic depth and is at least as likely as the second. The other changes in the window
+  (12 to 15, 16 to 18) leave the output held by a steady data input.
+- **What is excluded.** A late release of reset (the 9 to 10 change): reset is released
+  one UART byte time, about 10 us, before the clock-10 edge, and the scratch build below
+  releases it a cycle later still and is `exact`. A hold failure on the first count: the
+  count at clock 10 and the thirteen later ones go through the same paths under the same
+  condition (`hpos` leaves 0 right after the edge), and the later ones all arrived. A
+  link fault: the frame CRC is good and the repeat is byte-identical.
+- **Confirmed by experiment, as a diagnosis.** A scratch build, not project code,
+  identical except that `rst_n` comes from a system-clock register and so cannot glitch,
+  was built with openXC7 and run once on the board: `exact`, 6,000,013 bytes, none
+  before the header (`tmp/9b_regrst.py`, `tmp/9b/regrst-build.log`,
+  `tmp/9b/regrst-run.log`). That build is not the form the repair will take: its register
+  follows the comparator, so `rst_n` changes one system cycle later than the clock index
+  (t0+6 at settle 3) and really has 20 ns to the next clock edge while the constraints
+  assume 30. It served to show the cause and nothing else.
 - **What it means.** It is a defect of the compare top, present before this task and in
   both flows: any design that uses `rst_n` as an asynchronous reset can have state cleared
-  by a glitch after reset is released, depending on how the comparator happens to be
-  mapped and routed. Neither toolchain's timing analysis covers a glitch on a reset made
-  by logic. Of the pool, two designs use an asynchronous reset: this one, and
-  `tt_um_algofoogle_dottee`, whose asynchronously reset counter is still at its reset value
-  when the glitch could occur, so its `exact` says nothing either way. The Vivado results
-  for these two are `exact`, which shows the pulse did not occur or did not matter there,
-  not that it cannot. On a real Tiny Tapeout chip `rst_n` is a pin and does not glitch.
+  by a glitch whenever the clock index changes, depending on how the comparator happens
+  to be mapped and routed. Neither toolchain's timing analysis covers a glitch on a reset
+  made by logic. Of the pool, this design and `tt_um_algofoogle_dottee` use an
+  asynchronous reset. Dottee's asynchronously reset counter is clocked by its vsync and
+  first counts about one video frame into the run; a glitch before that clears a counter
+  that is still at its reset value and cannot be seen, and a glitch at any later change
+  of the index (the comparator's inputs keep changing for the whole run) would put it
+  behind and would be seen. Its four `exact` runs, two at each settle, show that none
+  cleared it in those builds, as the rings Vivado runs do for that build; they do not
+  show that it cannot happen. On a real Tiny Tapeout chip `rst_n` is a pin and does not
+  glitch.
 - **Not fixed here.** The verdict stands as recorded. The repair is in the gateware: drive
-  the project's `rst_n` from a register that changes in the same system cycle as the
-  clock index (t0+5 at settle 3), so that the constraints between `sys` and `pclk` stay as
-  they are. It needs the recorder or the stimulus changed, their tests, new bitstreams
-  and new runs, and belongs in a task of its own. The pre-screen's own list of blind spots
-  already names asynchronous resets driven from logic; this is that case, with the logic
-  being the harness's.
+  the project's `rst_n` from a register that is updated on the same system clock edge as
+  the clock index (t0+5 at settle 3), so that the constraints between `sys` and `pclk`
+  stay as they are. It needs the recorder or the stimulus changed, their tests, new
+  bitstreams and new runs, and is the next task. The pre-screen's own list of blind
+  spots already names asynchronous resets driven from logic; this is that case, with the
+  logic being the harness's.
 
 ### What is still open after Task 9b
 
@@ -865,8 +903,12 @@ design is `exact`, and so was the simulation of the compare top.
   constant on `CARRYCASCIN` for the pool designs, "Port BCOUT15 has no connections" for
   the test design).
 - Bytes before the header are now counted. The single stray byte of the first run did not
-  recur in eighteen runs; a run that follows someone else's bitstream can start with that
-  bitstream's bytes.
+  recur in eighteen runs; a run that follows a bitstream which is still sending can start
+  with bytes that are not its own.
+- Two other tests still build into default trees outside this task's scope:
+  `tests/test_clock_build.py` into `build/clock/` and `tests/toolchain/test_blink.py` into
+  `build/toolchain/`. Four stale test builds remain in `build/compare/` (see "What
+  changed", item 4).
 - Unchanged from "Known gaps" and "What remains for the sweep": inputs held fixed, `uio`
   not recorded, nothing at the real clock rate, one board, bitstreams identified by a file
   hash that changes on rebuild, and the verdict paths `nondeterministic` and

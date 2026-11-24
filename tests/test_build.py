@@ -1193,7 +1193,8 @@ def _vivado_with_project_clock(kind: str, row: str, extra: str = "") -> str:
     summary = _pclk_summary_row(VIVADO_PASS)
     intra = _pclk_intra_row(VIVADO_PASS)
     text = VIVADO_PASS.replace(
-        summary, f"{summary}\n    project_clk0  {wave}     {period}          8.333"
+        summary,
+        f"{summary}\n    project_clk0  {wave}     {period}          {1000 / float(period):.3f}",
     )
     return head + text.replace(intra, f"{intra}\n    project_clk0  {row}")
 
@@ -1293,6 +1294,8 @@ def test_no_path_lines_come_from_the_pair_reports(tmp_path: Path) -> None:
     (tmp_path / "project_clk0-to-project_clk0-setup.rpt").write_text(
         "Timing Report\n\nNo timing paths found.\n"
     )
+    # Arbitrary parser input: the requirement is whatever the report says (60 ns here,
+    # not a value of the current plan).
     (tmp_path / "pclk-to-pclk-setup.rpt").write_text(
         "Slack (MET) :  1.0ns\n  Requirement:            60.000ns  (pclk rise@60.000ns - ...)\n"
     )

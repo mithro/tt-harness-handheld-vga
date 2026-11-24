@@ -180,10 +180,15 @@ def test_classify_order_does_not_matter() -> None:
 # Vivado constraints --------------------------------------------------------------------------
 
 BUFG = "[get_pins pclk_bufg/O]"
+# A deliberate settle-2 case: `vivado_constraints` takes the pclk period as an argument,
+# and these tests give it 60 ns (settle 2 on the Arty), so the delays below are 60 ns (one
+# period) and 30 ns (half). Nothing here depends on the build's default settle, which
+# `tests/test_build.py` covers.
+SETTLE_2_PCLK_PERIOD_NS = 60.0
 
 
 def _tcl(text: str) -> str:
-    return pc.vivado_constraints(pc.parse_roots(text), "pclk_bufg/O", 60.0)
+    return pc.vivado_constraints(pc.parse_roots(text), "pclk_bufg/O", SETTLE_2_PCLK_PERIOD_NS)
 
 
 def test_vivado_constraints_for_register_roots() -> None:
