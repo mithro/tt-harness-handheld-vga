@@ -12,14 +12,16 @@ Finding the nets. The project is flattened into the top by Yosys and its hierarc
 by Vivado, so "the project's `rst_n` port" is not a reliable name in either netlist. The nets
 are found from the harness side instead: the generated top connects every project port to
 one named signal (`.rst_n(stimulus_rst_n)`), which `instance_connections` reads from the
-Verilog, and the compare top marks those signals `keep`, so both tools preserve them as nets
-with those names and cannot fold them into other logic. A net that cannot be found fails the
-gate, with one exception: Vivado removes a net that is tied to a constant, `keep` or not,
-when it propagates the constant into the project. A net that the generated top itself
-assigns a literal (`assign stimulus_ena = 1'd1;`, found by `source_constants`) may
-therefore be absent, and is then recorded as `FOLDED`; it may not have any other driver.
-(`keep` does not stop constants from being propagated into the project, and puts no logic
-on a path.)
+Verilog, and the compare top marks the one that is not a constant (`rst_n`) `keep`, so both
+tools preserve it as a net with that name and cannot fold it into other logic. A net that
+cannot be found fails the gate, with one exception: both tools propagate a constant into
+the project and drop its net. A net that the generated top itself assigns a literal
+(`assign stimulus_ena = 1'd1;`, found by `source_constants`) may therefore be absent, and is
+then recorded as `FOLDED`; it may not have any other driver. The constant nets are not
+marked `keep`: that gains nothing (Vivado removes them anyway) and it stops Vivado
+propagating the constants, which changes what is built (2048: 986 LUTs instead of 207).
+`keep` on the register's output costs nothing (the same 207 LUTs and 215 flip-flops with
+and without it) and puts no logic on a path.
 
 - openXC7: `yosys_drivers` reads the netlist Yosys wrote, which is the netlist nextpnr-xilinx
   reads before packing.

@@ -6,7 +6,7 @@
     "driver0": {
      "connections": {
       "Q": [
-       298
+       300
       ]
      },
      "port_directions": {
@@ -20,38 +20,9 @@
     }
    },
    "netnames": {
-    "stimulus_ena": {
-     "bits": [
-      "1"
-     ]
-    },
     "stimulus_rst_n": {
      "bits": [
-      298
-     ]
-    },
-    "stimulus_ui_in": {
-     "bits": [
-      "0",
-      "0",
-      "0",
-      "0",
-      "0",
-      "0",
-      "0",
-      "0"
-     ]
-    },
-    "stimulus_uio_in": {
-     "bits": [
-      "0",
-      "0",
-      "0",
-      "0",
-      "0",
-      "0",
-      "0",
-      "0"
+      300
      ]
     }
    }

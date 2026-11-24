@@ -53,16 +53,20 @@ def _top_verilog(tmp_path: Path) -> str:
     return arty.to_verilog(arty.Top(s.project, 1_000_000, 100), tmp_path / "t.v").read_text()
 
 
-def test_generated_top_connects_each_project_input_to_one_kept_net(tmp_path: Path) -> None:
+def test_generated_top_connects_each_project_input_to_one_named_net(tmp_path: Path) -> None:
     text = _top_verilog(tmp_path)
     assert input_gate.input_nets(text, PROJECT_INSTANCE) == NETS
-    for net in NETS.values():
-        assert any(
-            line.startswith('(* keep = "true" *)') and line.rstrip(";").split()[-1] == net
-            for line in (ln.split(" = 1'd")[0] for ln in text.splitlines())
-        ), f"{net} is not marked keep"
     connections = input_gate.instance_connections(text, PROJECT_INSTANCE)
     assert set(connections) == {"clk", *input_gate.INPUT_PORTS, *input_gate.OUTPUT_PORTS}
+    # The register output is marked keep, so both tools preserve the net under its name.
+    # The constants are not (it would stop Vivado propagating them into the project); they
+    # are recognised from the literals the top assigns them.
+    kept = [ln.split()[-1].rstrip(";") for ln in text.splitlines() if ln.startswith("(* keep")]
+    kept = [
+        ln.split(" = 1'd")[0].split()[-1] for ln in text.splitlines() if ln.startswith("(* keep")
+    ]
+    assert kept == ["stimulus_rst_n"]
+    assert input_gate.source_constants(text, NETS) == {"ena", "ui_in", "uio_in"}
 
 
 def test_an_unknown_project_port_is_refused(tmp_path: Path) -> None:
@@ -90,20 +94,30 @@ def test_yosys_registered_reset_passes() -> None:
     case = _yosys("registered")
     assert case["nets"] == NETS
     drivers = input_gate.yosys_drivers(case, "arty_compare", NETS)
-    assert drivers == GOOD
-    assert input_gate.offenders(drivers) == []
-    assert input_gate.summary(drivers) == (
-        ("ena", "constant"),
+    # Yosys folds the constants into the project and drops their nets, as Vivado does.
+    assert drivers == {
+        "ena": ("missing",),
+        "rst_n": ("FDRE",),
+        "ui_in": ("missing",),
+        "uio_in": ("missing",),
+    }
+    folded = input_gate.fold_constants(drivers, frozenset({"ena", "ui_in", "uio_in"}))
+    assert input_gate.offenders(folded) == []
+    assert input_gate.summary(folded) == (
+        ("ena", input_gate.FOLDED),
         ("rst_n", "FDRE"),
-        ("ui_in", "constant"),
-        ("uio_in", "constant"),
+        ("ui_in", input_gate.FOLDED),
+        ("uio_in", input_gate.FOLDED),
     )
+    # A constant net that is still there (tied off) is a constant too.
+    case["modules"]["arty_compare"]["netnames"]["stimulus_ui_in"] = {"bits": ["0", "1"] * 4}
+    assert input_gate.yosys_drivers(case, "arty_compare", NETS)["ui_in"] == ("constant",) * 8
 
 
 def test_yosys_comparator_reset_fails() -> None:
     drivers = input_gate.yosys_drivers(_yosys("comparator"), "arty_compare", NETS)
     assert drivers["rst_n"] == ("CARRY4",)
-    assert input_gate.offenders(drivers) == ["rst_n is driven by CARRY4"]
+    assert _only_rst_n(_yosys("comparator")) == ["rst_n is driven by CARRY4"]
 
 
 @pytest.mark.parametrize(
@@ -114,8 +128,7 @@ def test_yosys_any_driver_but_a_flip_flop_fails(kind: str) -> None:
     case = _yosys("registered")
     (cell,) = case["modules"]["arty_compare"]["cells"].values()
     cell["type"] = kind
-    drivers = input_gate.yosys_drivers(case, "arty_compare", NETS)
-    assert input_gate.offenders(drivers) == [f"rst_n is driven by {kind}"]
+    assert _only_rst_n(case) == [f"rst_n is driven by {kind}"]
 
 
 @pytest.mark.parametrize("kind", input_gate.FLIP_FLOPS)
@@ -123,28 +136,34 @@ def test_yosys_every_flip_flop_type_passes(kind: str) -> None:
     case = _yosys("registered")
     (cell,) = case["modules"]["arty_compare"]["cells"].values()
     cell["type"] = kind
-    assert input_gate.offenders(input_gate.yosys_drivers(case, "arty_compare", NETS)) == []
+    assert _only_rst_n(case) == []
+
+
+def _only_rst_n(case: dict) -> list[str]:
+    drivers = input_gate.yosys_drivers(case, "arty_compare", NETS)
+    folded = input_gate.fold_constants(drivers, frozenset({"ena", "ui_in", "uio_in"}))
+    return input_gate.offenders(folded)
 
 
 def test_yosys_missing_net_undriven_bit_and_non_q_pin_fail() -> None:
     case = _yosys("registered")
-    module = case["modules"]["arty_compare"]
+    assert _only_rst_n(case) == []
     missing = copy.deepcopy(case)
     del missing["modules"]["arty_compare"]["netnames"]["stimulus_rst_n"]
-    assert input_gate.offenders(input_gate.yosys_drivers(missing, "arty_compare", NETS)) == [
-        "rst_n is driven by missing"
-    ]
+    assert _only_rst_n(missing) == ["rst_n is driven by missing"]
     undriven = copy.deepcopy(case)
     undriven["modules"]["arty_compare"]["cells"].clear()
-    assert input_gate.offenders(input_gate.yosys_drivers(undriven, "arty_compare", NETS)) == [
-        "rst_n is driven by undriven"
-    ]
+    assert _only_rst_n(undriven) == ["rst_n is driven by undriven"]
+    # One bit of a constant bus that is not a constant after all.
     one_bit = copy.deepcopy(case)
-    (bit,) = module["netnames"]["stimulus_rst_n"]["bits"]
-    one_bit["modules"]["arty_compare"]["netnames"]["stimulus_ui_in"]["bits"][3] = bit + 1000
-    assert input_gate.offenders(input_gate.yosys_drivers(one_bit, "arty_compare", NETS)) == [
-        "ui_in is driven by undriven"
-    ]
+    one_bit["modules"]["arty_compare"]["netnames"]["stimulus_ui_in"] = {"bits": ["0"] * 7 + [9999]}
+    assert _only_rst_n(one_bit) == ["ui_in is driven by undriven"]
+    # A flip-flop, but not from its Q pin.
+    not_q = copy.deepcopy(case)
+    (cell,) = not_q["modules"]["arty_compare"]["cells"].values()
+    cell["connections"] = {"QN": cell["connections"]["Q"]}
+    cell["port_directions"]["QN"] = cell["port_directions"].pop("Q")
+    assert _only_rst_n(not_q) == ["rst_n is driven by FDRE.QN"]
 
 
 # Vivado: the report from the routed design ---------------------------------------------------
