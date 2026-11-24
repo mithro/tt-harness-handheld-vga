@@ -6,12 +6,14 @@ Date: 2026-11-24. Vivado 2025.2, yosys 0.71+77 (OSS CAD Suite 2026-11-22), nextp
 
 The clock scheme of the design spec (a fractional `MMCME2_ADV` followed by a `BUFGCE`) builds, constrains and meets timing in all four builds (Arty and Game Bub, openXC7 and Vivado). Both flows accept `COMPENSATION="INTERNAL"` with `CLKFBOUT` wired to `CLKFBIN`, and openXC7 accepts the fractional divider, the wired `BUFGCE` enable and the button pull-ups.
 
-It stands for Vivado without change. For openXC7 it stands with one open risk and one rule:
+It stands for Vivado without change. For openXC7 it builds, but the MMCM bitstream is **not the same as Vivado's** in several fields, and two of those differences are open questions that only a hardware measurement can settle:
 
-- **Risk (key result).** For a fractional divider whose integer part is odd (`CLKOUT0_DIVIDE_F` 35.75, the setting `solve()` picks for 25.175 MHz from both 50 and 100 MHz), nextpnr-xilinx writes the fraction bits exactly as Vivado does, but writes a different integer counter value and different fractional waveform bits (HIGH_TIME 16 against 17, WF_R and WF_F set, PHASE_MUX_F 3 against 7). The fraction is not dropped or rounded. Which of the two encodings gives 25.1748 MHz on silicon cannot be settled without hardware, and I could not derive it from first principles. Treat the open-flow output frequency as **unverified** until Task 10 measures it.
-- **Rule.** Where the integer part of `CLKOUT0_DIVIDE_F` or `CLKFBOUT_MULT_F` is even, or the value is whole, the two flows' encodings are identical (tested: 36.75, 36.0, 18.5, 18.125, 54.125, 26.875). So a solver restricted to "a fraction only on an even integer part" gives bit-identical MMCM encodings in both flows, at a small cost in accuracy (below). This is a change to `solve()` that the coordinator should decide on; I did not make it.
+1. **The fractional divider (odd integer part).** For `CLKOUT0_DIVIDE_F` 35.75, the setting `solve()` picks for 25.175 MHz from both 50 and 100 MHz, nextpnr-xilinx writes the fraction bits exactly as Vivado does, but a different integer counter and different fractional-waveform bits (section 1). Reasoning from the source of both tools (section 1), the output frequency is then probably still 25.1748 MHz and the duty cycle differs; that is not established.
+2. **The loop filter and power register.** nextpnr-xilinx 0.8.2 writes a hard-coded lock/filter `TABLE` of 0x3d4 that is the right value only for CLKFBOUT_MULT_F 10, 17 and 18, and `POWER_REG` 0xffff where Vivado writes 0x9900. This changes loop bandwidth and possibly lock behaviour, not the frequency. The Game Bub (MULT 18) gets the correct table; the Arty (MULT 9) does not (section 1).
 
-Everything else asked about is in the sections below. The open-flow timing result needs one qualification: nextpnr-xilinx does not propagate the input constraint through the MMCM, so the project clock was constrained from `achieved_hz` by a pre-pack script (section 4), and it does not time the BUFGCE enable path (section 5).
+Neither is a reason to change the clock scheme now. **The decision on the solver (whether to restrict it for the open flow) waits for a hardware measurement** (Task 10: measure the project clock from an open-flow bitstream, and check that the MMCM locks). Any restriction on this toolchain version would have to keep both the integer-part rule below and `MULT` in {10, 17, 18}, or wait for the upstream filter fix; the earlier draft's "fractions only on even integer parts" suggestion is withdrawn as stated (section 1, alternatives), because for the Game Bub it would trade a divider difference that is probably duty-cycle-only for a definitely wrong loop filter (MULT 54) and cost 16 ppm.
+
+The open-flow timing result needs one qualification: nextpnr-xilinx does not propagate the input constraint through the MMCM, so the project clock was constrained from `achieved_hz` by a pre-pack script (section 4), and it does not time the BUFGCE enable path (section 5).
 
 ## Results table
 
@@ -46,47 +48,73 @@ CMT_TOP_R_LOWER_B_X8Y61.MMCME2_ADV.CLKOUT5_CLKOUT2_FRACTIONAL_PHASE_MUX_F[1:0] =
 CMT_TOP_R_LOWER_B_X8Y61.MMCME2_ADV.CLKFBOUT_CLKOUT1_HIGH_TIME[5:0] = 6'b001001   (9 + 9 = 18, MULT 18.000)
 ```
 
-(`build/clock/gamebub-openxc7/top.fasm`.) Decoding the bitstream back with `bit2fasm` returns the same features (the round trip is in `build/clock/gamebub-openxc7.decoded.fasm`). The test `test_open_flow_fractional_divider_is_in_the_fasm` asserts `FRAC_EN` and the fraction value.
+(`build/clock/gamebub-openxc7/top.fasm`.) Decoding the bitstream back with `bit2fasm` returns the same features (the round trip is in `build/clock/gamebub-open.decoded.fasm`). The test `test_open_flow_fractional_divider_is_in_the_fasm` asserts `FRAC_EN` and the fraction value.
 
-**Comparison with Vivado.** The Vivado bitstream of the same design, decoded the same way (`build/clock/gamebub-vivado.decoded.fasm`), has the same `FRAC_EN` and `FRAC = 6` but different counter and waveform fields. Field values for CLKOUT0_DIVIDE_F = 35.75, MULT 18.000, DIVCLK 1 (decoded to integers, open flow first):
+**Comparison with Vivado: scope and result.** The bitstream of each built design was decoded with `bit2fasm` for both flows (`build/clock/<board>-{open,vivado}.decoded.fasm`) and every MMCME2_ADV feature at the site was compared as an integer (bit slices of one field summed; `tt_harness.clock_build.mmcm_values`). The test `test_open_and_vivado_mmcm_encodings_differ_as_documented` asserts exactly the sets below for both boards, so it fails if either toolchain changes. Everything not listed is equal in the two bitstreams (the input divider, `CLKFBOUT` high/low, the lock table `LKTABLE`, compensation, `LOCKREG3`, the clock output enables and the rest).
 
-| Field | openXC7 | Vivado |
-|---|---|---|
-| CLKOUT0 HIGH_TIME | 16 | 17 |
-| CLKOUT0 LOW_TIME | 17 | 17 |
-| CLKOUT0 EDGE | 1 | 1 |
-| CLKOUT0 FRAC, FRAC_EN | 6, 1 | 6, 1 |
-| CLKOUT0 FRAC_WF_R | 1 | 0 |
-| CLKOUT5 FRACTIONAL FRAC_WF_F | 1 | 0 |
-| CLKOUT5 FRACTIONAL PHASE_MUX_F | 3 | 7 |
-| CLKOUT5 FRACTIONAL NO_COUNT (unused CLKOUT5) | 0 | 1 |
-| CLKFBOUT HIGH/LOW, DIVCLK | identical | identical |
+Differences, each board, open flow first (hex; "unused" means outputs CLKOUT1 to CLKOUT6, which the design does not use):
 
-The last-but-one row also differs for an integer divider (35.0), where every other field is identical: it concerns the unused CLKOUT5 and is not a clock-frequency difference as far as I can tell. The test `test_open_and_vivado_encode_the_fractional_divider_differently` asserts exactly this set of differences, so it fails if either flow changes.
+| Field | Game Bub (MULT 18) | Arty (MULT 9) | Cause |
+|---|---|---|---|
+| CLKOUT0 HIGH_TIME | 16 vs 17 | 16 vs 17 | odd-integer fractional divide (below) |
+| CLKOUT0 FRAC_WF_R | 1 vs 0 | 1 vs 0 | same |
+| CLKOUT5 FRACTIONAL FRAC_WF_F | 1 vs 0 | 1 vs 0 | same |
+| CLKOUT5 FRACTIONAL PHASE_MUX_F | 3 vs 7 | 3 vs 7 | same |
+| `TABLE` (loop filter) | equal, 0x3d4 | **0x3d4 vs 0x394** | nextpnr hard-codes 0x3d4 |
+| `FILTREG1_RESERVED` | 0x3d4 vs 0x008 | 0x394 vs 0x008 | nextpnr writes the filter value here instead of 0x008 |
+| `POWER_REG` | 0xffff vs 0x9900 | 0xffff vs 0x9900 | nextpnr enables everything |
+| unused CLKOUT1 to CLKOUT4: HIGH_TIME, LOW_TIME | 0 vs 1 | 0 vs 1 | Vivado sets 1 |
+| unused CLKOUT1 to CLKOUT4: NO_COUNT | 0 vs 1 | 0 vs 1 | Vivado sets it |
+| unused CLKOUT5 and CLKOUT6: CLKOUT1 HIGH_TIME and LOW_TIME, FRACTIONAL NO_COUNT | 0 vs 1 | 0 vs 1 | same |
 
-**What was probed** (`scripts/mmcm_encoding_probe.py`, `scripts/mmcm_encoding_compare.py`; one tiny MMCM design per setting on the `xc7a100tcsg324-1`, both flows, bitstreams decoded; outputs in `build/fracprobe/<case>/`; all with the divider on CLKOUT0, DIVCLK 1 unless stated):
+The same fields agree: `CLKOUT0 FRAC` = 6, `FRAC_EN` = 1, `EDGE` = 1, LOW_TIME 17, `CLKFBOUT` 9 + 9 (MULT 18) or the Arty's 9, `DIVCLK`. The Arty `TABLE` figures and the Game Bub's matching `TABLE` were checked against the decoded files (`tmp/alldiff.py` output, reproduced by the test); the proposed even-integer setting below was probed separately and has `TABLE` 0x3d4 against Vivado's 0x184.
 
-| MULT / DIVIDE_F | Result |
+**Cause: the fractional divider with an odd integer part.** Vivado's values follow the fractional-counter calculation of Xilinx's XAPP888 reference design (`mmcm_frac_count_calc` in `mmcm_drp_func.h`; the register layout is XAPP888 v1.8, Tables 2, 5 and 7: `FRAC`, `FRAC_EN`, `FRAC_WF_R` in CLKOUT0's ClkReg2, `PHASE_MUX_F` and `FRAC_WF_F` in CLKOUT5's ClkReg2). With `odd` the odd bit of the integer part, `f` the fraction in eighths and `oaf = 8*odd + f`:
+
+```
+HIGH = int/2 - (oaf <= 8)    LOW = int/2 - (oaf <= 9)    (int/2 rounded down)
+PHASE_MUX_F = 4*odd + (f >> 1)
+WF_R = 1 if 1 <= oaf <= 8     WF_F = 1 if 2 <= oaf <= 9
+```
+
+I reproduced the decoded Vivado values from these formulas by hand (the function file was read from a published copy of the 7-series header, `Learn-FPGA-Programming` `mmcm_pll_drp_func_7s_mmcm.vh`, lines 622 to 638):
+
+| Divide | int, odd, f, oaf | HIGH, LOW | PHASE_MUX_F | WF_R, WF_F | Vivado decode |
+|---|---|---|---|---|---|
+| 35.75 | 35, 1, 6, 14 | 17, 17 | 4 + 3 = 7 | 0, 0 | 17, 17, 7, 0, 0 |
+| 36.75 | 36, 0, 6, 6 | 17, 17 | 0 + 3 = 3 | 1, 1 | 17, 17, 3, 1, 1 |
+| 35.125 | 35, 1, 1, 9 | 17 (HIGH), 16 (LOW) | 4 + 0 = 4 | 0, 1 | HIGH 17, LOW 16, 4, 0, 1 |
+
+nextpnr-xilinx 0.8.2 (`xilinx/fasm.cc`, `write_mmcm_clkout`, lines 1584 to 1657) has no odd-integer branch: it splits the integer part as `high = floor(d/2)`, `low = floor(d) - high`, sets `edge` when they differ, and for a fractional CLKOUT0 or CLKFBOUT decrements both (`--high; --low;`, lines 1621 to 1623), writes `FRAC_WF_F` and `PHASE_MUX_F = frac >> 1` (only if non-zero), and always `FRAC_EN`, `FRAC_WF_R` and `FRAC` (lines 1651 to 1655). For 35.75 that is HIGH 16, LOW 17, EDGE, WF_R 1, WF_F 1, PHASE_MUX_F 3: the 36.75 row with HIGH one lower. For an even integer part it is the XAPP888 result (the 36.75 row), which is why even integer parts agree. Upstream `main` of openXC7/nextpnr-xilinx is the same in this respect (`xilinx/fasm.cc` lines 2901 to 2932).
+
+**What that means for the output frequency (reasoning, not a measurement).** XAPP888 (page 2) says a HIGH or LOW count is a number of VCO cycles and the EDGE bit moves half a cycle from LOW to HIGH without changing their sum; the fractional bits (page 3) only adjust edge timing. If so, nextpnr's 35.75 encoding is Vivado's known-good 36.75 encoding with one HIGH count fewer, so its period is 36.75 - 1 = 35.75 VCO cycles: 900 / 35.75 = 25.1748 MHz, the frequency is right and only the duty cycle (and the exact edge positions) differ from Vivado's, a few percent off 50% (the reviewer's estimate was about 48.6%, or 50% if EDGE adds a half cycle as in integer mode; I did not derive it). **This is likely correct but not established**: the fractional counter's exact behaviour is not documented beyond the above, and I did not find a source that says what a lone HIGH_TIME decrement does with WF_R and WF_F set. If the assumption is wrong the output would be 900 / 34.75 or 900 / 36.75, about 2.8% off and unmistakable on a frequency counter, far outside the 0.1% limit. A hardware measurement is planned (Task 10) and decides it.
+
+**What was probed** (`scripts/mmcm_encoding_probe.py` builds one tiny MMCM design per setting for the `xc7a100tcsg324-1` in both flows and decodes both bitstreams; `scripts/mmcm_encoding_compare.py` prints every differing feature; outputs in `build/fracprobe/<case>/`). The unused-output, `FILTREG1_RESERVED` and `POWER_REG` differences of the table above apply to every case, and `TABLE` differs whenever MULT is not 10, 17 or 18 (it is 0x3d4 whatever the multiplier; the table `filter_lookup_optimized` in `fasm.cc` lines 1965 to 1984 gives 0x3d4 at MULT 10, 17 and 18). Beyond those, the divider fields are:
+
+| DIVCLK, MULT / DIVIDE_F | Divider fields |
 |---|---|
-| 18 / 35.0 | identical (except the unused-CLKOUT5 bit) |
-| 18 / 35.25, 35.5, 35.75 | FRAC and FRAC_EN identical; HIGH_TIME, WF_R, WF_F, PHASE_MUX_F differ. Vivado PHASE_MUX_F is 5, 6, 7 and the open flow 1, 2, 3 |
-| 18 / 36.75 | identical |
-| 18.5 / 36, 18.125 / 36 (fractional MULT, even integer part) | identical |
-| DIVCLK 4, 53.875 / 26.75 (odd integer part 53 in MULT) | CLKFBOUT HIGH_TIME and WF_R differ: the same divergence, on the feedback divider |
-| DIVCLK 4, 54.125 / 26.875 (both even integer parts) | identical |
+| 1, 18 / 35.0 | equal |
+| 1, 18 / 35.25, 35.5, 35.75 | `FRAC`, `FRAC_EN` equal; HIGH, WF_R, WF_F, PHASE_MUX_F differ. Vivado PHASE_MUX_F 5, 6, 7; open 1, 2, 3 |
+| 1, 18 / 35.125 (odd, f = 1) | differ in another way: Vivado HIGH 17, LOW 16, WF_R 0, WF_F 1, PHASE_MUX_F 4; open HIGH 16, LOW 17, WF_R 1, WF_F 0, PHASE_MUX_F 0 (`frac >> 1` is 0, so nextpnr writes no WF_F or PHASE_MUX_F) |
+| 1, 18 / 36.75 | equal |
+| 1, 18.5 / 36 and 18.125 / 36 (fractional MULT, even integer part) | equal |
+| 4, 53.875 / 26.75 (odd integer part 53 in MULT) | the same divergence on CLKFBOUT (HIGH, WF_R) |
+| 4, 54.125 / 26.875 (both even integer parts) | equal, but `TABLE` 0x3d4 against Vivado's 0x184 (MULT 54) |
 
-So the divergence is whenever a fractional divider (output or feedback) has an odd integer part. The pattern in Vivado's encoding for the odd case is HIGH = LOW = 17, WF_R and WF_F clear, PHASE_MUX_F = 4 + fraction/2; the open flow instead uses HIGH = 16, WF_R and WF_F set, PHASE_MUX_F = fraction/2, which is how both flows encode the even case. I could not find the 7-series fractional-counter register semantics (XAPP888's algorithm) offline, and the two encodings cannot be reconciled by counting cycles with an assumed meaning for the WF bits: under the readings I tried the open flow's period is either equal to or 1 VCO cycle (about 2.8%) off from Vivado's. So I cannot say that it is wrong, only that it is not what the vendor tool writes. **To close it:** measure the Game Bub or Arty project clock from an open-flow bitstream (a frequency counter or the logic analyser on the 24-bit counter's LED), which is the first thing Task 10 should do for an openXC7 bitstream.
+So the divider divergence occurs whenever a fractional divider (output or feedback) has an odd integer part.
 
 **Alternatives, per the brief (the open flow did not reject the fractional MMCM, so this is for information).** From the solver's space:
 
 | Class of setting | From 50 MHz | From 100 MHz |
 |---|---|---|
 | Solver's choice (odd-integer fractional divider) | DIVCLK 1, 18.0 / 35.75, -6.94 ppm | DIVCLK 1, 9.0 / 35.75, -6.94 ppm |
-| Fractions only on even integer parts (identical encodings) | DIVCLK 4, 54.125 / 26.875 (VCO 676.6), -23.09 ppm | DIVCLK 5, 58.375 / 46.375, +8.03 ppm: 58 and 46 are even |
+| Fractions only on even integer parts | DIVCLK 4, 54.125 / 26.875 (VCO 676.6), -23.09 ppm; divider fields equal, but **MULT 54 gets a wrong open-flow loop filter** (`TABLE` 0x3d4, Vivado 0x184) | DIVCLK 5, 58.375 / 46.375, +8.03 ppm (computed only; MULT 58 would also get a wrong table) |
 | Integer MULT and DIVIDE only (MMCM) | DIVCLK 5, 63 / 25 (VCO 630), 25.200 MHz, **+993 ppm** (inside 0.1% only just) | DIVCLK 3, 34 / 45, +404.6 ppm |
 | `PLLE2_ADV`, integer only (VCO 800 to 1600 MHz) | best is 25.000 MHz, -6951 ppm, outside 0.1% | DIVCLK 3, 37 / 49, -195.9 ppm |
 
-The DIVCLK 4, 54.125 / 26.875 row was built in both flows and encodes identically (above). The 100 MHz row of that class was computed only. `PLLE2_ADV` was not built: it is not needed on the Game Bub (it cannot reach the frequency), and on the Arty an MMCM setting that is better and encodes identically exists. No integer-only setting from 50 MHz is within 100 ppm; the best, 25.2 MHz, is within the project's 0.1% limit but 0.099% off is a poor clock for a video capture.
+The recommendation in the first version of this document, to restrict the solver to fractions on even integer parts, is **withdrawn**: it removes the divider difference but, for the Game Bub (MULT 18 today, MULT 54 under the rule) it replaces a difference that is probably cosmetic (duty cycle) with a definitely wrong loop filter, and it costs 16 ppm. A rule for this toolchain version would also have to keep `MULT` in {10, 17, 18} (where 0x3d4 is the right table) or wait for the upstream fix, which puts the filter value in `TABLE` and 0x8 in `FILTREG1_RESERVED` (`xilinx/fasm.cc` on `main`, lines 3344 to 3355, with the comment that they were previously swapped and that Vivado wants FILTREG1 = 0x8 and TABLE = the filter lookup). The decision waits for the hardware measurement. `PLLE2_ADV` was not built: it cannot reach the frequency from 50 MHz, and from 100 MHz the MMCM options are better.
+
+Two further upstream facts. Upstream `main` also writes `POWER_REG` 0x100 (integer counters only, as Vivado does for non-fractional configurations) where 0.8.2 writes 0xffff; Vivado's 0x9900 for a fractional configuration is what enables the fractional counters (the 0.8.2 source comment says so), so **a toolchain upgrade may break fractional mode** on the open flow, a follow-up to re-check on any upgrade (the new test would flag the change in the POWER_REG row). The 0.8.2 chip database and binary are the ones used here.
 
 ## 2. BUFGCE with a wired enable
 
@@ -137,7 +165,7 @@ Info: Max frequency for clock          'pc_clk0': 268.38 MHz (PASS at 25.17 MHz)
   tt-harness ce path: slack 36.732 from xilinxmultiregimpl1_reg/C to BUFGCE/CE0 clock pc_clkout_raw requirement 39.722
   ```
   Game Bub: slack 36.476, requirement 39.722. It is also the worst setup path of the whole project-clock domain, so the domain slack above is the enable path's. The first synchroniser flop's input (from the button and from `LOCKED`) is a false path to a `mr_ff` cell, as LiteX's `MultiReg` constraints say.
-- **openXC7: not timed (inferred).** The only path nextpnr-xilinx reports for `project_free_clk` (the clock the two synchroniser flops are on) is flop to flop, `xilinxmultiregimpl00` to `$auto$ff.cc:337:slice$1197.D`; no path ends at the BUFGCTRL's CE. nextpnr-xilinx has no timing endpoint for that pin. I did not find a log line that says so outright: this is the absence of such a path in the critical path reports, not a statement from the tool. The path is a single flop to a global buffer pin, so the risk is small, but it is not checked in this flow.
+- **openXC7: not timed.** The only path nextpnr-xilinx reports for `project_free_clk` (the clock the two synchroniser flops are on) is flop to flop, `xilinxmultiregimpl00` to `$auto$ff.cc:337:slice$1197.D`; no path ends at the BUFGCTRL's CE. The source says why: in nextpnr-xilinx 0.8.2 `xilinx/arch.cc`, `Arch::getPortTimingClass` (lines 1252 to 1292) gives a `BUFGCTRL` only `TMG_COMB_INPUT` for `I0`/`I1` and `TMG_COMB_OUTPUT` for `O` (lines 1285 to 1289) and falls through to `TMG_IGNORE` (line 1291) for every other port, `CE0` and `CE1` included. So the enable path is ignored by the timing engine, by design, not by accident. The path is a single flop to a global buffer pin, so the risk is small, but it is not checked in this flow.
 
 ## 6. Game Bub button pull-ups
 
@@ -159,11 +187,12 @@ Both flows honour `PULLTYPE=PULLUP`.
 
 ## Changes outside the new files
 
-None to `clocking.py`, the platform or `build.py`. The Game Bub platform's comment says "Task 7b must confirm the open flow actually emits the pull-up in its FASM": it does.
+None to `clocking.py` or `build.py`. The Game Bub platform gained `CFGBVS VCCO` and `CONFIG_VOLTAGE 3.3` for the Vivado toolchain only (as `tt_harness/boards/gamebub/link_build.py` sets them in its build script), with a unit test that the generated XDC carries them, so the CFGBVS-1 DRC warning seen in the Game Bub Vivado build is gone for any build that uses the platform; this was added after the builds above and the warning was not re-observed gone in a Vivado run beyond the test of the generated XDC. The platform's comment says "Task 7b must confirm the open flow actually emits the pull-up in its FASM": it does.
 
 ## Notes and loose ends
 
 - LiteX's own `openxc7` toolchain object looks for `$CHIPDB/xc7a100tcsg324.bin` (no speed grade) while `scripts/setup_toolchains.py` builds `xc7a100tcsg324-1.bin`; `clock_build.py` drives the tools directly and uses the repository's names, so this does not matter here, but `platform.build()` without `run=False` on the openxc7 backend would not find the chip database.
-- Vivado gives a CFGBVS warning for the Game Bub design: the platform sets no `CFGBVS` / `CONFIG_VOLTAGE`. Worth adding before a bitstream goes on the board.
+- The first version of the platform set no `CFGBVS` / `CONFIG_VOLTAGE` and Vivado warned (CFGBVS-1); now added, see above.
 - The `SIM_DEVICE` warning on `BUFGCE` is cosmetic.
+- Not probed: odd-integer fractions on the feedback divider beyond MULT 53.875 (one case), and fractions of x.375, x.625, x.875 on the output divider. The formulas above predict Vivado's encoding for them; nextpnr's follows `write_mmcm_clkout`.
 - Not done: `PLLE2_ADV` builds (not needed, see above); a second seed or a hold check in the open flow (nextpnr-xilinx does no hold analysis); any hardware measurement.
