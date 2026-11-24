@@ -36,6 +36,7 @@ addopts = "--basetemp=tmp/pytest"
 markers = [
     "toolchain: needs the open-source toolchains installed under .toolchains/",
     "vivado: needs a Vivado installation",
+    "board: uses a real FPGA board over SSH; deselected unless --board is given",
 ]
 
 [tool.ruff]

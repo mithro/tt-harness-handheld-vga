@@ -102,3 +102,49 @@ the host booted, a `tmux` session with a bare shell, no terminal activity in the
 hours since, and nothing holding the serial ports. pi3 is therefore usable too. If a
 session shows activity within the last several minutes, or a tool is running, leave the
 board alone and use another.
+
+`tt_harness.host.run.board_activity` makes this check (terminal activity within ten
+minutes, a process with the UART or the adapter's JTAG serial port open, or one running
+`openFPGALoader`, `picocom`, `tio` or `minicom`) and `tt-harness run-compare` refuses a busy
+board before uploading anything.
+
+### What the first hardware runs found, 2026-11-24 (pi7)
+
+The runs themselves are in `docs/results/2026-11-first-hardware-run.md`. About the hosts:
+
+- **Host key.** `ps1.fpgas.online` ports 10322, 10722 and 12122 present one ED25519 key,
+  `SHA256:pDFcD3r8o4wazB5vGN24X8mWlcWtrRBh5zoUcw5+jfI`. It is not in the user's
+  `~/.ssh/known_hosts`, so a batch-mode `ssh` fails with "Host key verification failed"
+  until it is added there or a known-hosts file holding it is given
+  (`tt-harness run-compare --known-hosts FILE`, which also sets
+  `StrictHostKeyChecking=yes`).
+- **Login.** Every user is `pi`; the login shell is `zsh`, so a command line is parsed by
+  zsh (an unmatched glob is an error and ends the command). The line of text printed at
+  login (the site's password) is the SSH banner: it arrives on stderr, not on stdout.
+- **No sudo is needed.** `pi` is in `plugdev`; `openFPGALoader -b arty FILE` and
+  `openFPGALoader -b arty --detect` work as `pi`, and the UART `/dev/ttyUSB1` is
+  `crw-rw-r-- root plugdev`.
+- **Loading** a 2.2 MB bitstream with `openFPGALoader -b arty` takes 2.5 s including the
+  SSH connection, and ends with `done 1`. The design runs as soon as it is configured: a
+  build that transmits from configuration had its first byte at the receiver 2.47 s
+  after the receiver reported it was listening, the load having been started right
+  after that report.
+- **UART at 1,000,000 baud is clean.** Four frames of 6,000,013 bytes each (60 s each)
+  arrived with a good CRC-32 and the kernel's counters (`TIOCGICOUNT` on the open port:
+  frame, overrun, parity, break, buffer overrun) all unchanged; `rx` advanced by exactly
+  the frame length. A plain pyserial read loop on the Pi keeps up.
+  `/proc/tty/driver/` is readable only by root, so `TIOCGICOUNT` is the way to read the
+  counters.
+- **Tools.** `fuser`, `gzip`, `timeout`, `setsid`, `sha256sum` and Python 3.13 with
+  pyserial 3.5 are there; `lsof` is not. The open files of other users' processes cannot
+  be read without root, but every login is `pi`, so a UART held by another session shows.
+- **Home directory.** `/home/pi` holds other people's files (`Demos/`, `Uploads/`, a
+  `.bit`); the runner works in its own `/home/pi/tt-harness-run-<random>/` (mode 700) and
+  removes it. The filesystem is RAM: a 2.2 MB bitstream plus a 6 MB recording is fine.
+- **Clock.** The Pi's clock is UTC and agreed with this machine to within a few seconds.
+- **Camera.** `https://ps1.fpgas.online/live/pi7.m3u8` shows the board with a clock
+  overlay (UTC) and lags by about 35 s. On 2026-11-24 the room was dark and the picture
+  out of focus: individual LEDs cannot be told apart, though the light of the USB-serial
+  activity LED going out when a frame ends is measurable.
+- **State left.** After a run the last bitstream loaded stays in the FPGA until someone
+  loads another or the board loses power; there is no earlier state to restore.
