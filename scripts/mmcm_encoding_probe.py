@@ -17,7 +17,7 @@ V = """\
 module top(input clk50, output led);
   wire fb, o, g, locked;
   MMCME2_ADV #(.BANDWIDTH("OPTIMIZED"), .COMPENSATION("INTERNAL"), .CLKIN1_PERIOD(20.0),
-    .DIVCLK_DIVIDE(1), .CLKFBOUT_MULT_F(%s), .CLKOUT0_DIVIDE_F(%s), .CLKOUT0_DUTY_CYCLE(0.5),
+    .DIVCLK_DIVIDE(%s), .CLKFBOUT_MULT_F(%s), .CLKOUT0_DIVIDE_F(%s), .CLKOUT0_DUTY_CYCLE(0.5),
     .CLKOUT0_PHASE(0.0), .CLKFBOUT_PHASE(0.0)) mmcm (
     .CLKIN1(clk50), .CLKIN2(1'b0), .CLKINSEL(1'b1), .CLKFBIN(fb), .CLKFBOUT(fb), .CLKOUT0(o),
     .LOCKED(locked), .RST(1'b0), .PWRDWN(1'b0), .DCLK(1'b0), .DEN(1'b0), .DWE(1'b0),
@@ -72,10 +72,10 @@ def mmcm_lines(fasm: Path):
     return keep
 
 
-def one(mult: str, div: str, flows):
-    d = ROOT / f"m{mult}_d{div}"
+def one(mult: str, div: str, flows, divclk: str = "1"):
+    d = ROOT / f"c{divclk}_m{mult}_d{div}"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "top.v").write_text(V % (mult, div))
+    (d / "top.v").write_text(V % (divclk, mult, div))
     (d / "top.xdc").write_text(XDC)
     log = d / "build.log"
     log.write_text("")
@@ -156,6 +156,12 @@ if __name__ == "__main__":
         ("18.500", "36.000"),
         ("18.125", "36.000"),
     ]
+    if len(sys.argv) > 2:  # "divclk:mult:div" ...
+        for spec in sys.argv[2:]:
+            c, m, dv = spec.split(":")
+            one(m, dv, flows, c)
+            print("done", spec, flush=True)
+        raise SystemExit(0)
     for m, dv in cases:
         one(m, dv, flows)
         print("done", m, dv, flush=True)
