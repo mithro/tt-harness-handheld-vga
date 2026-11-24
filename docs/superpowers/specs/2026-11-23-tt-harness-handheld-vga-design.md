@@ -304,6 +304,15 @@ is a good target, and a complicated dependency tree between projects is not. The
 used here: **share by making small, self-contained pieces with a written interface, and
 do not make a build wait on another repository.**
 
+**Update, 2026-11-24 (owner):** "It is fine for this repo to depend on the vga capture
+functionality we own." So `vgacap` may be a real code dependency of this project, pinned to
+a commit: its stream format code, frame reconstruction and its RTL capture library. The
+rule against a dependency tree still applies to the other sibling projects, whose output is
+read as files. The pieces already written here before this was said (a small vgacap stream
+writer, the `uo_out` sampler) stay as they are for now; new work that overlaps `vgacap`
+should use `vgacap` rather than add another copy, and the existing copies are replaced when
+the `vgacap` versions exist and it is convenient.
+
 What this project offers for reuse:
 
 - Each core block (stimulus sequencer, gamepad emulator, VGA capture, 7-segment sampler,
