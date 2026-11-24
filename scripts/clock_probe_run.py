@@ -35,6 +35,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tt_harness import mmcm_fasm
 from tt_harness.boards import arty_clock_probe as probe
 from tt_harness.boards import arty_clock_probe_build as probe_build
 from tt_harness.host import run
@@ -75,35 +76,25 @@ def vivado_messages(out_dir: Path) -> dict:
     }
 
 
-VARIANTS = {
-    "": "the build as the toolchain makes it",
-    "fbfix": "open flow, FASM edited afterwards: CLKFBIN takes CLKFBOUT as in Vivado's bitstream",
-    "zhold": "open flow, COMPENSATION set to ZHOLD in the pre-pack script",
-}
-
-
-def build_one(name: str, toolchain: str, reuse: bool, variant: str = "") -> dict:
+def build_one(name: str, toolchain: str, reuse: bool) -> dict:
     """Build (or reuse) one probe; return its facts, also written to `<dir>/probe.json`."""
-    if variant and toolchain != "openxc7":
-        raise ValueError("variants are of the open flow only")
-    out_dir = BUILD / (f"{name}-{toolchain}" + (f"-{variant}" if variant else ""))
+    out_dir = BUILD / f"{name}-{toolchain}"
     facts_path = out_dir / "probe.json"
     if reuse and facts_path.is_file() and (out_dir / "top.bit").is_file():
         facts = json.loads(facts_path.read_text())
         bits = (out_dir / "top.bit").read_bytes()
-        if facts["bitstream_sha256"] == hashlib.sha256(bits).hexdigest():
+        # A bitstream from before Task 7d (feedback tied off) is never reused.
+        if facts["bitstream_sha256"] == hashlib.sha256(bits).hexdigest() and str(
+            facts.get("feedback")
+        ).endswith(mmcm_fasm.DEDICATED):
             return facts
     s = probe.setting(name)
     started = time.monotonic()
-    extra = probe_build.PREPACK_ZHOLD if variant == "zhold" else ""
-    job = probe_build.build(name, toolchain, out_dir, prepack_extra=extra)
-    if variant == "fbfix":
-        probe_build.rewrite_feedback(job)
+    job = probe_build.build(name, toolchain, out_dir)
     mmcm = probe_build.programmed_mmcm(job.bitstream)
     facts = {
         "setting": name,
         "toolchain": toolchain,
-        "variant": variant,
         "feedback": probe_build.feedback_source(job.bitstream),
         "part": job.board.parts[toolchain],
         "divclk": s.divclk,
@@ -238,7 +229,7 @@ def measure_one(args, facts: dict, runner) -> dict:
     doc = measure(board, Path(facts["bitstream"]), args.gates, runner, args.wait_busy_min * 60)
     data = doc.pop("capture")
     RESULTS.mkdir(parents=True, exist_ok=True)
-    stem = f"{name}-{toolchain}{'-' + args.variant if args.variant else ''}{args.tag}"
+    stem = f"{name}-{toolchain}{args.tag}"
     (RESULTS / f"{stem}.capture.txt").write_bytes(data)
     result = {"build": facts, "run": doc, **summarise(data, args.gates)}
     (RESULTS / f"{stem}.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
@@ -283,7 +274,7 @@ def table(rows: list[dict]) -> str:
         else:
             measured = "not run | | | | "
         lines.append(
-            f"| {b['setting']} | {b['toolchain']} {b.get('variant', '')} | {ideal:,.2f} "
+            f"| {b['setting']} | {b['toolchain']} | {ideal:,.2f} "
             f"| {measured} | {m['TABLE']:#05x} | {fields} | {b.get('feedback', '?')} |"
         )
     return "\n".join(lines)
@@ -302,7 +293,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-load", action="store_true", help="build and decode only")
     parser.add_argument("--gates", type=int, default=10, help="1 s readings after gate 0")
     parser.add_argument("--tag", default="", help="suffix for the result files, e.g. -60s")
-    parser.add_argument("--variant", default="", choices=sorted(VARIANTS), help=str(VARIANTS))
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     parser.add_argument("--uart")
@@ -322,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     built = []
     for name, toolchain in pairs:  # one FPGA build at a time
         print(f"build {name} {toolchain} ...", flush=True)
-        facts = build_one(name, toolchain, args.reuse, args.variant)
+        facts = build_one(name, toolchain, args.reuse)
         built.append(facts)
         print(f"build {name} {toolchain}: {facts['bitstream_sha256'][:12]}", flush=True)
     rows = [{"build": facts} for facts in built]

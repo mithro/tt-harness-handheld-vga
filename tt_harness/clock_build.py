@@ -23,6 +23,10 @@ exactly as LiteX writes them. The tools are then driven directly, as `build.py` 
 - Vivado: synthesis, implementation and bitstream in one batch run, reports and
   `tt-harness` lines written by the script (see `vivado_script`).
 
+Feedback gate. Every build decodes its own bitstream and fails unless the MMCM's CLKFBIN is
+fed by its own CLKFBOUT through the tile's dedicated connection (`feedback_gate`): an open-flow
+MMCM whose feedback nextpnr-xilinx has tied off builds, meets timing and never locks.
+
 Timing gate. A build passes only when both clock domains have a constraint, each domain's
 worst setup slack is not negative, and (Vivado) `check_timing` finds nothing unconstrained.
 Inputs (buttons) and outputs (LEDs, test points) have no clock relationship to the board and
@@ -42,7 +46,7 @@ from litex_boards.platforms import digilent_arty
 from migen import Cat, ClockDomain, Instance, Module, Signal, reduce
 from migen.genlib.cdc import MultiReg
 
-from tt_harness import tools, verilate
+from tt_harness import mmcm_fasm, tools, verilate
 from tt_harness.boards.gamebub import platform as gamebub_platform
 from tt_harness.build import (
     CHIPDB,
@@ -321,6 +325,7 @@ def openxc7_build(board: Board, out_dir: Path, top=None, prepack_extra: str = ""
     )
     job.bitstream = bit
     job.facts["nextpnr"] = text
+    job.facts["feedback"] = feedback_gate(job)
     return job
 
 
@@ -484,6 +489,7 @@ def vivado_build(board: Board, out_dir: Path, top=None) -> Build:
     )
     job.bitstream = out_dir / f"{TOP}.bit"
     job.facts["vivado"] = text + "\n" + (out_dir / "timing.rpt").read_text()
+    job.facts["feedback"] = feedback_gate(job)
     return job
 
 
@@ -567,6 +573,27 @@ def decode_bitstream(bit: Path, part: str, out: Path) -> Path:
             check=True,
         )
     return out
+
+
+def decoded_path(job: Build) -> Path:
+    """Where `feedback_gate` leaves the build's bitstream decoded back to FASM."""
+    return job.out_dir / f"{TOP}.decoded.fasm"
+
+
+def feedback_gate(job: Build) -> str:
+    """Decode the build's bitstream and require the MMCM's dedicated feedback.
+
+    Every build here ends with this, whichever the toolchain and board: the bitstream is
+    decoded with `bit2fasm` to `decoded_path(job)` and the source of the MMCM's CLKFBIN must
+    be its own CLKFBOUT (`mmcm_fasm.check_feedback`). Returns that source's name; raises
+    `BuildError` otherwise, because such a bitstream does not lock and no tool says so.
+    """
+    # The Vivado part of the Arty (-1L) is not in the prjxray database; it is the same die.
+    decode_bitstream(job.bitstream, job.board.parts["openxc7"], decoded_path(job))
+    try:
+        return mmcm_fasm.check_feedback(decoded_path(job).read_text())
+    except mmcm_fasm.FeedbackError as e:
+        raise BuildError(f"{job.board.name} {job.toolchain}: {e}", job.log) from e
 
 
 def generate_setting(board: Board) -> MmcmSetting:

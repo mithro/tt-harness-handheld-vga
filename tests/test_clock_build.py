@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from tt_harness import clock_build as cb
-from tt_harness import tools
+from tt_harness import mmcm_fasm, tools
 from tt_harness.core.clocking import explicit_setting
 
 REPO = Path(__file__).resolve().parent.parent
@@ -126,6 +126,7 @@ def test_open_flow_build(open_job: cb.Build) -> None:
     job = open_job
     _bitstream_ok(job)
     log = job.facts["nextpnr"]
+    assert job.facts["feedback"].endswith("CLKFBOUT2IN")
     domains = cb.parse_nextpnr(log, job.board, job.setting, job.log)
     assert domains["input"].constraint_mhz == pytest.approx(job.board.clk_hz / 1e6)
     projects = {k: d for k, d in domains.items() if k.startswith("project:")}
@@ -179,6 +180,7 @@ def test_open_flow_gamebub_button_pullups(open_job: cb.Build) -> None:
 def test_vivado_build(vivado_job: cb.Build) -> None:
     job = vivado_job
     _bitstream_ok(job)
+    assert job.facts["feedback"].endswith("CLKFBOUT2IN")
     domains = cb.parse_vivado(job.facts["vivado"], job.board, job.setting, job.log)
     assert sorted(domains) == ["input", "project"]
     assert all(d.met for d in domains.values()), domains
@@ -187,6 +189,9 @@ def test_vivado_build(vivado_job: cb.Build) -> None:
         job.setting.achieved_hz / 1e6, rel=1e-4
     )
     text = job.facts["vivado"]
+    # The source says ZHOLD (for nextpnr-xilinx). Vivado 2025.2 sees CLKFBOUT wired straight
+    # to CLKFBIN and changes the implemented cell's property to INTERNAL, without a message.
+    assert 'COMPENSATION       ("ZHOLD")' in (job.out_dir / "top.v").read_text()
     for prop, want in (
         ("COMPENSATION", "INTERNAL"),
         ("DIVCLK_DIVIDE", str(job.setting.divclk)),
@@ -225,7 +230,8 @@ def test_vivado_gamebub_button_pullups(vivado_job: cb.Build) -> None:
 
 # Every MMCM feature that differs between the two flows' bitstreams for the same design,
 # decoded back with bit2fasm and read as integers: field -> (openXC7, Vivado). The comparison
-# covers the whole MMCM site, not only the dividers. The causes (nextpnr-xilinx 0.8.2
+# covers the whole MMCM site, not only the dividers, and (since Task 7d) the routing features
+# of the MMCM's tile, which must be the same in both flows. The causes (nextpnr-xilinx 0.8.2
 # `xilinx/fasm.cc`, `write_mmcm_clkout` and `write_mmcm`):
 #
 # - The fractional CLKOUT0_DIVIDE_F = 35.75 has an odd integer part. Vivado follows XAPP888's
@@ -271,12 +277,19 @@ def known_differences(board: cb.Board) -> dict[str, tuple[int, int]]:
 @pytest.mark.parametrize("board", BOARDS)
 def test_open_and_vivado_mmcm_encodings_differ_as_documented(board: cb.Board) -> None:
     jobs = {"open": _open(board.name), "vivado": _vivado(board.name)}
-    decoded = {}
+    decoded, routing = {}, {}
     for tag, job in jobs.items():
-        out = BUILD / f"{board.name}-{tag}.decoded.fasm"
-        # The Vivado part (-1L) is not in the database; it is the same die as the open part.
-        cb.decode_bitstream(job.bitstream, board.parts["openxc7"], out)
-        decoded[tag] = cb.mmcm_values(out.read_text())
+        # Each build has decoded its own bitstream for the feedback gate.
+        text = cb.decoded_path(job).read_text()
+        decoded[tag] = cb.mmcm_values(text)
+        (tile,) = mmcm_fasm.mmcm_tiles(text)
+        routing[tag] = mmcm_fasm.tile_routing(text, tile)
+    # The routing features of the MMCM's tile, which `mmcm_values` does not see (it keeps
+    # the site's `.MMCME2_ADV.` features only): the pips into CLKIN1, CLKIN2 and CLKFBIN.
+    # Comparing only the site features is how a tied-off feedback went unnoticed in Task 7b.
+    assert routing["open"] == routing["vivado"], routing
+    feedback = {f for f in routing["open"] if f.split(".")[0].endswith("MMCM_CLKFBIN")}
+    assert len(feedback) == 1 and feedback.pop().endswith("CLKFBOUT2IN")
     keys = sorted(set(decoded["open"]) | set(decoded["vivado"]))
     diff = {
         k: (decoded["open"].get(k, 0), decoded["vivado"].get(k, 0))

@@ -275,8 +275,13 @@ class ProjectClock(Module):
         self.specials += Instance(
             "MMCME2_ADV",
             p_BANDWIDTH="OPTIMIZED",
-            # CLKFBOUT feeds CLKFBIN directly (no feedback buffer): internal compensation.
-            p_COMPENSATION="INTERNAL",
+            # CLKFBOUT feeds CLKFBIN directly (no feedback buffer). The value must be an
+            # explicit "ZHOLD": nextpnr-xilinx 0.8.2 (xilinx/pack_clocking_xc7.cc, lines 98
+            # to 104) defaults an absent COMPENSATION to "INTERNAL" and, for "INTERNAL",
+            # disconnects CLKFBIN and ties it to VCC, so the MMCM never locks (measured on
+            # an Arty, docs/results/2026-11-spike-b-project-clock.md). With "ZHOLD" it keeps
+            # the loop and selects the tile's dedicated CLKFBOUT-to-CLKFBIN connection.
+            p_COMPENSATION="ZHOLD",
             p_CLKIN1_PERIOD=s.clkin_period_ns,
             p_DIVCLK_DIVIDE=s.divclk,
             p_CLKFBOUT_MULT_F=s.mult,
