@@ -75,8 +75,8 @@ def test_vivado_builds_with_spi_constrained_at_40mhz() -> None:
         pytest.skip(f"Vivado is not installed at {tools.VIVADO_SETTINGS}")
     result = link_build.build_vivado(OUT / "vivado")
     _assert_bitstream(result.bitstream)
-    assert set(result.clocks) == {"sys", "spi"}
-    for name, mhz in (("sys", 50.0), ("spi", 40.0)):
+    assert set(result.clocks) == {"sys", "spi", "spi_rd"}
+    for name, mhz in (("sys", 50.0), ("spi", 40.0), ("spi_rd", 16.0)):
         constraint, setup, hold = result.clocks[name]
         assert constraint == pytest.approx(mhz)
         assert setup >= 0 and hold >= 0, f"{name}: setup {setup}, hold {hold}"
