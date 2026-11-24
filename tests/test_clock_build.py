@@ -106,10 +106,10 @@ def test_open_flow_build(open_job: cb.Build) -> None:
 def test_open_flow_fractional_divider_is_in_the_fasm(open_job: cb.Build) -> None:
     job = open_job
     fasm = (job.out_dir / "top.fasm").read_text()
-    feats = cb.mmcm_features(fasm)
+    feats = cb.mmcm_values(fasm)
     assert "CLKOUT0_CLKOUT2_FRAC_EN" in feats, "CLKOUT0 fractional enable is not set"
     frac = _frac_eighths(job.setting.div)
-    assert feats["CLKOUT0_CLKOUT2_FRAC[2:0]"] == format(frac, "03b")
+    assert feats["CLKOUT0_CLKOUT2_FRAC"] == frac
     # CLKFBOUT_MULT_F is whole in this setting: the feedback divider has no fraction.
     assert _frac_eighths(job.setting.mult) == 0
     assert not any(k.startswith("CLKFBOUT") and "FRAC" in k for k in feats)
@@ -121,7 +121,7 @@ def test_open_flow_bufgce_enable_is_routed(open_job: cb.Build) -> None:
     log = job.facts["nextpnr"]
     m = re.search(r"Constrained BUFGCTRL 'BUFGCE' to bel 'BUFGCTRL_X0Y(\d+)/BUFGCTRL'", log)
     assert m, "the BUFGCE was not placed on a BUFGCTRL"
-    n = m.group(1)
+    n = int(m.group(1)) % 16  # the index within its clock-buffer tile (top half: 16 to 31)
     fasm = (job.out_dir / "top.fasm").read_text()
     assert re.search(rf"BUFGCTRL{n}_CE0\.CLK_BUFG_IMUX\d+_\d\n", fasm), "no fabric route to CE0"
     assert f"BUFGCTRL.BUFGCTRL_X0Y{n}.ZINV_CE0\n" in fasm, "CE0 is inverted or the bit is absent"
@@ -212,7 +212,8 @@ def test_open_and_vivado_encode_the_fractional_divider_differently() -> None:
         out = BUILD / f"{board.name}-{tag}.decoded.fasm"
         cb.decode_bitstream(job.bitstream, board.parts[job.toolchain], out)
         decoded[tag] = cb.mmcm_values(out.read_text())
-    keys = sorted(set(decoded["open"]) | set(decoded["vivado"]))
+    divider = re.compile(r"CLKOUT0_|CLKFBOUT_|CLKOUT5_CLKOUT[12]_FRACTIONAL|DIVCLK_")
+    keys = sorted(k for k in set(decoded["open"]) | set(decoded["vivado"]) if divider.match(k))
     diff = {
         k: (decoded["open"].get(k, 0), decoded["vivado"].get(k, 0))
         for k in keys

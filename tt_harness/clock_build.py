@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from operator import xor
 from pathlib import Path
@@ -543,29 +544,9 @@ def parse_vivado(
 
 # What the bitstream says ---------------------------------------------------------------------
 
-_FASM_FEATURE = re.compile(
-    r"^(?P<tile>\S+?)\.(?P<name>[A-Za-z0-9_.]+?)(?:\[(?P<bits>[\d:]+)\])?(?: = (?P<value>\S+))?$"
-)
-
-
-def mmcm_features(fasm: str) -> dict[str, str]:
-    """The MMCME2_ADV features set in a FASM text: feature name -> value (`1` for a flag)."""
-    out: dict[str, str] = {}
-    for line in fasm.splitlines():
-        if ".MMCME2_ADV." not in line:
-            continue
-        m = _FASM_FEATURE.match(line.strip())
-        if m is None:
-            raise ValueError(f"cannot read FASM line {line!r}")
-        name = m["name"].removeprefix("MMCME2_ADV.")
-        value = m["value"] or "1"
-        out[name] = value.split("'b")[-1] if "'b" in value else value
-    return out
-
 
 def decode_bitstream(bit: Path, part: str, out: Path) -> Path:
     """Decode a `.bit` back to FASM with `bit2fasm` (openXC7); the FASM is written to `out`."""
-    import subprocess
 
     with out.open("w") as fasm, out.with_suffix(".err").open("w") as err:
         subprocess.run(
@@ -600,7 +581,7 @@ def mmcm_values(fasm: str) -> dict[str, int]:
         if ".MMCME2_ADV." not in line:
             continue
         name = line.split(".MMCME2_ADV.")[1].strip()
-        m = re.match(r"(\w+?)(?:\[(\d+)(?::(\d+))?\])?(?: = \d+'b(\w+))?$", name)
+        m = re.match(r"([\w.]+?)(?:\[(\d+)(?::(\d+))?\])?(?: = \d+'b(\w+))?$", name)
         if m is None:
             raise ValueError(f"cannot read FASM line {line!r}")
         base, hi, lo, val = m.groups()
