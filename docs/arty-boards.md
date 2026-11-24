@@ -64,3 +64,25 @@ answers with a banner, and whether its camera stream playlist is being updated.
 - Access is by SSH as user `pi` on the port above (the site's own instructions; the
   password is shown in the login banner) or through each host's web page, which has a
   file upload. This is the public service: other people may be using a board at any time.
+
+### Logged-in check of the PS1 hosts, 2026-11-24
+
+With the owner's permission to use any fpgas.online device, a read-only login (existing SSH
+key, no password needed) found:
+
+| Host | Board | Other logins at the time | Notes |
+|---|---|---|---|
+| pi7 | Arty A7-35T, Digilent USB serial 210319A764F5 | none | JTAG identify: `idcode 0x362d093`, `family artix a7 35t` |
+| pi3 | Arty (FTDI 0403:6010), Digilent USB serial 210319A43AD3 | one other session, three hours old | not probed over JTAG because someone else was logged in |
+| pi21 | a Tiny Tapeout board (MicroPython USB device), not an Arty | three sessions from the site's own gateway | not useful for this project |
+
+- JTAG is `/dev/ttyUSB0` (interface 0) and the UART `/dev/ttyUSB1`; stable names are under
+  `/dev/serial/by-id/`.
+- Each host has `openFPGALoader`, `picocom`, `tio` and Python with pyserial 3.5.
+- The root filesystem is a 458 MB RAM overlay with about 450 MB free, and the Pi has about
+  730 MB of memory available; a 2.2 MB bitstream and a 6 MB recording fit, but keep
+  uploads small and delete them afterwards.
+- There is no `/run/fpgas-online/` lock at PS1, so nothing serialises users. Check `who`
+  and for processes holding the serial ports before each use.
+
+pi7 is the first choice for test runs.
