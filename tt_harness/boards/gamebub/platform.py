@@ -95,6 +95,11 @@ class Platform(Xilinx7SeriesPlatform):
                 f"unsupported toolchain {toolchain!r} for Game Bub: use one of {TOOLCHAINS}"
             )
         Xilinx7SeriesPlatform.__init__(self, DEVICE, _io, toolchain=toolchain)
+        if toolchain == "vivado":
+            # Bank 0 is powered at 3.3 V on this board; without these Vivado's DRC warns
+            # CFGBVS-1. nextpnr-xilinx has no such property.
+            self.add_platform_command("set_property CFGBVS VCCO [current_design]")
+            self.add_platform_command("set_property CONFIG_VOLTAGE 3.3 [current_design]")
 
     def do_finalize(self, fragment):
         Xilinx7SeriesPlatform.do_finalize(self, fragment)
