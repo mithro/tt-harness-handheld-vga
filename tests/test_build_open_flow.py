@@ -107,9 +107,11 @@ def test_real_build_openxc7_multiplier_design_builds_without_dsp(build_root: Pat
 def test_real_netlist_with_inferred_dsp_has_no_spurious_project_clock(
     monkeypatch: pytest.MonkeyPatch, build_root: Path
 ) -> None:
-    # With DSP inference left on (as before Task 9b) Yosys makes DSP48E1 cells whose CLK pin
-    # is tied off. nextpnr-xilinx 0.8.2 may then stop in the router, which is why inference
-    # is off by default; the clock scan runs before that and is what this test is about.
+    # With DSP inference left on (as before Task 9b) Yosys makes a DSP48E1 with no register
+    # packed into it, whose CLK pin is tied off. nextpnr-xilinx 0.8.2 then fails in one way
+    # or another (for this design "Port BCOUT15 has no connections", for the pool designs
+    # an unrouteable constant on CARRYCASCIN), which is why inference is off by default; the
+    # clock scan runs before that and is what this test is about.
     options = tuple(o for o in build.SYNTH_XILINX_OPTIONS if o != "-nodsp")
     monkeypatch.setattr(build, "SYNTH_XILINX_OPTIONS", options)
     sources = _local(*MUL)
@@ -117,7 +119,7 @@ def test_real_netlist_with_inferred_dsp_has_no_spurious_project_clock(
     try:
         result = build.build_compare(sources.project, sources, "arty", "openxc7", out, 100_000)
     except build.BuildError as e:
-        assert "Unrouteable" in str(e), e
+        assert "place and route (nextpnr-xilinx) failed" in str(e), e
     else:
         assert result.project_clocks == ()
     assert "DSP48E1" in (out / "utilization-yosys.txt").read_text()

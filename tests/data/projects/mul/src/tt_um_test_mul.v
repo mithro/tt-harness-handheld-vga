@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Test design with two small signed multiplications, the shape that made Yosys infer
-// DSP48E1 cells in two pool designs (`psubx*psubx + psuby*psuby`): x and y are the two
-// halves of a free-running counter, and uo_out is a registered fold of x*x + y*y.
+// DSP48E1 cells in two pool designs (`psubx*psubx + psuby*psuby`). x and y are made by
+// logic from a free-running counter, and uo_out is a registered fold of x*x + y*y: with
+// logic on both sides of a multiplier no register can be packed into its DSP48E1, so the
+// cell is unregistered and Yosys ties its CLK and cascade inputs to constants.
 
 `default_nettype none
 
@@ -19,8 +21,8 @@ module tt_um_test_mul (
   reg [9:0] count;
   reg [7:0] out;
 
-  wire signed [ 4:0] x = count[4:0];
-  wire signed [ 4:0] y = count[9:5];
+  wire signed [ 4:0] x = count[4:0] ^ count[9:5];
+  wire signed [ 4:0] y = count[4:0] + count[9:5];
   wire signed [10:0] product = x * x + y * y;
 
   always @(posedge clk) begin

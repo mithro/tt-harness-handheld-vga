@@ -11,11 +11,14 @@ Reads what `tt-harness pool-sim` (`result.json`) and `scripts/pool_run.py`
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 
 from tt_harness import build, pool
 
-WORK = pool.DEFAULT_WORK
+# TT_POOL_WORK names another results directory (an earlier run kept aside, say).
+WORK = Path(os.environ.get("TT_POOL_WORK", pool.DEFAULT_WORK))
 TOOL = {"openxc7": "openXC7", "vivado": "Vivado"}
 STANDING = (build.LIMIT_NO_HOLD, build.LIMIT_CROSS_BUDGET)
 
@@ -201,6 +204,16 @@ def limits() -> None:
     _table(["Design", "Toolchain", "Standing entries", "Further entries, verbatim"], rows)
 
 
+def _pre_header(run: dict) -> str:
+    """The receiver's count of bytes before the frame header, with their values."""
+    if "pre_header_count" not in run:
+        return "not recorded"
+    count = run["pre_header_count"]
+    if count is None:
+        return "no header"
+    return str(count) + (f" (`{run.get('pre_header_hex')}`)" if count else "")
+
+
 def hw() -> None:
     rows = []
     for pid in pool.POOL:
@@ -223,6 +236,7 @@ def hw() -> None:
                     f"**{d['verdict']}**",
                     "none" if diff is None else diff,
                     run.get("bytes_received"),
+                    _pre_header(run),
                     {True: "good", False: f"bad: {rec.get('problem')}"}.get(rec.get("ok"), "?"),
                     "?" if errors is None else ("all 0" if not any(errors.values()) else errors),
                     {True: "equal", False: "differs", None: "?"}[same],
@@ -240,6 +254,7 @@ def hw() -> None:
             "Verdict",
             "First differing clock",
             "Bytes received",
+            "Bytes before the header",
             "Frame CRC",
             "UART error counters",
             "Payload sha256 against reference",
