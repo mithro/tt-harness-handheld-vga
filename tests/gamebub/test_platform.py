@@ -137,3 +137,17 @@ def test_buttons_have_internal_pullups_in_generated_xdc(toolchain):
         assert f"set_property PULLTYPE PULLUP [get_ports {{buttons_{b}}}]" in xdc, b
     # Only the buttons get a pull-up.
     assert xdc.count("PULLTYPE PULLUP") == len(BUTTONS)
+
+
+@pytest.mark.parametrize(("toolchain", "present"), [("vivado", True), ("openxc7", False)])
+def test_vivado_xdc_sets_the_configuration_bank_voltage(tmp_path, toolchain, present) -> None:
+    """The generated XDC carries CFGBVS and CONFIG_VOLTAGE for Vivado only."""
+    from migen import Module
+
+    platform = gb.Platform(toolchain=toolchain)
+    top = Module()
+    top.comb += platform.request("tp", 0).eq(0)
+    platform.build(top, run=False, build_dir=str(tmp_path), build_name="top")
+    xdc = (tmp_path / "top.xdc").read_text()
+    assert ("set_property CFGBVS VCCO [current_design]" in xdc) is present
+    assert ("set_property CONFIG_VOLTAGE 3.3 [current_design]" in xdc) is present
