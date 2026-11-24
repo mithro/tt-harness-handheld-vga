@@ -1,10 +1,10 @@
 # Spike B: the project clock under both toolchains
 
-Date: 2026-11-24. Vivado 2025.2, yosys 0.71+77 (OSS CAD Suite 2026-11-22), nextpnr-xilinx 0.8.2 (openXC7 snap) with the repository's chip databases, prjxray-db from the same snap. Sections 1 to 6 used no hardware: every "the bitstream encodes X" statement there is a decode of the bitstream, not a measurement of a clock. The clock was then measured on a real Arty A7-35T (Task 7c, same day); that is the section "Measured on hardware", and where it settles or overturns a statement of the earlier sections, the statement now says so.
+Date: 2026-11-24. Vivado 2025.2, yosys 0.71+77 (OSS CAD Suite 2026-11-22), nextpnr-xilinx 0.8.2 (openXC7 snap) with the repository's chip databases, prjxray-db from the same snap. Sections 1 to 6 used no hardware: every "the bitstream encodes X" statement there is a decode of the bitstream, not a measurement of a clock. The clock was then measured on a real Arty A7-35T (Task 7c, same day); that is the section "Measured on hardware", and where it settles or overturns a statement of the earlier sections, the statement now says so. The open flow's failure found there was then fixed and measured again (Task 7d, same day): the last section, "After Task 7d". Everything before that section describes the design as it was before the fix, with `COMPENSATION="INTERNAL"`.
 
 ## Conclusion
 
-The clock scheme of the design spec (a fractional `MMCME2_ADV` followed by a `BUFGCE`) builds, constrains and meets timing in all four builds (Arty and Game Bub, openXC7 and Vivado). Both flows accept `COMPENSATION="INTERNAL"` with `CLKFBOUT` wired to `CLKFBIN`, and openXC7 accepts the fractional divider, the wired `BUFGCE` enable and the button pull-ups. **Accepting is not working: on hardware the open-flow MMCM built this way never locks** ("Measured on hardware"): nextpnr-xilinx 0.8.2 ties the feedback input to a constant for `COMPENSATION="INTERNAL"`, and equally when the parameter is absent. With Vivado the clock is exact and locked. The Game Bub was not measured; its open-flow build uses the same code and is expected to fail the same way.
+The clock scheme of the design spec (a fractional `MMCME2_ADV` followed by a `BUFGCE`) builds, constrains and meets timing in all four builds (Arty and Game Bub, openXC7 and Vivado). Both flows accept `COMPENSATION="INTERNAL"` with `CLKFBOUT` wired to `CLKFBIN`, and openXC7 accepts the fractional divider, the wired `BUFGCE` enable and the button pull-ups. **Accepting is not working: on hardware the open-flow MMCM built this way never locks** ("Measured on hardware"): nextpnr-xilinx 0.8.2 ties the feedback input to a constant for `COMPENSATION="INTERNAL"`, and equally when the parameter is absent. With Vivado the clock is exact and locked. The Game Bub was not measured; its open-flow build uses the same code and is expected to fail the same way. **Fixed in Task 7d** (`COMPENSATION="ZHOLD"`; the open-flow clock then locks and is exact on the board): see "After Task 7d".
 
 It stands for Vivado without change. For openXC7 it builds, but **as specified it does not work on hardware** (no feedback, no lock, the gated clock never starts), and the MMCM bitstream is **not the same as Vivado's** in several further fields. Two of those differences were open questions when this was written; the measurement answered both, for open-flow bitstreams whose feedback had been corrected (diagnostic variants, not the design as specified):
 
@@ -275,7 +275,7 @@ Over the 60 gates the counts sum to within 0.51 of sixty times the ideal. G was 
 ### What must change (not changed in this task)
 
 - **The solver needs no toolchain-specific rule.** Odd-integer fractional dividers give the right frequency in the open flow, and the hard-coded filter table did not prevent lock at MULT 9.
-- **The open-flow build must give nextpnr-xilinx 0.8.2 an explicit `COMPENSATION="ZHOLD"`.** Removing the parameter is not enough: absent means `INTERNAL` to this packer, and the feedback is tied to VCC all the same. The `zhold` variant shows the explicit value working on this board: with `ZHOLD` and CLKFBOUT wired to CLKFBIN, nextpnr keeps the loop, selects the dedicated feedback and writes the same feedback and compensation bits as Vivado's bitstream. **Untested: whether Vivado accepts `ZHOLD` with a direct CLKFBOUT to CLKFBIN connection** (and what it then programs). That decides whether one value in `ProjectClock` serves both flows or the value must be set per toolchain (in `ProjectClock`, or in the open flow's pre-pack script as the variant does). It is for the follow-up (Task 7d). `clocking.py` still says `INTERNAL`, so every open-flow build of `ProjectClock` is broken until then.
+- **The open-flow build must give nextpnr-xilinx 0.8.2 an explicit `COMPENSATION="ZHOLD"`.** Removing the parameter is not enough: absent means `INTERNAL` to this packer, and the feedback is tied to VCC all the same. The `zhold` variant shows the explicit value working on this board: with `ZHOLD` and CLKFBOUT wired to CLKFBIN, nextpnr keeps the loop, selects the dedicated feedback and writes the same feedback and compensation bits as Vivado's bitstream. **Untested: whether Vivado accepts `ZHOLD` with a direct CLKFBOUT to CLKFBIN connection** (and what it then programs). That decides whether one value in `ProjectClock` serves both flows or the value must be set per toolchain (in `ProjectClock`, or in the open flow's pre-pack script as the variant does). It is for the follow-up (Task 7d). `clocking.py` still says `INTERNAL`, so every open-flow build of `ProjectClock` is broken until then. (Done: "After Task 7d".)
 - **A newer nextpnr-xilinx is another route:** upstream `master` keeps a real CLKFBOUT to CLKFBIN loop for `INTERNAL` (above). Not tried; and section 1 notes that upstream also changed `POWER_REG` in a way that may affect fractional mode, so an upgrade needs the measurement repeated.
 - **A gate that would have caught this:** the decoded bitstream's CLKFBIN source (`arty_clock_probe_build.feedback_source`) must be `CLKFBOUT2IN`. Any comparison of the two flows' MMCM configuration has to include the tile's routing pips into the MMCM's pins, not only the lines `mmcm_values()` keeps.
 - **The Game Bub** was not measured (no board), and its bitstream was not decoded again here. Its open-flow build uses the same `ProjectClock` and the same nextpnr, so the same failure is expected.
@@ -284,3 +284,62 @@ Over the 60 gates the counts sum to within 0.51 of sixty times the ideal. G was 
 ### State the board was left in
 
 FPGA: the `zhold` variant of setting A (openXC7, bitstream sha256 `284a17cfd316…`), which goes on sending one line a second on the UART. Board host: no `tt-harness-probe-*` directory, no process of ours, the UART unheld, disk use unchanged (3.2 MB of 458 MB); `sudo` was not used and nothing was installed. Before the session (by hand) and before every load (`board_activity`) the host was checked for other users: one other terminal, idle since the previous day, and nothing holding the UART.
+
+## After Task 7d (2026-11-24): the feedback loop closed
+
+**Result.** `ProjectClock` now gives its MMCM an explicit `COMPENSATION="ZHOLD"`, one value for both toolchains. The open-flow build, as specified and with no variant or FASM edit, now locks on the Arty and its clock is exact: settings A and B, 60 gates each, every count within one of the ideal, LOCKED at the end of every gate, no lock loss. Every `clock_build` build now decodes its own bitstream and fails unless the MMCM's feedback is the dedicated one.
+
+### What changed
+
+- **`tt_harness/core/clocking.py`:** `COMPENSATION="ZHOLD"` in place of `"INTERNAL"`, with a comment citing nextpnr-xilinx 0.8.2 `xilinx/pack_clocking_xc7.cc` lines 98 to 104. CLKFBOUT is still wired straight to CLKFBIN. Nothing else in `ProjectClock` or the solver changed.
+- **One value, not one per toolchain.** Vivado 2025.2 accepts `ZHOLD` with the direct connection: no error, no critical warning, no DRC about the feedback or the compensation, and no message about it at all (the only lines of `vivado.log` that mention the compensation are synthesis's `Parameter COMPENSATION bound to: ZHOLD - type: string` and the read-back below). It changes the property itself: the implemented cell reports `COMPENSATION INTERNAL` (`get_property`, and `mmcm_properties.rpt`: `COMPENSATION string false INTERNAL`). The decoded bitstream selects the dedicated feedback (`CMT_LR_LOWER_B_MMCM_CLKFBIN.CMT_LR_LOWER_B_CLKFBOUT2IN`), and the features of the MMCM's whole tile, site and routing, are identical to those of the Vivado bitstream measured in Task 7c with `INTERNAL` (46 features, none differing, setting A). The one DRC warning is the old CFGBVS-1 on the Arty.
+- **What the change does to the open flow's bitstream:** only the feedback. The Arty clock design built with `INTERNAL` and with `ZHOLD` (same seed, nothing else changed) differ, in nextpnr's FASM, in exactly this: gone are the VCC tie `INT_L_X42Y64.FAN_ALT5.VCC_WIRE`, `INT_L_X42Y64.FAN_BOUNCE5.FAN_ALT5`, `INT_L_X42Y64.CLK_L0.FAN_BOUNCE5`, `CMT_L_LOWER_B_CLK_IN3_INT.CMT_TOP_CLK0_14` and `CMT_LR_LOWER_B_MMCM_CLKFBIN.CMT_L_LOWER_B_CLK_IN3_INT`; new are `CMT_LR_LOWER_B_CLKFBOUT2IN.CMT_LR_LOWER_B_MMCM_CLKFBOUT` and `CMT_LR_LOWER_B_MMCM_CLKFBIN.CMT_LR_LOWER_B_CLKFBOUT2IN`. In the decoded bitstreams that is two features gone (the CLKFBIN source and the `CLK_L0` pip) and one new (the dedicated source), of 938. The probe's MMCM tile (setting A) is feature for feature the tile of Task 7c's `zhold` variant, which was the one measured then.
+- **The gate (`clock_build.feedback_gate`, using `tt_harness/mmcm_fasm.py`).** At the end of every build, either toolchain, either board, the bitstream is decoded with `bit2fasm` and the source of the pip into the MMCM's CLKFBIN must end in `CLKFBOUT2IN`; anything else, a `CLK_IN*_INT` source in particular, is a `BuildError`. The tile and wire names are read from the decoded FASM (the tile that holds the `MMCME2_ADV` features), not written into the code: the Arty's MMCM is in `CMT_TOP_L_LOWER_B_X106Y61`, the Game Bub's in `CMT_TOP_R_LOWER_B_X8Y61`. Shown failing and passing: on saved tile features of the bitstream that never locked and of two that did (`tests/data/mmcm_feedback/`, `tests/test_mmcm_fasm.py`), and on a real build, the Arty clock design with `INTERNAL` put back for the purpose, which the gate refused ("the MMCM in tile CMT_TOP_L_LOWER_B_X106Y61 takes CLKFBIN from CMT_L_LOWER_B_CLK_IN3_INT, a pin of the fabric interconnect ...: it cannot lock").
+- **The comparison of the two flows** (`test_open_and_vivado_mmcm_encodings_differ_as_documented`) now also compares the routing features of the MMCM's tile, which must be equal: in all four bitstreams they are the three pips into CLKIN1 (from the HCLK row), CLKIN2 (an interconnect pin; the input is unused) and CLKFBIN (`CLKFBOUT2IN`). The documented differences in the site's own features (section 1) are unchanged.
+- **The probe's known-defect test is inverted** (`test_clock_probe_open_flow_uses_the_dedicated_feedback`), and Task 7c's two diagnostic variants (`fbfix`, `zhold`) are removed from the code: the ordinary build is now what `zhold` was.
+
+### Builds
+
+All eight pass the feedback gate (`CLKFBOUT2IN`) and timing with every domain constrained.
+
+| Design | Toolchain | CLKFBIN from | Input clock | MMCM output |
+|---|---|---|---|---|
+| Arty clock design | Vivado | CLKFBOUT2IN | slack +7.464 ns, hold +0.252 | slack +36.732 ns, hold +0.089 |
+| Arty clock design | openXC7 | CLKFBOUT2IN | 264.48 MHz against 100 | 275.63 (BUFGCE) and 1179.25 (BUFG) MHz against 25.17 |
+| Game Bub clock design | Vivado | CLKFBOUT2IN | slack +17.606 ns, hold +0.122 | slack +36.476 ns, hold +0.131 |
+| Game Bub clock design | openXC7 | CLKFBOUT2IN | 274.20 MHz against 50 | 268.38 (BUFGCE) and 1057.08 (BUFG) MHz against 25.17 |
+| Probe, setting A | Vivado | CLKFBOUT2IN | slack +4.766 ns, hold +0.031 | slack +18.637 ns, hold +0.106 |
+| Probe, setting A | openXC7 | CLKFBOUT2IN | 179.31 MHz against 100 | 220.02 (BUFGCE) and 201.29 (BUFG) MHz against 25.17 |
+| Probe, setting B | Vivado | CLKFBOUT2IN | slack +4.766 ns, hold +0.031 | slack +18.620 ns, hold +0.106 |
+| Probe, setting B | openXC7 | CLKFBOUT2IN | 179.31 MHz against 100 | 220.02 (BUFGCE) and 201.29 (BUFG) MHz against 25.17 |
+
+The timing figures of the clock designs are those of the results table at the top, to the digit: the change does not touch timed logic. Vivado reports `COMPENSATION INTERNAL` for both boards and no critical warning or error; the Game Bub's DRC is clean.
+
+### Measured on the board
+
+The same Arty (host `pi7`), 10:29 to 10:34 UTC, room temperature. These are the first captures taken with the probe's shared gate (the Task 7c captures had a gate counter per meter; see "Method").
+
+| Setting | Toolchain | Gates | Ideal | F min / max | G min / max | LOCKED | Lock losses | H / gate |
+|---|---|---|---|---|---|---|---|---|
+| A (1, 9, 35.75) | openXC7 | 60 | 25,174,825.17 | 25,174,825 / 25,174,826 | 25,174,825 / 25,174,826 | always (60 of 60) | 0 | 0.51702 to 0.51726 |
+| B (2, 18, 35.75) | openXC7 | 60 | 25,174,825.17 | 25,174,825 / 25,174,826 | 25,174,825 / 25,174,826 | always (60 of 60) | 0 | 0.51509 to 0.51581 |
+| A (1, 9, 35.75) | Vivado (regression) | 10 | 25,174,825.17 | 25,174,825 / 25,174,826 | 25,174,825 / 25,174,826 | always (10 of 10) | 0 | 71/143 = 0.49650 |
+
+- In every gate of all three captures G equals F. Over the 60 gates the counts of A and of B each sum to within 0.49 of sixty times the ideal.
+- Gate 0, the start-up: F 25,174,587 (A) and 25,174,589 (B), G 25,174,248 and 25,174,223, as in Task 7c; and H is now a real count in gate 0 (51,729,949 and 51,562,987), where the per-meter gates could report 0.
+- All lines whole, checksums good, gate numbers consecutive, UART error counters unchanged.
+- Vivado's H is 71 of 143 phases here and was 72 of 143 in Task 7c: the two neighbours of 71.5, which is 50%. The build is a different placement (the probe changed), so the fixed phase between the two clocks moved; this is the method's one-step resolution, not a change of duty cycle.
+- The filter table is still the hard-coded 0x3d4: wrong for A (MULT 9; Vivado 0x394) and right for B (MULT 18). Both locked and stayed locked for the minute.
+
+### Still open
+
+- **Filter table and `POWER_REG`.** The open flow still writes `TABLE` 0x3d4 whatever the multiplier, the filter value in `FILTREG1_RESERVED`, and `POWER_REG` 0xffff (section 1). The MMCM locked with them for a minute; loop bandwidth and jitter were not measured, and neither was lock over temperature or supply noise.
+- **Duty cycle.** The open flow's 35.75 divider is still about 51.5% high (here 0.515 to 0.517 of the samples, at a resolution of 1/143); Vivado's is 50%. Nothing was changed about the divider encoding.
+- **One board, room temperature, a minute.** The same limits as before.
+- **The Game Bub** build is decoded and passes the gate with both toolchains (dedicated feedback in `CMT_TOP_R_LOWER_B_X8Y61`), but no Game Bub was measured.
+- **A newer nextpnr-xilinx** keeps the loop for `INTERNAL` too (upstream `master`); `ZHOLD` does not depend on that, and the gate will say if a toolchain change breaks the feedback again.
+- **H wanders more in B than in A** (0.07% against 0.02% of the gate over the minute). Both are within one sampling phase; it was not looked into, and it is not a jitter measurement.
+
+### State the board was left in
+
+FPGA: the Vivado build of the probe, setting A (bitstream sha256 `542798ad3f7c…`), locked and working; it goes on sending one line a second on the UART. Board host: no `tt-harness-probe-*` directory, no process of ours, the UART unheld; `sudo` was not used. Checked by hand before and after the session and by `board_activity` before each load; another agent of this project was making short runs on the same board during the hour.
