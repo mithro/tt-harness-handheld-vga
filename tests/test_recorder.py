@@ -222,6 +222,55 @@ def test_clock_index_changes_only_while_pclk_low(
             assert run.pclk[c - 1] == 0 and run.pclk[c] == 0, f"cycle {c}"
 
 
+# The step, cycle by cycle. `c` is the first cycle in which pclk is seen high (t0 is the edge
+# before it); with a divider of 1 a byte takes ten system cycles, so the UART limits the
+# step at settle 2 and 3 (2S + 2 is 6 and 8) and does not at settle 5 (12).
+@pytest.mark.parametrize("settle, sys_clk_freq", [(2, 20), (3, 20), (2, 10), (3, 10), (5, 10)])
+def test_step_timeline_is_exact(settle: int, sys_clk_freq: int) -> None:
+    clocks = 14
+    run = _simulate(sys_clk_freq=sys_clk_freq, baud=10, clocks=clocks, settle=settle)
+    rises = _rises(run.pclk)
+    assert len(rises) == clocks
+    # Before the first clock: reset asserted from the very first cycle, index 0.
+    assert set(run.rst_n[: rises[0]]) == {0} and set(run.clock_index[: rises[0]]) == {0}
+    for k, c in enumerate(rises):
+        end = rises[k + 1] if k + 1 < clocks else c + 2 * settle + 2
+        # pclk high for exactly S + 1 system cycles.
+        assert run.pclk[c : c + settle + 1] == [1] * (settle + 1), f"clock {k}"
+        assert set(run.pclk[c + settle + 1 : end]) == {0}, f"clock {k}"
+        # One sample per clock: the strobe is high in the cycle before rise + S, the edge at
+        # which the sampler registers uo.
+        assert [i - c for i in range(c, end) if run.strobe[i]] == [settle - 1], f"clock {k}"
+        # clock_index is k up to rise + S + 1 and k + 1 from rise + S + 2 ...
+        assert set(run.clock_index[c : c + settle + 2]) == {k}, f"clock {k}"
+        assert set(run.clock_index[c + settle + 2 : end]) == {k + 1}, f"clock {k}"
+        # ... and rst_n changes in that same cycle, never in another: in every cycle it is
+        # exactly (clock_index >= 10).
+        for i in range(c, end):
+            assert run.rst_n[i] == (1 if run.clock_index[i] >= 10 else 0), f"cycle {i}"
+        # The next rise is no sooner than 2S + 2 cycles after this one.
+        if k + 1 < clocks:
+            assert rises[k + 1] - c >= 2 * settle + 2, f"clock {k}"
+    gaps = {b - a for a, b in pairwise(rises)}
+    if 2 * settle + 2 >= 10 * run.bit_cycles:
+        assert gaps == {2 * settle + 2}  # not limited by the UART: exactly 2S + 2
+    else:
+        assert min(gaps) >= 10 * run.bit_cycles  # one byte per clock
+
+
+@pytest.mark.parametrize("settle", [2, 3])
+def test_reset_is_low_for_exactly_the_first_ten_clocks(settle: int) -> None:
+    # What the project sees at each rising edge, and in the cycles on both sides of it.
+    run = _simulate(sys_clk_freq=20, baud=10, clocks=14, settle=settle)
+    seen = [run.rst_n[c] for c in _rises(run.pclk)]
+    assert seen == [0] * 10 + [1] * 4
+    for c in _rises(run.pclk):
+        assert run.rst_n[c - 2] == run.rst_n[c - 1] == run.rst_n[c] == run.rst_n[c + 1]
+    # The counter project shows it in the bytes: zeros for clocks 0 to 9, then counting.
+    data, _ = _uart_decode(run.tx, run.bit_cycles)
+    assert data == _expected_frame(14)
+
+
 def test_uart_bottleneck_loses_and_duplicates_nothing(long_run: _Run) -> None:
     data, _ = _uart_decode(long_run.tx, long_run.bit_cycles)
     assert data == _expected_frame(300)
