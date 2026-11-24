@@ -30,18 +30,27 @@ Host keys are checked as the user's OpenSSH configuration says; a known-hosts fi
 
 from __future__ import annotations
 
+import base64
+import binascii
+import gzip
+import hashlib
 import json
 import queue
 import re
+import secrets
 import shlex
 import subprocess
+import sys
 import threading
 import time
+import zlib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from tt_harness.compare.recorder import frame_length, header
 from tt_harness.host import board_host
 
 REMOTE_SCRIPT = Path(board_host.__file__)
@@ -353,3 +362,172 @@ def board_activity(board: Board, runner: Runner | None = None) -> Activity:
         return judge(probe)
     except (KeyError, TypeError, ValueError) as e:
         return Activity(True, (f"the activity check gave no usable answer ({e!r})",))
+
+
+# one recording ------------------------------------------------------------------------
+
+
+def parse_sent(output: bytes) -> bytes:
+    """The file printed by `board_host.py send`, checked against its length and SHA-256."""
+    lines = _text(output).splitlines()
+    begin = next((i for i, x in enumerate(lines) if x.startswith(f"{PREFIX}begin ")), None)
+    end = next((i for i, x in enumerate(lines) if x.startswith(f"{PREFIX}end")), None)
+    if begin is None or end is None or end < begin:
+        raise RunError("the recording did not arrive whole (begin or end marker missing)")
+    try:
+        doc = json.loads(lines[begin].removeprefix(f"{PREFIX}begin "))
+        data = gzip.decompress(base64.b64decode("".join(lines[begin + 1 : end]), validate=True))
+    except (ValueError, binascii.Error, OSError, EOFError, zlib.error) as e:
+        raise RunError(f"the recording did not arrive readable: {e}") from e
+    actual = hashlib.sha256(data).hexdigest()
+    if not isinstance(doc, dict) or doc.get("sha256") != actual or doc.get("bytes") != len(data):
+        raise RunError(
+            f"the recording arrived damaged: {len(data)} bytes with sha256 {actual}, "
+            f"the board host sent {doc!r}"
+        )
+    return data
+
+
+def meta_path(out: Path) -> Path:
+    """Where `record` writes what it measured, beside the recording `out`."""
+    out = Path(out)
+    return out.with_name(out.name + ".json")
+
+
+def _must(runner: Runner, argv: list[str], what: str, **kwargs) -> Result:
+    result = runner.run(_checked(argv), timeout=kwargs.pop("timeout", COMMAND_TIMEOUT_S), **kwargs)
+    if result.returncode != 0:
+        said = " ".join((_text(result.stdout) + " " + _text(result.stderr)).split())[-600:]
+        raise RunError(f"{what} failed with status {result.returncode}: {said}")
+    return result
+
+
+def _upload(runner: Runner, files: dict[str, bytes]) -> None:
+    for path, data in files.items():
+        _must(runner, ["dd", f"of={path}", "status=none"], f"writing {path}", input=data)
+    listed = _must(runner, ["sha256sum", *files], "checking the upload")
+    sums = {}
+    for line in _text(listed.stdout).splitlines():
+        m = _SHA_LINE.match(line.strip())
+        if m:
+            sums[m.group(2)] = m.group(1)
+    for path, data in files.items():
+        if sums.get(path) != hashlib.sha256(data).hexdigest():
+            raise RunError(f"{path} did not arrive intact on the board host")
+
+
+def record(
+    board: Board,
+    bitstream: Path,
+    clocks: int,
+    baud: int,
+    out: Path,
+    timeout_s: float,
+    runner: Runner | None = None,
+) -> Path:
+    """Load `bitstream` on `board` and write the raw bytes its UART then sent to `out`.
+
+    Raises `BoardBusy` (nothing uploaded) when `board_activity` says the board is in use,
+    and `RunError` when a step fails. A recording that is short because the receiver timed
+    out is not an error here: it is written to `out` and the decoder and verdict judge it.
+    `timeout_s` is how long the receiver waits for the whole frame after it starts
+    listening. What was measured is written to `meta_path(out)` as JSON.
+    """
+    check_board(board)
+    bitstream, out = Path(bitstream), Path(out)
+    if not _BITSTREAM.fullmatch(bitstream.name) or ".." in bitstream.name:
+        raise ValueError(
+            f"bitstream file name {bitstream.name!r} is not plain letters, digits, '.', '_', "
+            "'-' ending in .bit"
+        )
+    if type(clocks) is not int or not 1 <= clocks < 2**32:
+        raise ValueError(f"clocks must be 1..2**32-1, not {clocks!r}")
+    if type(baud) is not int or baud < 1:
+        raise ValueError(f"baud must be a positive integer, not {baud!r}")
+    if not timeout_s > 0:
+        raise ValueError(f"timeout_s must be positive, not {timeout_s!r}")
+    bits = bitstream.read_bytes()
+    runner = runner or SshRunner(board)
+
+    activity = board_activity(board, runner)
+    if activity.busy:
+        raise BoardBusy(board, activity.reasons)
+
+    remote = f"/home/{board.user}/tt-harness-run-{secrets.token_hex(6)}"
+    script = f"{remote}/{REMOTE_SCRIPT.name}"
+    remote_bits = f"{remote}/{bitstream.name}"
+    remote_out = f"{remote}/recording.bin"
+    meta = {
+        "started": datetime.now(UTC).isoformat(timespec="seconds"),
+        "board": asdict(board),
+        "clocks": clocks,
+        "baud": baud,
+        "bitstream": str(bitstream),
+        "bitstream_bytes": len(bits),
+        "bitstream_sha256": hashlib.sha256(bits).hexdigest(),
+        "activity": asdict(activity),
+        "remote_dir": remote,
+    }
+    stream = None
+    failed = True
+    began = time.monotonic()
+    _must(runner, ["mkdir", "-m", "700", remote], f"creating {remote}")
+    try:
+        _upload(runner, {script: REMOTE_SCRIPT.read_bytes(), remote_bits: bits})
+        receive = [
+            "python3",
+            script,
+            "receive",
+            "--uart",
+            board.uart,
+            "--baud",
+            str(baud),
+            "--header",
+            header(clocks).hex(),
+            "--length",
+            str(frame_length(clocks)),
+            "--timeout",
+            f"{float(timeout_s):.1f}",
+            "--idle-timeout",
+            f"{IDLE_TIMEOUT_S:.1f}",
+            "--out",
+            remote_out,
+        ]
+        stream = runner.start(_checked(receive))
+        try:
+            meta["listening"] = stream.expect("listening", LISTEN_TIMEOUT_S)
+        except RunError as e:
+            raise RunError(f"the receiver did not start listening: {e}") from e
+        # Only now: the build starts sending as soon as it is configured.
+        load_started = time.monotonic()
+        loaded = _must(
+            runner,
+            ["openFPGALoader", *board.loader_args, remote_bits],
+            "loading the bitstream",
+            timeout=LOAD_TIMEOUT_S,
+        )
+        meta["load_s"] = round(time.monotonic() - load_started, 2)
+        meta["loader_output"] = " ".join(_text(loaded.stdout).split())[-400:]
+        meta["receiver"] = stream.expect("received", timeout_s + 30)
+        meta["receiver_status"] = stream.wait(30)
+        meta["receive_s"] = round(time.monotonic() - load_started, 2)
+        data = parse_sent(_must(runner, ["python3", script, "send", remote_out], "fetching").stdout)
+        if meta["receiver"].get("sha256") != hashlib.sha256(data).hexdigest():
+            raise RunError("the recording fetched is not the one the receiver wrote (sha256)")
+        failed = False
+    finally:
+        if stream is not None:
+            stream.kill()
+        # Also stops a receiver that is still running: it watches for its directory.
+        try:
+            _must(runner, ["rm", "-rf", "--", remote], f"removing {remote} from the board host")
+        except RunError as e:
+            if not failed:
+                raise
+            # Do not hide the first failure; say that files may be left.
+            print(f"tt-harness: warning: {e}", file=sys.stderr)
+    meta["total_s"] = round(time.monotonic() - began, 2)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    meta_path(out).write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    return out
