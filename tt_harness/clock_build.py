@@ -160,14 +160,21 @@ class Build:
     facts: dict = field(default_factory=dict)
 
 
-def generate(board: Board, toolchain: str, out_dir: Path) -> tuple[Path, Path, MmcmSetting]:
-    """Write `top.v` and `top.xdc` for `board` with the LiteX platform; return them."""
+def generate(
+    board: Board, toolchain: str, out_dir: Path, top=None
+) -> tuple[Path, Path, MmcmSetting]:
+    """Write `top.v` and `top.xdc` for `board` with the LiteX platform; return them.
+
+    `top(platform, board)` makes the design, `ClockTop` unless given. It must have the same
+    clock structure (the input clock through a BUFG, one `ProjectClock` as `pc`) for the
+    constraints and the timing gate here to apply.
+    """
     out_dir = out_dir.resolve()
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
     platform = board.platform(toolchain)
-    top = ClockTop(platform, board)
+    top = (top or ClockTop)(platform, board)
     platform.build(top, run=False, build_dir=str(out_dir), build_name=TOP)
     return out_dir / f"{TOP}.v", out_dir / f"{TOP}.xdc", top.pc.setting
 
@@ -226,10 +233,10 @@ def tool(name: str) -> Path:
     return path
 
 
-def openxc7_build(board: Board, out_dir: Path) -> Build:
+def openxc7_build(board: Board, out_dir: Path, top=None) -> Build:
     """Yosys, nextpnr-xilinx, fasm2frames, xc7frames2bit. Raises `BuildError` on a tool failure."""
     out_dir = out_dir.resolve()
-    top_v, xdc, setting = generate(board, "openxc7", out_dir)
+    top_v, xdc, setting = generate(board, "openxc7", out_dir, top)
     job = Build(board, "openxc7", out_dir, setting, out_dir / "build.log")
     job.log.write_text("")
     part = board.parts["openxc7"]
@@ -454,10 +461,10 @@ def vivado_script(board: Board, out_dir: Path, top_v: Path, xdc: Path) -> Path:
     return script
 
 
-def vivado_build(board: Board, out_dir: Path) -> Build:
+def vivado_build(board: Board, out_dir: Path, top=None) -> Build:
     """Implement with Vivado and write a bitstream. Raises `BuildError` on a tool failure."""
     out_dir = out_dir.resolve()
-    top_v, xdc, setting = generate(board, "vivado", out_dir)
+    top_v, xdc, setting = generate(board, "vivado", out_dir, top)
     job = Build(board, "vivado", out_dir, setting, out_dir / "build.log")
     job.log.write_text("")
     settings = tools.vivado_settings()
@@ -499,13 +506,15 @@ def parse_vivado(
         slacks[(m["name"], m["kind"])] = None if m["slack"] == "none" else float(m["slack"])
     input_ns = 1e9 / board.clk_hz
     project_ns = 1e9 / setting.achieved_hz
+    feedback_ns = input_ns * setting.divclk
     domains: dict[str, TimingDomain] = {}
     for name, (period, generated) in clocks.items():
         wns, whs = slacks.get((name, "setup")), slacks.get((name, "hold"))
         if generated and abs(period - project_ns) > 1e-3:
-            # Vivado also derives a clock for CLKFBOUT, at the input period: it clocks only
-            # the feedback pin, so it must have no timing paths.
-            if abs(period - input_ns) > 1e-3 or wns is not None or whs is not None:
+            # Vivado also derives a clock for CLKFBOUT, at the phase detector's period (the
+            # input period times DIVCLK_DIVIDE): it clocks only the feedback pin, so it must
+            # have no timing paths.
+            if abs(period - feedback_ns) > 1e-3 or wns is not None or whs is not None:
                 raise TimingError(f"unexpected generated clock {name} ({period} ns)", log)
             continue
         key = "project" if generated else "input"
