@@ -172,7 +172,8 @@ class _SshStream:
         )
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._seen: list[str] = []
-        threading.Thread(target=self._pump, daemon=True).start()
+        self._pump_thread = threading.Thread(target=self._pump, daemon=True)
+        self._pump_thread.start()
 
     def _pump(self) -> None:
         for raw in self._proc.stdout:
@@ -218,7 +219,10 @@ class _SshStream:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self._proc.wait()
-        self._proc.stdout.close()
+        # The reader ends at end of file; closing the pipe under it would not be safe.
+        self._pump_thread.join(10)
+        if not self._pump_thread.is_alive():
+            self._proc.stdout.close()
 
 
 class SshRunner:
