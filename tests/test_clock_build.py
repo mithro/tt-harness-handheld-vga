@@ -187,37 +187,69 @@ def test_vivado_gamebub_button_pullups(vivado_job: cb.Build) -> None:
 
 # Open flow against Vivado -------------------------------------------------------------------
 
-# What differs between the two flows' encodings of CLKOUT0_DIVIDE_F = 35.75 (an odd integer
-# part with a fraction), decoded back from the bitstreams with bit2fasm: field -> (open, vivado).
-# The fraction itself (FRAC, FRAC_EN) is identical; the integer counter and the waveform
-# fields are not. Even integer parts (36.75) and a fractional CLKFBOUT_MULT_F encode
-# identically. Which encoding is right on silicon is not known without hardware: see
-# docs/results/2026-11-spike-b-project-clock.md.
-KNOWN_DIFFERENCES = {
-    "CLKOUT0_CLKOUT1_HIGH_TIME": (16, 17),
-    "CLKOUT0_CLKOUT2_FRAC_WF_R": (1, 0),
-    "CLKOUT5_CLKOUT2_FRACTIONAL_FRAC_WF_F": (1, 0),
-    "CLKOUT5_CLKOUT2_FRACTIONAL_PHASE_MUX_F": (3, 7),
-    "CLKOUT5_CLKOUT2_FRACTIONAL_NO_COUNT": (0, 1),
-}
+# Every MMCM feature that differs between the two flows' bitstreams for the same design,
+# decoded back with bit2fasm and read as integers: field -> (openXC7, Vivado). The comparison
+# covers the whole MMCM site, not only the dividers. The causes (nextpnr-xilinx 0.8.2
+# `xilinx/fasm.cc`, `write_mmcm_clkout` and `write_mmcm`):
+#
+# - The fractional CLKOUT0_DIVIDE_F = 35.75 has an odd integer part. Vivado follows XAPP888's
+#   `mmcm_frac_count_calc` (HIGH 17, WF_R 0, WF_F 0, PHASE_MUX_F 7); nextpnr-xilinx has no odd
+#   branch and writes HIGH 16, WF_R 1, WF_F 1, PHASE_MUX_F 3. The fraction itself (FRAC,
+#   FRAC_EN) agrees.
+# - The unused outputs CLKOUT1 to CLKOUT6: Vivado sets NO_COUNT and HIGH = LOW = 1.
+# - The loop filter: 0.8.2 writes 0x3d4 to TABLE and the per-multiplier filter value to
+#   FILTREG1_RESERVED (swapped; fixed upstream, where TABLE gets the value and FILTREG1 is 8),
+#   so TABLE is right only for MULT 10, 17 and 18.
+# - POWER_REG: 0xffff against Vivado's 0x9900.
+#
+# Which divider encoding is right on silicon needs a hardware measurement; see
+# docs/results/2026-11-spike-b-project-clock.md. The test asserts the documented set exactly,
+# so it fails if either toolchain changes.
+FILTER = {"arty": (0x394, 0x8, 0x3D4, 0x394), "gamebub": (0x3D4, 0x8, None, None)}
+
+
+def known_differences(board: cb.Board) -> dict[str, tuple[int, int]]:
+    diff = {
+        "CLKOUT0_CLKOUT1_HIGH_TIME": (16, 17),
+        "CLKOUT0_CLKOUT2_FRAC_WF_R": (1, 0),
+        "CLKOUT5_CLKOUT2_FRACTIONAL_FRAC_WF_F": (1, 0),
+        "CLKOUT5_CLKOUT2_FRACTIONAL_PHASE_MUX_F": (3, 7),
+        "POWER_REG_POWER_REG_POWER_REG": (0xFFFF, 0x9900),
+        "CLKOUT5_CLKOUT2_FRACTIONAL_NO_COUNT": (0, 1),
+        "CLKOUT6_CLKOUT2_FRACTIONAL_NO_COUNT": (0, 1),
+    }
+    for n in (1, 2, 3, 4):
+        diff[f"CLKOUT{n}_CLKOUT2_NO_COUNT"] = (0, 1)
+    for n in (1, 2, 3, 4, 5, 6):
+        diff[f"CLKOUT{n}_CLKOUT1_HIGH_TIME"] = (0, 1)
+        diff[f"CLKOUT{n}_CLKOUT1_LOW_TIME"] = (0, 1)
+    filt_open, filt_viv, table_open, table_viv = FILTER[board.name]
+    diff["FILTREG1_RESERVED"] = (filt_open, filt_viv)
+    if table_open is not None:
+        diff["TABLE"] = (table_open, table_viv)
+    return diff
 
 
 @pytest.mark.toolchain
 @pytest.mark.vivado
-def test_open_and_vivado_encode_the_fractional_divider_differently() -> None:
-    board = cb.GAMEBUB
+@pytest.mark.parametrize("board", BOARDS)
+def test_open_and_vivado_mmcm_encodings_differ_as_documented(board: cb.Board) -> None:
     jobs = {"open": _open(board.name), "vivado": _vivado(board.name)}
     decoded = {}
     for tag, job in jobs.items():
         out = BUILD / f"{board.name}-{tag}.decoded.fasm"
-        cb.decode_bitstream(job.bitstream, board.parts[job.toolchain], out)
+        # The Vivado part (-1L) is not in the database; it is the same die as the open part.
+        cb.decode_bitstream(job.bitstream, board.parts["openxc7"], out)
         decoded[tag] = cb.mmcm_values(out.read_text())
-    divider = re.compile(r"CLKOUT0_|CLKFBOUT_|CLKOUT5_CLKOUT[12]_FRACTIONAL|DIVCLK_")
-    keys = sorted(k for k in set(decoded["open"]) | set(decoded["vivado"]) if divider.match(k))
+    keys = sorted(set(decoded["open"]) | set(decoded["vivado"]))
     diff = {
         k: (decoded["open"].get(k, 0), decoded["vivado"].get(k, 0))
         for k in keys
         if decoded["open"].get(k, 0) != decoded["vivado"].get(k, 0)
     }
-    assert diff == KNOWN_DIFFERENCES
+    assert diff == known_differences(board)
+    # The fraction and its enable agree.
     assert decoded["open"]["CLKOUT0_CLKOUT2_FRAC"] == decoded["vivado"]["CLKOUT0_CLKOUT2_FRAC"] == 6
+    assert (
+        decoded["open"]["CLKOUT0_CLKOUT2_FRAC_EN"] == decoded["vivado"]["CLKOUT0_CLKOUT2_FRAC_EN"]
+    )
