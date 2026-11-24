@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from tt_harness import build, cli, fetch, manifest, prescreen, tools, verilate
+from tt_harness import build, cli, fetch, input_gate, manifest, prescreen, tools, verilate
 from tt_harness import project_clocks as pc
 from tt_harness.boards import arty
 from tt_harness.build import ClockPlan, TimingError
@@ -566,6 +566,14 @@ def _check_real(result: build.BuildResult, sources: Sources, toolchain: str) -> 
         assert domain.constraint_mhz == pytest.approx(expected, abs=0.001)
     assert all(d.signed_off for d in result.timing.values())
     assert not any("not signed off" in item for item in result.limitations)
+    # The gate on the implemented netlist: rst_n straight from a flip-flop, the rest
+    # constants (Vivado removes the constant nets; the open flow shows them tied off).
+    drivers = dict(result.input_drivers)
+    assert set(drivers) == set(input_gate.INPUT_PORTS)
+    assert drivers["rst_n"] in input_gate.FLIP_FLOPS
+    constant = input_gate.FOLDED if toolchain == "vivado" else input_gate.CONSTANT
+    assert {drivers[p] for p in ("ena", "ui_in", "uio_in")} == {constant}
+    assert "tt-harness project input: rst_n driven by FD" in result.log.read_text()
     # The pre-screen finds a clock made in logic exactly when the tools do.
     screen = prescreen.check(sources)
     assert screen.derived_clocks == result.prescreen_derived_clocks
@@ -1751,6 +1759,7 @@ def _local_build(
     assert result.bitstream.is_file()
     assert all(d.met for d in result.timing.values())
     assert bool(result.project_clocks) == bool(prescreen.check(sources).derived_clocks)
+    assert dict(result.input_drivers)["rst_n"] in input_gate.FLIP_FLOPS
     for name, d in sorted(result.timing.items()):
         print(f"{toolchain} {sources.project.macro} {name}: {build.describe(d)}")
     return sources, result
