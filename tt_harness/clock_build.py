@@ -44,7 +44,7 @@ from migen.genlib.cdc import MultiReg
 
 from tt_harness import tools, verilate
 from tt_harness.boards.gamebub import platform as gamebub_platform
-from tt_harness.build import _NEXTPNR_FMAX, BuildError, TimingDomain, TimingError
+from tt_harness.build import NEXTPNR_FMAX, BuildError, TimingDomain, TimingError
 from tt_harness.core.clocking import MmcmSetting, ProjectClock, solve
 
 CLOCK_HZ = 25_175_000
@@ -330,7 +330,7 @@ def parse_nextpnr(
     if not any(d.startswith("project:") for d, _ in mapping.values()):
         raise TimingError("nextpnr: no project clock was constrained", log)
     final = text[text.rindex("Info: Routing complete.") :]
-    reported = {m["name"]: m for m in _NEXTPNR_FMAX.finditer(final)}
+    reported = {m["name"]: m for m in NEXTPNR_FMAX.finditer(final)}
     domains: dict[str, TimingDomain] = {}
     for net, (domain, mhz) in mapping.items():
         m = reported.get(net)
