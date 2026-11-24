@@ -20,6 +20,7 @@ from litex_boards.platforms import digilent_arty
 from migen import Instance, Module, Signal
 from migen.fhdl import verilog
 
+from tt_harness.compare.recorder import DEFAULT_SETTLE
 from tt_harness.compare.top import CompareTop
 from tt_harness.manifest import Project
 
@@ -72,7 +73,9 @@ def bufg(i: Signal, o: Signal) -> Instance:
 class ArtyCompare(Module):
     """`CompareTop` on the Arty: clk100 in, UART TX out, `done` on LD4; `pclk` via a BUFG."""
 
-    def __init__(self, project: Project, baud: int, clocks: int, settle: int = 2) -> None:
+    def __init__(
+        self, project: Project, baud: int, clocks: int, settle: int = DEFAULT_SETTLE
+    ) -> None:
         self.clk100 = Signal(name_override="clk100")
         self.serial_tx = Signal(name_override="serial_tx")
         self.user_led0 = Signal(name_override="user_led0")

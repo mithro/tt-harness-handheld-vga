@@ -16,7 +16,7 @@ from migen import ClockDomain, Instance, Module, Signal
 from migen.fhdl import verilog
 from migen.fhdl.specials import Special
 
-from tt_harness.compare.recorder import StepRecorder
+from tt_harness.compare.recorder import DEFAULT_SETTLE, StepRecorder
 from tt_harness.core.stimulus import RESET_CLOCKS, ReferenceStimulus
 from tt_harness.manifest import Project
 
@@ -43,7 +43,7 @@ class CompareTop(Module):
         sys_clk_freq: int,
         baud: int,
         clocks: int,
-        settle: int = 2,
+        settle: int = DEFAULT_SETTLE,
         reset_clocks: int = RESET_CLOCKS,
         clock_buffer: ClockBuffer | None = None,
     ) -> None:

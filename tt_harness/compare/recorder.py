@@ -46,6 +46,14 @@ HEADER_LENGTH = len(MAGIC) + 1 + 4
 TRAILER_LENGTH = 4
 CRC32_POLY_REFLECTED = 0xEDB88320
 MAX_BAUD_ERROR = 0.02
+# System cycles between a project clock edge and the sample (S in the module docstring),
+# and the one place the default is set: the compare top, the board layers, the system
+# simulation and `tt_harness.build` (clock periods, multicycle paths, budgets) take it
+# from here. 3 rather than the minimum of 2 gives a project's own output logic 30 ns to
+# the sample at a 100 MHz system clock; it costs no run time while the UART, one byte
+# per project clock, is slower than 2S+2 system cycles.
+DEFAULT_SETTLE = 3
+MIN_SETTLE = 2
 
 
 def frame_length(clocks: int) -> int:
@@ -150,10 +158,12 @@ class StepRecorder(Module):
     including the last stop bit, has been sent). See the module docstring for timing.
     """
 
-    def __init__(self, sys_clk_freq: int, baud: int, clocks: int, settle: int = 2) -> None:
+    def __init__(
+        self, sys_clk_freq: int, baud: int, clocks: int, settle: int = DEFAULT_SETTLE
+    ) -> None:
         if not 0 <= clocks < 2**32:
             raise ValueError(f"clocks must be 0..2**32-1, got {clocks}")
-        if settle < 2:
+        if settle < MIN_SETTLE:
             # settle=1 samples one system cycle after pclk rises, before a project behind a
             # clock buffer has updated: the recording would be skewed by one clock.
             raise ValueError(f"settle must be at least 2 system cycles, got {settle}")
