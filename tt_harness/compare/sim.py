@@ -47,7 +47,7 @@ def simulate(
     out_dir: Path,
     sys_clk_freq: int,
     baud: int,
-    settle: int = 2,
+    settle: int = recorder.DEFAULT_SETTLE,
     max_cycles: int | None = None,
 ) -> bytes:
     """Run the compare build for `clocks` project clocks; return the bytes seen on `tx`.

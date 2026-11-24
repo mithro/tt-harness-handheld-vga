@@ -493,8 +493,19 @@ def _cmd_run_compare(args: argparse.Namespace) -> int:
         "load_s": meta.get("load_s"),
         "receive_s": meta.get("receive_s"),
         "receiver_stopped": receiver.get("stopped"),
+        # Bytes the receiver got before the frame header (a line glitch at configuration,
+        # say): how many, and the first 16 in hex. None when no header arrived.
+        "pre_header_count": receiver.get("pre_header_count"),
+        "pre_header_hex": receiver.get("pre_header_hex"),
         "uart_errors": _uart_errors(receiver),
     }
+    count = doc["run"]["pre_header_count"]
+    print(
+        "tt-harness run-compare: bytes before the frame header: "
+        + ("unknown" if count is None else str(count))
+        + (f" ({doc['run']['pre_header_hex']})" if count else ""),
+        file=sys.stderr,
+    )
     print(json.dumps(doc))
     return _VERDICT_EXIT[doc["verdict"]]
 

@@ -1,27 +1,27 @@
 Info: constraining clock net 'clk0' to 100.00 MHz
-Info: constraining clock net 'project.clk' to 16.67 MHz
-Info: constraining clock net 'project.uo_out[3]' to 16.67 MHz
-tt-harness clock: domain sys net 'clk0' 100.0 MHz (cells 113 rising 113 falling 0 latches 0 intra yes; BUFG sys_bufg from clk100)
-tt-harness clock: domain pclk net 'project.clk' 16.666666666666668 MHz (cells 54 rising 54 falling 0 latches 0 intra yes; BUFG pclk_bufg)
-tt-harness clock: domain project net 'project.uo_out[3]' 16.666666666666668 MHz (cells 12 rising 12 falling 0 latches 0 intra yes; clocks $auto$ff.cc:337:slice$7653.C)
+Info: constraining clock net 'project.clk' to 12.50 MHz
+Info: constraining clock net 'project.uo_out[3]' to 12.50 MHz
+tt-harness clock: domain sys net 'clk0' 100.0 MHz (cells 114 rising 114 falling 0 latches 0 intra yes; BUFG sys_bufg from clk100)
+tt-harness clock: domain pclk net 'project.clk' 12.5 MHz (cells 54 rising 54 falling 0 latches 0 intra yes; BUFG pclk_bufg)
+tt-harness clock: domain project net 'project.uo_out[3]' 12.5 MHz (cells 12 rising 12 falling 0 latches 0 intra yes; clocks $auto$ff.cc:337:slice$7666.C)
 tt-harness clock root: project.uo_out[3]
 tt-harness clock contributor: project.uo_out[3] FDRE pclk rising direct no-async
-Info: Checksum: 0x820e6439
-Info: Max frequency for clock              'clk0': 149.95 MHz (PASS at 100.00 MHz)
-Info: Max frequency for clock       'project.clk': 63.05 MHz (PASS at 16.67 MHz)
-Info: Max frequency for clock 'project.uo_out[3]': 233.86 MHz (PASS at 16.67 MHz)
-Info: Max delay posedge clk0              -> posedge project.clk      : 5.51 ns
-Info: Max delay posedge clk0              -> posedge project.uo_out[3]: 5.89 ns
-Info: Max delay posedge project.clk       -> posedge clk0             : 0.35 ns
-Info: Max delay posedge project.uo_out[3] -> posedge project.clk      : 15.33 ns
-Info: Checksum: 0x546a9d96
+Info: Checksum: 0xebaae369
+Info: Max frequency for clock       'project.clk': 59.19 MHz (PASS at 12.50 MHz)
+Info: Max frequency for clock              'clk0': 148.94 MHz (PASS at 100.00 MHz)
+Info: Max frequency for clock 'project.uo_out[3]': 271.89 MHz (PASS at 12.50 MHz)
+Info: Max delay posedge clk0              -> posedge project.clk      : 6.09 ns
+Info: Max delay posedge clk0              -> posedge project.uo_out[3]: 5.95 ns
+Info: Max delay posedge project.clk       -> posedge clk0             : 0.69 ns
+Info: Max delay posedge project.uo_out[3] -> posedge project.clk      : 16.55 ns
+Info: Checksum: 0x2a64e5a1
 Info: Routing complete.
-Info: Router1 time 0.04s
-Info: Checksum: 0x1e747c95
-Info: Max frequency for clock              'clk0': 216.78 MHz (PASS at 100.00 MHz)
-Info: Max frequency for clock       'project.clk': 73.37 MHz (PASS at 16.67 MHz)
-Info: Max frequency for clock 'project.uo_out[3]': 315.96 MHz (PASS at 16.67 MHz)
-Info: Max delay posedge clk0              -> posedge project.clk      : 4.43 ns
-Info: Max delay posedge clk0              -> posedge project.uo_out[3]: 4.76 ns
-Info: Max delay posedge project.clk       -> posedge clk0             : 0.98 ns
+Info: Router1 time 0.03s
+Info: Checksum: 0x0e0de06e
+Info: Max frequency for clock       'project.clk': 72.40 MHz (PASS at 12.50 MHz)
+Info: Max frequency for clock              'clk0': 195.16 MHz (PASS at 100.00 MHz)
+Info: Max frequency for clock 'project.uo_out[3]': 304.14 MHz (PASS at 12.50 MHz)
+Info: Max delay posedge clk0              -> posedge project.clk      : 5.03 ns
+Info: Max delay posedge clk0              -> posedge project.uo_out[3]: 4.67 ns
+Info: Max delay posedge project.clk       -> posedge clk0             : 0.93 ns
 Info: Max delay posedge project.uo_out[3] -> posedge project.clk      : 13.32 ns

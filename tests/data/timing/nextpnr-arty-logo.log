@@ -1,36 +1,17 @@
-Info: constraining clock net 'project.clk' to 16.67 MHz
+Info: constraining clock net 'project.clk' to 12.50 MHz
 Info: constraining clock net 'clk0' to 100.00 MHz
-tt-harness clock: domain pclk net 'project.clk' 16.666666666666668 MHz
-tt-harness clock: domain sys net 'clk0' 100.0 MHz
-Info:   at iteration #16: temp = 0.000000, timing cost = 8, wirelen = 5032 
-Info: SA placement time 0.50s
-
-Info: Max frequency for clock        'clk0': 149.21 MHz (PASS at 100.00 MHz)
-Info: Max frequency for clock 'project.clk': 90.69 MHz (PASS at 16.67 MHz)
-
-Info: Max delay posedge clk0        -> posedge project.clk: 7.66 ns
-Info: Max delay posedge project.clk -> posedge clk0       : 0.35 ns
-
-Info:    IterCnt |  w/ripup   wo/ripup |  w/r  wo/r |      arcs| batch(sec) total(sec)|
-Info:          0 |        0          0 |    0     0 |         0|       0.06       0.06|
+tt-harness clock: domain pclk net 'project.clk' 12.5 MHz (cells 60 rising 60 falling 0 latches 0 intra yes; BUFG pclk_bufg)
+tt-harness clock: domain sys net 'clk0' 100.0 MHz (cells 114 rising 114 falling 0 latches 0 intra yes; BUFG sys_bufg from clk100)
+Info: Checksum: 0x60f4b850
+Info: Max frequency for clock 'project.clk': 92.46 MHz (PASS at 12.50 MHz)
+Info: Max frequency for clock        'clk0': 142.82 MHz (PASS at 100.00 MHz)
+Info: Max delay posedge clk0        -> posedge project.clk: 7.03 ns
+Info: Max delay posedge project.clk -> posedge clk0       : 0.74 ns
+Info: Checksum: 0x6b4a35c5
 Info: Routing complete.
 Info: Router1 time 0.06s
-Info: Checksum: 0xd1068386
-
-Info:  0.1  0.1  Source $auto$ff.cc:337:slice$14991.Q
-Info:  0.8  0.9    Net project.G[0] budget 9.800000 ns (13,27) -> (13,27)
-Info:                Sink $auto$ff.cc:337:slice$15151.D
-Info:  0.1  1.0  Setup $auto$ff.cc:337:slice$15151.D
-Info: 0.2 ns logic, 0.8 ns routing
-
-Info: Max frequency for clock        'clk0': 210.88 MHz (PASS at 100.00 MHz)
-Info: Max frequency for clock 'project.clk': 92.76 MHz (PASS at 16.67 MHz)
-
-Info: Max delay posedge clk0        -> posedge project.clk: 6.59 ns
+Info: Checksum: 0xc14b6fcd
+Info: Max frequency for clock 'project.clk': 97.56 MHz (PASS at 12.50 MHz)
+Info: Max frequency for clock        'clk0': 183.89 MHz (PASS at 100.00 MHz)
+Info: Max delay posedge clk0        -> posedge project.clk: 5.69 ns
 Info: Max delay posedge project.clk -> posedge clk0       : 0.99 ns
-
-Info: Slack histogram:
-Info:  legend: * represents 2 endpoint(s)
-Info:          + represents [1,2) endpoint(s)
-Info: [  5258,   7965) |************************************************************ 
-Info: [  7965,  10672) |*************************************+
