@@ -15,20 +15,57 @@ Clocks, with S = `SETTLE` system cycles and T the system period:
   period, 2 * (S + 1) * T. This times the project's own logic at that rate, not at the
   project's real clock.
 - project clocks: any other clock the tools find, made by the project's own logic. Timing
-  keys are `project:<source>`. Vivado tells the two kinds apart by the cell that drives the
-  clock root (through a BUFG if there is one): a flip-flop clocked by pclk gets a generated
-  clock with `-edges {1 3 5}` from its C pin, both edges on pclk rising edges, which is
-  exact for a flip-flop that toggles at most once per pclk; anything else (a gate) gets
-  pclk's own waveform (`-divide_by 1` from pclk), which assumes the gate is positive unate
-  in pclk (an inverting gate is not detected). openXC7 constrains every project clock at
-  the pclk frequency, a safe bound for both kinds.
+  keys are `project:<source>`. Vivado propagates pclk through combinational gates itself,
+  so every root found is made by sequential cells; `tt_harness.project_clocks` sorts each
+  root by where its edges can fall (`TimingDomain.root_kind`), from the cells both flows
+  print for it.
 - sys <-> pclk and sys <-> project clocks: S system cycles from a sys-side change to the
   next project edge and from a project edge to the sample (`tt_harness.compare.recorder`).
 
-nextpnr-xilinx 0.8.2 times cells on a clock's falling edge as if on its rising edge, so a
-clock with users on both edges is constrained at twice its frequency there (every path,
-half-cycle ones included, is checked against half the period); the domain says
-`half_cycle`.
+Project clocks in Vivado. P is the pclk period; pclk rises at 0 and falls at P/2. Vivado's
+constraints for each root class, and why, edge by edge:
+
+- `register` (edges only on pclk rising edges): `create_generated_clock -edges {1 3 5}`
+  from the pclk BUFG output, so the clock rises at 0 and falls at P, both on pclk rising
+  edges, with pclk's insertion delay and the delay to the root in its latency.
+  - pclk rise -> either edge of the clock: setup P, hold 0 (the edge may be the very pclk
+    edge that launched the data). The waveforms give exactly this for both edges.
+  - pclk fall -> either edge: setup P/2, hold -P/2. Either edge -> pclk rise: P and 0;
+    -> pclk fall: P/2 and -P/2. All from the waveforms.
+  - within the clock: same edge 2P and 0, opposite edges P and -P; two edges of one such
+    clock are never closer than P.
+  - between two different `register` clocks, A -> B: on hardware any edge of B can be one
+    pclk period after any edge of A, or on the same pclk edge. The 2P waveforms would give
+    2P for same-edge paths and a hold of -P for opposite edges, so every A -> B path gets
+    `set_max_delay P` and `set_min_delay 0` (without `-datapath_only`: both clocks'
+    insertion delays stay in the check, and hold stays analysed). A multicycle path cannot
+    express this: it moves a requirement by whole periods of these 2P clocks.
+- `derived` (edges on pclk rising or falling edges): `create_generated_clock -divide_by 1`
+  from the pclk BUFG output, pclk's own waveform in whichever sense Vivado traces. That
+  waveform alone would be wrong between clocks (a falling edge of the clock that really
+  lies on a pclk rising edge would get a hold requirement of -P/2), and a clock at twice
+  pclk's frequency is no better (-P/4). So every path between the clock and pclk or any
+  other project clock, both ways, gets `set_max_delay P/2` and `set_min_delay 0`:
+  - setup P/2: two different pclk edges are at least P/2 apart, whichever edges launch and
+    capture;
+  - hold 0: the capturing edge may be the pclk edge that launched the data.
+  - within the clock the waveform stands: same edge P, opposite edges P/2 (hold -P/2);
+    its edges are pclk edges, so two of them are never closer than P/2.
+  - with sys, the sys <-> pclk multicycles apply to both of its edges: setup S system
+    periods either way (the least it can be), hold -1 system period from sys (a sys-side
+    change comes one system cycle after a pclk falling edge, later after a rising one) and
+    0 to sys.
+- `unclassified` (a latch, an asynchronous set or clear, a cell not clocked by pclk, ...):
+  the `derived` constraints, as an assumption: the build completes, the domain has
+  `signed_off` False and the result lists it in `limitations`. If pclk does not reach the
+  root at all it is a primary clock with pclk's waveform.
+
+openXC7 constrains every project clock at the pclk frequency. nextpnr-xilinx 0.8.2 times
+cells on a clock's falling edge as if on its rising edge, so a clock with users on both
+edges is constrained at twice its frequency (every path, half-cycle ones included, is
+checked against half the period; the domain says `half_cycle`), and a path between pclk and
+a project clock, or between two project clocks, is budgeted at half a pclk period when
+either clock has any falling-edge user or is not of the `register` class.
 
 The gate raises `TimingError` when a clock in the design is missing from the report, a clock
 in the report has no constraint (it was timed at a default), a clock was timed against a
@@ -67,6 +104,7 @@ from pathlib import Path
 from typing import Literal
 
 from tt_harness import prescreen, tools, verilate
+from tt_harness import project_clocks as pc
 from tt_harness.boards import arty
 from tt_harness.fetch import Sources
 from tt_harness.manifest import Project
@@ -100,6 +138,16 @@ LIMIT_CROSS_BUDGET = (
     "assuming clock-insertion skew under 10 ns (one system period)"
 )
 LIMIT_LOCAL_CLOCKS = "openXC7: project clocks are on local routing with unmeasured skew"
+# Per-build entries, with the toolchain named as in the standing facts.
+TOOL_NAMES = {"openxc7": "openXC7", "vivado": "Vivado"}
+LIMIT_NOT_SIGNED_OFF = (
+    "{tool}: project clock {clock} is not signed off: {reason}; it was timed as a clock with "
+    "edges on either pclk edge, which is an assumption"
+)
+LIMIT_GATE = (
+    "{tool}: project clock {clock} is a gate of {n} flip-flops; a glitch at the gate is not timed"
+)
+LIMIT_NO_PATHS = "{tool}: {key} has no paths within its own clock"
 
 
 class _LoggedError(RuntimeError):
@@ -119,8 +167,11 @@ class TimingError(_LoggedError):
 
 @dataclass(frozen=True)
 class TimingDomain:
+    # A clock: its constraint. A clock pair: 1000 / the setup requirement in ns.
     constraint_mhz: float
-    # The frequency the worst path would close at, against that path's own requirement;
+    # The frequency the clock could run at with its worst setup path just closing, so it
+    # compares with `constraint_mhz`: `constraint_mhz * requirement / (requirement - slack)`
+    # with that path's own requirement (which is not the period for a half-cycle path).
     # None where the requirement is not known (nextpnr cross-domain entries, Vivado entries
     # without a pair report) or there are no paths.
     achieved_mhz: float | None
@@ -135,6 +186,19 @@ class TimingDomain:
     half_cycle: bool = False
     # False when the clock has no paths within its own domain (only cross-domain ones).
     intra_paths: bool = True
+    # The setup requirement in ns of the worst path (Vivado, from the pair reports), or the
+    # budget its data-path delay was checked against (nextpnr clock pairs); None if unknown.
+    requirement_ns: float | None = None
+    # Project clocks only: where the edges of the clock's root can fall ("register": only on
+    # pclk rising edges; "derived": on either pclk edge; "unclassified": not known), why,
+    # and how many flip-flops the root is a gate of (`tt_harness.project_clocks`).
+    root_kind: pc.RootKind | None = None
+    root_reason: str | None = None
+    root_gate_of: int | None = None
+    # False when the clock's timing model is an assumption rather than derived from the
+    # netlist (an "unclassified" root). Such a domain can be `met` and still not be signed
+    # off; `BuildResult.limitations` names it.
+    signed_off: bool = True
 
 
 @dataclass(frozen=True)
@@ -185,6 +249,8 @@ class ClockPlan:
 
     def requirement_ns(self, src: str, dst: str, same_edge: bool = True) -> float:
         """Setup requirement of a path from clock kind `src` to clock kind `dst`."""
+        if src == "sys" and dst == "sys":
+            return self.sys_period_ns if same_edge else self.sys_period_ns / 2
         if "sys" in (src, dst):
             return self.cross_requirement_ns
         return self.pclk_period_ns if same_edge else self.pclk_period_ns / 2
@@ -223,10 +289,22 @@ _NEXTPNR_ROUTED = "Info: Routing complete."
 @dataclass(frozen=True)
 class _NextpnrClock:
     key: str
-    cells: int | None  # clocked cells on the net; None in logs without the count
+    cells: int | None  # clocked cells on the net; None in logs without the counts
     half_cycle: bool
     # Whether data can pass from one of its cells to another (None: not reported).
     intra: bool | None = None
+    falling: int | None = None  # cells on its falling edge; None in logs without the counts
+    # Project clocks: the class of the net's root.
+    root: pc.Classified | None = None
+
+    @property
+    def half_budget(self) -> bool:
+        """Whether a path between this clock and another may have only half a pclk period:
+        it has (or may have) a falling-edge user, which nextpnr prints as `posedge`, or its
+        own edges may lie on pclk falling edges."""
+        if self.falling is None or self.falling > 0:
+            return True
+        return self.root is not None and self.root.kind != pc.REGISTER
 
 
 def _edge_clock(text: str) -> tuple[str, str] | None:
@@ -240,15 +318,37 @@ def _edge_clock(text: str) -> tuple[str, str] | None:
     return edge, name.strip()
 
 
-def _nextpnr_clocks(text: str) -> dict[str, _NextpnrClock]:
-    """Net name -> clock, from the pre-pack script's `tt-harness clock:` lines."""
+_NO_ROOT_FACTS = pc.Classified(pc.UNCLASSIFIED, "the build did not report what drives it", False, 0)
+
+
+def _root_fields(root: pc.Classified) -> dict:
+    """The `TimingDomain` fields of a project clock whose root is `root`."""
+    return {
+        "root_kind": root.kind,
+        "root_reason": root.reason,
+        "root_gate_of": root.gate_of,
+        "signed_off": root.signed_off,
+    }
+
+
+def _nextpnr_clocks(text: str, log: Path) -> dict[str, _NextpnrClock]:
+    """Net name -> clock, from the pre-pack script's `tt-harness clock` lines."""
+    try:
+        roots = pc.classify(pc.parse_roots(text))
+    except ValueError as e:
+        raise TimingError(str(e), log) from e
     nets = {}
     for m in _NEXTPNR_CLOCK_MAP.finditer(text):
         domain, net = m.group("domain"), m.group("net")
-        key = f"{PROJECT}{net}" if domain == "project" else domain
-        cells = int(m.group("cells")) if m.group("cells") is not None else None
-        intra = None if m.group("intra") is None else m.group("intra") == "yes"
-        nets[net] = _NextpnrClock(key, cells, bool(m.group("half")), intra)
+        project = domain == "project"
+        nets[net] = _NextpnrClock(
+            key=f"{PROJECT}{net}" if project else domain,
+            cells=int(m.group("cells")) if m.group("cells") is not None else None,
+            half_cycle=bool(m.group("half")),
+            intra=None if m.group("intra") is None else m.group("intra") == "yes",
+            falling=int(m.group("falling")) if m.group("falling") is not None else None,
+            root=roots.get(net, _NO_ROOT_FACTS) if project else None,
+        )
     return nets
 
 
@@ -256,11 +356,13 @@ def parse_nextpnr(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDoma
     """Timing per domain from a nextpnr-xilinx log (the post-route report is used).
 
     Net names are mapped to domains by the `tt-harness clock:` lines that the pre-pack
-    script prints. Raises `TimingError` for an unmapped clock, a mapped clock missing from
-    the report (unless it clocks a single cell, so it can have no paths of its own), or a
-    target other than the plan's (twice the plan's for a half-cycle clock).
+    script prints, and project clocks are classified from its `tt-harness clock root:`
+    lines. Raises `TimingError` for an unmapped clock, a mapped clock missing from the
+    report (unless the script found no path between its cells, or it clocks a single cell
+    and the script did not say), or a target other than the plan's (twice the plan's for a
+    half-cycle clock).
     """
-    nets = _nextpnr_clocks(text)
+    nets = _nextpnr_clocks(text, log)
     keys = {c.key: c for c in nets.values()}
     routed = text.rfind(_NEXTPNR_ROUTED)
     if routed < 0:
@@ -294,6 +396,8 @@ def parse_nextpnr(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDoma
             kind=kind,
             setup_slack_ns=1000.0 / target - 1000.0 / achieved,
             half_cycle=clock.half_cycle,
+            requirement_ns=1000.0 / expected,
+            **(_root_fields(clock.root) if clock.root is not None else {}),
         )
 
     allowance = CROSS_DOMAIN_ALLOWANCE_CYCLES * plan.sys_period_ns
@@ -308,40 +412,48 @@ def parse_nextpnr(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDoma
                     f"involves clock net '{edge_net[1]}', which is not a constrained clock",
                     log,
                 )
-            ends.append(None if edge_net is None else (edge_net[0], nets[edge_net[1]].key))
+            ends.append(None if edge_net is None else (edge_net[0], nets[edge_net[1]]))
         if None in ends:
             continue  # I/O paths are not clock pairs
         (src_edge, src), (dst_edge, dst) = ends
-        if src == dst and src_edge == dst_edge:
+        if src.key == dst.key and src_edge == dst_edge:
             continue  # within one clock: covered by its Fmax line
+        # A whole period only when both ends are known to be on rising edges that are a
+        # whole period apart (the printed edges are no evidence: a falling-edge capture is
+        # printed as `posedge`).
         same_edge = src_edge == dst_edge
-        budget = plan.requirement_ns(_kind(src), _kind(dst), same_edge) - allowance
-        key = f"{src}->{dst}" + ("" if src != dst else " (opposite edges)")
+        if src.key != dst.key and "sys" not in (src.key, dst.key):
+            same_edge = same_edge and not (src.half_budget or dst.half_budget)
+        budget = plan.requirement_ns(_kind(src.key), _kind(dst.key), same_edge) - allowance
+        key = f"{src.key}->{dst.key}" + ("" if src.key != dst.key else " (opposite edges)")
         slack = budget - float(m.group("delay"))
         if key not in worst or slack < worst[key][0]:
             worst[key] = (slack, budget)
     for key, (slack, budget) in worst.items():
         timing[key] = TimingDomain(
-            constraint_mhz=1000.0 / budget,
+            constraint_mhz=1000.0 / budget if budget > 0 else float("inf"),
             achieved_mhz=None,  # only a data-path delay against a harness budget
             met=slack >= 0,
             kind="cross",
             setup_slack_ns=slack,
+            requirement_ns=budget,
         )
 
     for key, clock in sorted(keys.items()):
         if key in timing:
             continue
         single = clock.cells is not None and clock.cells <= 1
-        if key.startswith(PROJECT) and (single or clock.intra is False):
-            # No cell on this clock can take data from another one on it (the pre-pack
-            # script walked the netlist), so it has no paths of its own to report.
+        if clock.root is not None and (clock.intra is False or (clock.intra is None and single)):
+            # No cell on this clock can take data from another one on it, or from itself
+            # (the pre-pack script walked the netlist), so it has no paths of its own to
+            # report. Without the script's word, only a single cell is taken to have none.
             timing[key] = TimingDomain(
                 constraint_mhz=plan.pclk_mhz,
                 achieved_mhz=None,
                 met=True,
                 kind="project",
                 intra_paths=False,
+                **_root_fields(clock.root),
             )
             continue
         raise TimingError(
@@ -368,15 +480,17 @@ VIVADO_CHECKS = (
     "latch_loops",
 )
 _VIVADO_CHECK = re.compile(r"^\d+\. checking (\w+) \((\d+)\)\s*$", re.MULTILINE)
+_VIVADO_PROJECT_CLOCK_PREFIX = "tt-harness project clock: "
 _VIVADO_PROJECT_CLOCK = re.compile(
-    r"^tt-harness project clock: (?P<name>\S+) on (?P<root>\S+) from \S+ "
-    r"\(master pin \S+\)(?: kind (?P<kind>register|gate))?$",
+    r"^tt-harness project clock: (?P<name>\S+) on (?P<root>\S+) "
+    r"kind (?P<kind>register|derived|unclassified)$",
     re.MULTILINE,
 )
 _VIVADO_REQUIREMENT = re.compile(
     r"^tt-harness requirement: (?P<a>\S+) -> (?P<b>\S+) setup (?P<ns>-?[\d.]+) ns$",
     re.MULTILINE,
 )
+_VIVADO_NO_PATHS = re.compile(r"^tt-harness no paths: (?P<a>\S+) -> (?P<b>\S+)$", re.MULTILINE)
 
 
 def _table_rows(text: str, title: str) -> list[list[str]]:
@@ -402,23 +516,27 @@ def _ns(text: str) -> float | None:
     return None if text == "NA" else float(text)
 
 
-def _achieved(requirement: float | None, wns: float | None) -> float | None:
-    if requirement is None or wns is None or requirement - wns <= 0:
+def _achieved(constraint_mhz: float, requirement: float | None, wns: float | None) -> float | None:
+    """The frequency a clock constrained at `constraint_mhz` could run at, from a path with
+    setup requirement `requirement` and slack `wns` (see `TimingDomain.achieved_mhz`)."""
+    if requirement is None or wns is None or requirement <= 0 or requirement - wns <= 0:
         return None
-    return 1000.0 / (requirement - wns)
+    return constraint_mhz * requirement / (requirement - wns)
 
 
 def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomain]:
     """Timing per clock and per clock pair from a Vivado `report_timing_summary`.
 
-    Project clocks are named `project_clk<n>` in Vivado; the `tt-harness project clock:`
-    lines (from the constraint script, prepended to the report) map them to their source
-    pins and kind. `tt-harness requirement:` lines (prepended from the pair reports) give
-    the requirement of each pair's worst setup path, from which `achieved_mhz` is derived.
-    Raises `TimingError` if `check_timing` found untimed logic, the report lists a clock
-    that is neither sys, pclk nor a mapped project clock, a clock's period differs from the
-    plan's, a mapped clock is absent, or a clock reports setup or hold figures for only
-    one of the two.
+    Project clocks are named `project_clk<n>` in Vivado. The lines the flow prepends to the
+    report say the rest: `tt-harness project clock:` maps each to its root pin and the class
+    it was constrained as, the `tt-harness clock root:` lines give what drives each root
+    (the class is derived again here and must agree), `tt-harness requirement:` gives the
+    requirement of a pair's worst setup path and `tt-harness no paths:` a pair whose report
+    has no paths. Raises `TimingError` if `check_timing` found untimed logic, the report
+    lists a clock that is neither sys, pclk nor a mapped project clock, a clock's period
+    differs from what its class calls for, a mapped clock is absent, a clock reports setup
+    or hold figures for only one of the two, or a clock has neither (unless it is a project
+    clock whose own pair report says it has no paths).
     """
     checks = {}
     for m in _VIVADO_CHECK.finditer(text):
@@ -431,14 +549,35 @@ def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomai
         detail = ", ".join(f"{c} ({n})" for c, n in bad.items())
         raise TimingError(f"unconstrained: Vivado check_timing reports {detail}", log)
 
+    try:
+        classes = pc.classify(pc.parse_roots(text))
+    except ValueError as e:
+        raise TimingError(str(e), log) from e
     names = {"sys": "sys", "pclk": "pclk"}
     expected_period = {"sys": plan.sys_period_ns, "pclk": plan.pclk_period_ns}
-    for m in _VIVADO_PROJECT_CLOCK.finditer(text):
-        names[m.group("name")] = f"{PROJECT}{m.group('root')}"
-        # A flip-flop's clock has both edges on pclk rising edges: twice pclk's period.
-        factor = 2 if m.group("kind") == "register" else 1
-        expected_period[m.group("name")] = factor * plan.pclk_period_ns
+    roots: dict[str, pc.Classified] = {}
+    for line in text.splitlines():
+        if not line.startswith(_VIVADO_PROJECT_CLOCK_PREFIX):
+            continue
+        m = _VIVADO_PROJECT_CLOCK.match(line)
+        if m is None:
+            raise TimingError(f"cannot read the project clock line {line!r}", log)
+        name, root, kind = m.group("name"), m.group("root"), m.group("kind")
+        if root not in classes:
+            raise TimingError(f"no clock root facts for project clock {name} on {root}", log)
+        if classes[root].kind != kind:
+            raise TimingError(
+                f"project clock {name} on {root} was constrained as {kind}, but its root is "
+                f"{classes[root].kind} ({classes[root].reason})",
+                log,
+            )
+        names[name] = f"{PROJECT}{root}"
+        roots[name] = classes[root]
+        # A register clock has both edges on pclk rising edges: twice pclk's period.
+        factor = 2 if kind == pc.REGISTER else 1
+        expected_period[name] = factor * plan.pclk_period_ns
     requirements = {(m["a"], m["b"]): float(m["ns"]) for m in _VIVADO_REQUIREMENT.finditer(text)}
+    no_paths = {(m["a"], m["b"]) for m in _VIVADO_NO_PATHS.finditer(text)}
     periods = {}
     for row in _table_rows(text, "Clock Summary"):
         name, period = row[0], float(row[-2])
@@ -465,15 +604,27 @@ def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomai
             raise TimingError(f"cannot read the intra-clock row for {name}: {row}", log)
         if (wns is None) != (whs is None):
             raise TimingError(f"clock {name} reports only one of setup and hold slack", log)
+        if wns is None and not (name in roots and (name, name) in no_paths):
+            # sys and pclk always have paths of their own; a project clock may have none,
+            # but only on the word of its own pair report.
+            raise TimingError(
+                f"clock {name} has no setup or hold figures"
+                + (" and no pair report saying it has no paths" if name in roots else ""),
+                log,
+            )
         key = names[name]
+        constraint = 1000.0 / periods[name]
+        requirement = requirements.get((name, name))
         timing[key] = TimingDomain(
-            constraint_mhz=1000.0 / periods[name],
-            achieved_mhz=_achieved(requirements.get((name, name)), wns),
+            constraint_mhz=constraint,
+            achieved_mhz=_achieved(constraint, requirement, wns),
             met=(wns is None or (wns >= 0 and whs >= 0)) and wpws is not None and wpws >= 0,
             kind=_kind(key),
             setup_slack_ns=wns,
             hold_slack_ns=whs,
             intra_paths=wns is not None,
+            requirement_ns=requirement,
+            **(_root_fields(roots[name]) if name in roots else {}),
         )
 
     def pair(row_src: str, row_dst: str, wns, whs, suffix: str, req_known: bool) -> None:
@@ -484,16 +635,18 @@ def parse_vivado(text: str, plan: ClockPlan, log: Path) -> dict[str, TimingDomai
         if wns is None or whs is None:
             raise TimingError(f"clock pair {row_src} -> {row_dst} has no slack figures", log)
         a, b = names[row_src], names[row_dst]
-        requirement = plan.requirement_ns(_kind(a), _kind(b))
+        # The pair's constraint is the requirement of its worst setup path where the pair
+        # report gave it, else the plan's requirement between clocks of these kinds.
+        requirement = requirements.get((row_src, row_dst)) if req_known else None
+        constraint = 1000.0 / (requirement or plan.requirement_ns(_kind(a), _kind(b)))
         timing[f"{a}->{b}{suffix}"] = TimingDomain(
-            constraint_mhz=1000.0 / requirement,
-            achieved_mhz=_achieved(requirements.get((row_src, row_dst)), wns)
-            if req_known
-            else None,
+            constraint_mhz=constraint,
+            achieved_mhz=_achieved(constraint, requirement, wns),
             met=wns >= 0 and whs >= 0,
             kind="cross",
             setup_slack_ns=wns,
             hold_slack_ns=whs,
+            requirement_ns=requirement,
         )
 
     for row in _table_rows(text, "Inter Clock Table"):
@@ -533,8 +686,23 @@ def check(timing: dict[str, TimingDomain], plan: ClockPlan, log: Path) -> None:
 
 
 def _describe(d: TimingDomain) -> str:
-    achieved = "n/a" if d.achieved_mhz is None else f"{d.achieved_mhz:.2f} MHz"
-    parts = [f"{achieved} achieved against {d.constraint_mhz:.2f} MHz"]
+    if d.kind == "cross":
+        # A clock pair is a requirement, not a frequency.
+        requirement = d.requirement_ns
+        if requirement is None:
+            requirement = 1000.0 / d.constraint_mhz
+        parts = [f"requirement {requirement:.3f} ns"]
+    else:
+        achieved = "n/a" if d.achieved_mhz is None else f"{d.achieved_mhz:.2f} MHz"
+        parts = [f"{achieved} achieved against {d.constraint_mhz:.2f} MHz"]
+        period = 1000.0 / d.constraint_mhz
+        if d.requirement_ns is not None and abs(d.requirement_ns - period) > 0.001:
+            parts.append(
+                f"worst setup path has a {d.requirement_ns:.3f} ns requirement "
+                f"(frequency scaled to the {period:.3f} ns period)"
+            )
+    if d.root_kind is not None:
+        parts.append(f"{d.root_kind} clock" + ("" if d.signed_off else ", NOT SIGNED OFF"))
     if d.half_cycle:
         parts.append("constraint doubled: clock used on both edges")
     if not d.intra_paths:
@@ -611,10 +779,17 @@ for name, cell in ctx.cells:
             if cell.type in LATCHES:
                 u[3] += 1
 clock_of = {{}}  # clocked cell name -> its clock net
+clock_port_of = {{}}
 for name, cell in ctx.cells:
     for port, info in cell.ports:
         if port in CLOCK_PORTS and info.net is not None:
             clock_of[name] = info.net.name
+            clock_port_of[name] = port
+
+
+def own_output(cell, port, info):
+    drv = info.net.driver
+    return drv is not None and drv.cell is not None and drv.cell.name == cell.name and drv.port == port
 
 
 def has_intra_paths(net_name):
@@ -627,9 +802,14 @@ def has_intra_paths(net_name):
         for port, info in cell.ports:
             if port in CLOCK_PORTS or info.net is None or info.net.driver is None:
                 continue
+            if own_output(cell, port, info):
+                continue
             drv = info.net.driver.cell
-            if drv is not None and drv.name != start:
-                todo.append(drv)
+            if drv is None:
+                continue
+            if drv.name == start:
+                return True  # its own output on one of its inputs (Q to D or CE)
+            todo.append(drv)
         seen = set()
         while todo and len(seen) < 20000:
             c = todo.pop()
@@ -653,6 +833,7 @@ def has_intra_paths(net_name):
 
 found = {{}}
 known = set()
+project_nets = []
 
 
 def constrain(domain, net, mhz, why):
@@ -663,6 +844,8 @@ def constrain(domain, net, mhz, why):
     ctx.addClock(net.name, effective)
     known.add(net.name)
     found.setdefault(domain, []).append(net.name)
+    if domain == "project":
+        project_nets.append(net)
     print(
         f"tt-harness clock: domain {{domain}} net '{{net.name}}' {{effective}} MHz "
         f"(cells {{cells}} rising {{rise}} falling {{fall}} latches {{latches}} intra {{intra}}"
@@ -694,6 +877,72 @@ for name, cell in ctx.cells:
 for domain in ("sys", "pclk"):
     if len(found.get(domain, [])) != 1:
         raise RuntimeError(f"tt-harness: expected one {{domain}} clock, found {{found.get(domain)}}")
+
+# What drives each project clock, for tt_harness.project_clocks: walk back from the net
+# through cells that are not clocked to the clocked cells (and inputs) its value comes from.
+CONSTANTS = ("GND", "VCC")
+ASYNC = {{"FDCE": "CLR", "FDPE": "PRE", "FDCE_1": "CLR", "FDPE_1": "PRE", "LDCE": "CLR", "LDPE": "PRE"}}
+SYS_NET = found["sys"][0]
+PCLK_NET = found["pclk"][0]
+
+
+def clock_ref(net_name):
+    if net_name == PCLK_NET:
+        return "pclk"
+    if net_name == SYS_NET:
+        return "sys"
+    return "root:" + net_name
+
+
+def has_async(cell):
+    wanted = ASYNC.get(cell.type)
+    for port, info in cell.ports:
+        if port != wanted:
+            continue
+        drv = info.net.driver.cell if info.net is not None and info.net.driver is not None else None
+        return drv is None or drv.type not in CONSTANTS
+    return False
+
+
+def contributors(net):
+    out = []
+    seen_nets = set()
+    seen_cells = set()
+    todo = [net]
+    while todo:
+        n = todo.pop()
+        if n.name in seen_nets:
+            continue
+        seen_nets.add(n.name)
+        if n.name != net.name and n.name in (PCLK_NET, SYS_NET):
+            # A clock used as data: both of its edges pass through.
+            out.append(f"clock {{clock_ref(n.name)}} rising through-logic no-async")
+            continue
+        drv = n.driver.cell if n.driver is not None else None
+        if drv is None or drv.type == "IBUF" or drv.type.startswith("$nextpnr_"):
+            out.append("port none rising direct no-async")
+            continue
+        if drv.type in CONSTANTS or drv.name in seen_cells:
+            continue
+        seen_cells.add(drv.name)
+        if len(seen_cells) > 20000:
+            out.append("unknown none rising direct no-async")  # too large to tell
+            break
+        if drv.name in clock_of:
+            edge = "falling" if falling(drv, clock_port_of[drv.name]) else "rising"
+            asynchronous = "async" if has_async(drv) else "no-async"
+            out.append(f"{{drv.type}} {{clock_ref(clock_of[drv.name])}} {{edge}} direct {{asynchronous}}")
+            continue
+        for port, info in drv.ports:
+            if info.net is not None and not own_output(drv, port, info):
+                todo.append(info.net)
+    return out
+
+
+for net in project_nets:
+    print(f"tt-harness clock root: {{net.name}}")
+    for line in contributors(net):
+        print(f"tt-harness clock contributor: {{net.name}} {{line}}")
 """
 
 
@@ -863,22 +1112,6 @@ def _openxc7_bitstream(job: _Job) -> None:
     )
 
 
-# The generated-clock command for each kind of project-clock root, as Tcl with $name,
-# $master and $root. A flip-flop clocked on pclk's rising edge changes only on pclk rising
-# edges, so both edges of its clock lie on them: edges 1, 3 and 5 of its C pin (period two
-# pclk periods, exact for one flip-flop toggling at most once per pclk). Anything else (a
-# gate) gets pclk's own waveform from the pclk BUFG, assuming it is positive unate in pclk.
-PROJECT_CLOCK_COMMANDS = {
-    "register": "create_generated_clock -name $name -edges {1 3 5} -source $master $root",
-    "gate": "create_generated_clock -name $name -divide_by 1 -source $master $root",
-}
-
-
-def project_clock_command(kind: str) -> str:
-    """The Tcl that defines a project clock whose root is driven by a `kind` cell."""
-    return PROJECT_CLOCK_COMMANDS[kind]
-
-
 _VIVADO_CLOCKS = """\
 # Generated by tt_harness.build. sys is the board oscillator. pclk is the recorder's pclk
 # register through the BUFG; it is defined on the BUFG output, so the register's own (sys)
@@ -897,55 +1130,87 @@ create_generated_clock -name pclk -divide_by {divide} \\
     -source [get_pins -of_objects $drivers -filter {{REF_PIN_NAME == C}}] [get_pins {bufg}/O]
 
 # Clocks made by the project's logic. Every clock pin of a sequential cell that no clock
-# reaches yet is followed to the root of its net: a BUFG output, or the driving pin itself.
-# The cell behind the root decides the kind: a flip-flop (on pclk's rising edge) is a
-# "register" clock, anything else a "gate" clock.
-set roots {{}}
+# reaches yet is followed to the root of its net, the pin that drives it. (Vivado carries
+# pclk through combinational gates itself, so a root is made by sequential cells.)
+set tt_roots {{}}
 foreach pin [get_pins -quiet -filter {{IS_CLOCK}} \\
         -of_objects [get_cells -quiet -hier -filter {{IS_SEQUENTIAL}}]] {{
     if {{[llength [get_clocks -quiet -of_objects $pin]]}} {{ continue }}
     set drv [get_pins -quiet -leaf -filter {{DIRECTION == OUT}} -of_objects [get_nets -of_objects $pin]]
     if {{[llength $drv] != 1}} {{ error "tt-harness: clock pin $pin has driver(s) '$drv'" }}
-    if {{[lsearch -exact $roots $drv] < 0}} {{ lappend roots $drv }}
+    if {{[lsearch -exact $tt_roots $drv] < 0}} {{ lappend tt_roots $drv }}
 }}
-set n 0
-foreach root $roots {{
-    set cell [get_cells -of_objects $root]
-    if {{[string match BUFG* [get_property REF_NAME $cell]]}} {{
-        set src [get_pins -leaf -filter {{DIRECTION == OUT}} \\
-            -of_objects [get_nets -of_objects [get_pins $cell/I]]]
-    }} else {{
-        set src $root
+
+# What drives each root, for tt_harness.project_clocks: every sequential cell in its fan-in
+# cone, with the clock on its clock pin (pclk, sys, another root or none), the edge it is
+# clocked on, whether that clock arrives straight from its source, and whether the cell has
+# an asynchronous set or clear that is not tied off; and every top-level input in the cone.
+set tt_facts [open {{{roots_file}}} w]
+proc tt_fact {{line}} {{
+    global tt_facts
+    puts $tt_facts $line
+    puts $line
+}}
+set tt_pclk_pin [get_pins {bufg}/O]
+set tt_n 0
+foreach root $tt_roots {{
+    set tt_root($tt_n) $root
+    incr tt_n
+    tt_fact "tt-harness clock root: $root"
+    foreach cell [filter [all_fanin -quiet -flat -only_cells $root] {{IS_SEQUENTIAL}}] {{
+        set ref [get_property REF_NAME $cell]
+        set async no-async
+        foreach p [get_pins -quiet -of_objects $cell \\
+                -filter {{REF_PIN_NAME == CLR || REF_PIN_NAME == PRE}}] {{
+            set type [get_property -quiet TYPE [get_nets -quiet -of_objects $p]]
+            if {{$type ne "GROUND" && $type ne "POWER"}} {{ set async async }}
+        }}
+        set edge rising
+        foreach prop {{IS_C_INVERTED IS_G_INVERTED IS_CLK_INVERTED}} {{
+            # The value reads 1'b1 or 1'b0.
+            if {{[string match "*1" [get_property -quiet $prop $cell]]}} {{ set edge falling }}
+        }}
+        set cpins [get_pins -quiet -of_objects $cell -filter {{IS_CLOCK}}]
+        if {{[llength $cpins] == 0}} {{
+            tt_fact "tt-harness clock contributor: $root $ref none $edge direct $async"
+        }}
+        foreach cpin $cpins {{
+            set drv [get_pins -quiet -leaf -filter {{DIRECTION == OUT}} \\
+                -of_objects [get_nets -quiet -of_objects $cpin]]
+            set clocks [get_clocks -quiet -of_objects $cpin]
+            set path direct
+            if {{[lsearch -exact $clocks pclk] >= 0}} {{
+                set clock pclk
+                if {{[llength $drv] != 1 || $drv ne $tt_pclk_pin}} {{ set path through-logic }}
+            }} elseif {{[lsearch -exact $clocks sys] >= 0}} {{
+                set clock sys
+            }} elseif {{[llength $drv] == 1}} {{
+                set clock root:$drv
+            }} else {{
+                set clock none
+            }}
+            tt_fact "tt-harness clock contributor: $root $ref $clock $edge $path $async"
+        }}
     }}
-    set srccell [get_cells -of_objects $src]
-    set c_pin [get_pins -quiet -of_objects $srccell -filter {{REF_PIN_NAME == C}}]
-    if {{[lsearch -exact {{FDRE FDSE FDCE FDPE}} [get_property REF_NAME $srccell]] >= 0
-            && [get_property -quiet IS_C_INVERTED $srccell] != 1
-            && [lsearch -exact [get_clocks -quiet -of_objects $c_pin] pclk] >= 0}} {{
-        set kind register
-        set master $c_pin
-    }} else {{
-        set kind gate
-        set master [get_pins {bufg}/O]
-    }}
-    set name project_clk$n
-    incr n
-    puts "tt-harness project clock: $name on $root from $src (master pin $master) kind $kind"
-    if {{$kind eq "register"}} {{
-        {register_command}
-    }} else {{
-        {gate_command}
+    foreach start [all_fanin -quiet -flat -startpoints_only $root] {{
+        if {{[get_property CLASS $start] eq "port"}} {{
+            tt_fact "tt-harness clock contributor: $root port none rising direct no-async"
+        }}
     }}
 }}
-puts "tt-harness: $n project clock(s)"
+close $tt_facts
+
+# tt_harness.project_clocks classifies the roots and writes the clock on each one, and the
+# requirements between project clocks and pclk that their waveforms do not give.
+exec /usr/bin/env -i {{{python}}} -I {{{script}}} {{{roots_file}}} {{{constraints}}} {bufg}/O {pclk_period:.3f}
+source {{{constraints}}}
 
 # One project clock is S = {settle} system cycles from any sys-side change to the next pclk
 # edge, and S cycles from a pclk edge to the sample. Setup is checked over S sys cycles in
 # both directions. Hold: sys->pclk data changes one sys cycle after a falling pclk edge at
 # the earliest (requirement -1 sys period); pclk->sys keeps the default same-edge check
 # (requirement 0), which is stricter than the recorder needs. Clocks the project makes are
-# edges of pclk delayed further, so they get the same relationship to sys. Between pclk and
-# project clocks the relationship follows from their waveforms.
+# edges of pclk delayed further, so they get the same relationship to sys.
 foreach c [get_clocks {{pclk project_clk*}}] {{
     set_multicycle_path -setup -start {settle} -from [get_clocks sys] -to $c
     set_multicycle_path -hold -start {settle} -from [get_clocks sys] -to $c
@@ -953,6 +1218,30 @@ foreach c [get_clocks {{pclk project_clk*}}] {{
     set_multicycle_path -hold -end {settle_minus_1} -from $c -to [get_clocks sys]
 }}
 """
+
+
+def vivado_clocks_tcl(plan: ClockPlan, board, out: Path) -> str:
+    """The Tcl that constrains a compare build's clocks, run after synthesis.
+
+    It defines sys and pclk, writes what drives every project-clock root to
+    `out/clock-roots.txt`, runs `tt_harness/project_clocks.py` (as a program, with this
+    interpreter and an empty environment, so Vivado's own cannot affect it) to write
+    `out/project-clocks.tcl` from that, and sources the result.
+    """
+    return _VIVADO_CLOCKS.format(
+        sys_period=plan.sys_period_ns,
+        pclk_period=plan.pclk_period_ns,
+        input_port=board.SYS_CLK_PORT,
+        bufg=board.BUFG_NAME,
+        divide=2 * (plan.settle + 1),
+        settle=plan.settle,
+        settle_minus_1=plan.settle - 1,
+        roots_file=out / "clock-roots.txt",
+        constraints=out / "project-clocks.tcl",
+        python=sys.executable,
+        script=Path(pc.__file__),
+    )
+
 
 _VIVADO_NETTYPE_ERROR = "[Synth 8-6735]"
 _VIVADO_MESSAGE_FILE = re.compile(r"\[(?P<path>[^\[\]]+?):\d+\]\s*$")
@@ -1024,6 +1313,49 @@ _DECLARATION_WORDS = (
     "input|output|inout|wire|reg|logic|tri|tri0|tri1|wand|wor|supply0|supply1|integer|"
     "genvar|bit|byte|int|shortint|longint|parameter|localparam|var"
 )
+_DECLARATION = re.compile(rf"\b(?:{_DECLARATION_WORDS})\b")
+_NOT_NAMES = frozenset(_DECLARATION_WORDS.split("|")) | {"signed", "unsigned"}
+_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+_BRACKETS = re.compile(r"\[[^\[\]]*\]")
+
+
+def _declared_names(text: str) -> set[str]:
+    """The identifiers that declarations in Verilog `text` declare (a textual reading).
+
+    From each declaration keyword to the end of its statement (or of an ANSI port list),
+    each comma-separated item declares the last identifier before any `=`: names used in
+    ranges or initialisers are not declared by it.
+    """
+    text = _COMMENT.sub(" ", text)
+    names: set[str] = set()
+    for m in _DECLARATION.finditer(text):
+        items, item, depth, i = [], [], 0, m.end()
+        while i < len(text):
+            c = text[i]
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+                if depth < 0:
+                    break  # the end of an ANSI port list
+            elif c == ";" and depth == 0:
+                break
+            if c == "," and depth == 0:
+                items.append("".join(item))
+                item = []
+            else:
+                item.append(c)
+            i += 1
+        items.append("".join(item))
+        for piece in items:
+            while _BRACKETS.search(piece):
+                piece = _BRACKETS.sub(" ", piece)
+            head = piece.split("=", 1)[0]
+            found = [w for w in _IDENTIFIER.findall(head) if w not in _NOT_NAMES]
+            if found:
+                names.add(found[-1])
+    return names
 
 
 def undeclared_symbols(text: str, sources: list[Path]) -> list[str]:
@@ -1031,13 +1363,10 @@ def undeclared_symbols(text: str, sources: list[Path]) -> list[str]:
     names = sorted({m.group("name") for m in _VIVADO_UNDECLARED.finditer(text)})
     if not names:
         return []
-    corpus = "\n".join(p.read_bytes().decode("utf-8", errors="replace") for p in sources)
-    missing = []
-    for name in names:
-        declared = re.compile(rf"\b(?:{_DECLARATION_WORDS})\b[^;]*?\b{re.escape(name)}\b")
-        if not declared.search(corpus):
-            missing.append(name)
-    return missing
+    declared: set[str] = set()
+    for path in sources:
+        declared |= _declared_names(path.read_bytes().decode("utf-8", errors="replace"))
+    return [name for name in names if name not in declared]
 
 
 def _vivado_rewritten_sources(job: _Job) -> tuple[list[Path], list[Path]]:
@@ -1072,18 +1401,7 @@ def _vivado_rewritten_sources(job: _Job) -> tuple[list[Path], list[Path]]:
 def _vivado_script(job: _Job, files: list[Path], dirs: list[Path]) -> Path:
     out = job.out_dir
     clocks_tcl = out / "clocks.tcl"
-    clocks_tcl.write_text(
-        _VIVADO_CLOCKS.format(
-            sys_period=job.plan.sys_period_ns,
-            input_port=job.board.SYS_CLK_PORT,
-            bufg=job.board.BUFG_NAME,
-            divide=2 * (job.plan.settle + 1),
-            settle=job.plan.settle,
-            settle_minus_1=job.plan.settle - 1,
-            register_command=project_clock_command("register"),
-            gate_command=project_clock_command("gate"),
-        )
-    )
+    clocks_tcl.write_text(vivado_clocks_tcl(job.plan, job.board, out))
 
     def braced(paths: list[Path]) -> str:
         return " ".join("{" + str(p) + "}" for p in paths)
@@ -1131,24 +1449,35 @@ def _vivado_script(job: _Job, files: list[Path], dirs: list[Path]) -> Path:
 
 _PAIR_REPORT = re.compile(r"^(?P<a>.+)-to-(?P<b>.+)-setup\.rpt$")
 _REQUIREMENT_LINE = re.compile(r"^\s*Requirement:\s+(-?[\d.]+)ns", re.MULTILINE)
+_NO_PATHS_LINE = re.compile(r"^No timing paths found\.\s*$", re.MULTILINE)
 
 
-def _requirement_lines(out: Path) -> list[str]:
-    """`tt-harness requirement:` lines: the first (worst) setup path of each pair report."""
+def _pair_report_lines(out: Path) -> list[str]:
+    """What each pair's setup report says, as lines for `parse_vivado`.
+
+    `tt-harness requirement:` gives the requirement of the first (worst) path;
+    `tt-harness no paths:` a report that says there are none.
+    """
     lines = []
     for report in sorted(out.glob("*-to-*-setup.rpt")):
         m = _PAIR_REPORT.match(report.name)
-        req = _REQUIREMENT_LINE.search(report.read_text(errors="replace"))
-        if m and req:
+        if m is None:
+            continue
+        text = report.read_text(errors="replace")
+        req = _REQUIREMENT_LINE.search(text)
+        if req:
             lines.append(f"tt-harness requirement: {m['a']} -> {m['b']} setup {req.group(1)} ns")
+        elif _NO_PATHS_LINE.search(text):
+            lines.append(f"tt-harness no paths: {m['a']} -> {m['b']}")
     return lines
 
 
 def _vivado_implement(job: _Job) -> str:
     """Synthesise, implement and write the bitstream; return the timing summary.
 
-    The returned text starts with the `tt-harness project clock:` and `tt-harness
-    requirement:` lines of the run.
+    The returned text starts with the run's `tt-harness clock root:`, `tt-harness clock
+    contributor:` and `tt-harness project clock:` lines and the lines of
+    `_pair_report_lines`.
     """
     settings = tools.vivado_settings()
     if settings is None:
@@ -1222,8 +1551,13 @@ def _vivado_implement(job: _Job) -> str:
     timing_rpt = out / "timing.rpt"
     if not timing_rpt.is_file():
         raise BuildError(f"{project_id}: Vivado wrote no timing report", job.log)
-    mapping = [ln for ln in text.splitlines() if ln.startswith("tt-harness project clock: ")]
-    return "\n".join([*mapping, *_requirement_lines(out)]) + "\n" + timing_rpt.read_text()
+    prefixes = (
+        pc.ROOT_PREFIX,
+        pc.CONTRIBUTOR_PREFIX,
+        _VIVADO_PROJECT_CLOCK_PREFIX,
+    )
+    mapping = [ln for ln in text.splitlines() if ln.startswith(prefixes)]
+    return "\n".join([*mapping, *_pair_report_lines(out)]) + "\n" + timing_rpt.read_text()
 
 
 def _vivado_bitstream(job: _Job) -> None:
@@ -1243,14 +1577,23 @@ _FLOWS = {
 }
 
 # Outputs of an earlier build in the same directory that must not be mistaken for this one's.
-_STALE = ("timing.rpt", "clocks.rpt", "utilization.rpt", "nextpnr.log", "vivado.log")
+_STALE = (
+    "timing.rpt",
+    "clocks.rpt",
+    "utilization.rpt",
+    "nextpnr.log",
+    "vivado.log",
+    "clock-roots.txt",
+    "project-clocks.tcl",
+)
 
 
 def _remove_stale(out_dir: Path, names: tuple[str, ...]) -> None:
     for name in (*_STALE, *names):
         (out_dir / name).unlink(missing_ok=True)
-    for report in out_dir.glob("*-to-*-*.rpt"):
-        report.unlink()
+    for pattern in ("*-to-*-*.rpt", "vivado_*.backup.log"):
+        for stale in out_dir.glob(pattern):
+            stale.unlink()
     shutil.rmtree(out_dir / "src-nettype-wire", ignore_errors=True)
 
 
@@ -1343,6 +1686,7 @@ def build_compare(
     job.unchecked_bit.rename(bitstream)
     clocks_made = project_clocks(timing)
 
+    tool = TOOL_NAMES[toolchain]
     limitations = []
     if toolchain == "openxc7":
         limitations += [LIMIT_NO_HOLD, LIMIT_CROSS_BUDGET]
@@ -1355,16 +1699,26 @@ def build_compare(
                     "cells as rising, so it was constrained at twice its frequency"
                 )
     for key, d in sorted(timing.items()):
+        if d.kind != "project":
+            continue
+        clock = key.removeprefix(PROJECT)
+        if not d.signed_off:
+            limitations.append(
+                LIMIT_NOT_SIGNED_OFF.format(tool=tool, clock=clock, reason=d.root_reason)
+            )
+        elif d.root_kind == pc.REGISTER and (d.root_gate_of or 0) > 1:
+            limitations.append(LIMIT_GATE.format(tool=tool, clock=clock, n=d.root_gate_of))
+    for key, d in sorted(timing.items()):
         if d.kind != "cross" and not d.intra_paths:
-            limitations.append(f"{toolchain}: {key} has no paths within its own clock")
+            limitations.append(LIMIT_NO_PATHS.format(tool=tool, key=key))
     if screen.latches:
         limitations.append(
             f"{screen.latches} latch(es) in the design, timed with their enable as a clock"
         )
     if bool(clocks_made) != bool(screen.derived_clocks):
         limitations.append(
-            f"pre-screen and {toolchain} disagree on clocks made in logic: pre-screen "
-            f"{screen.derived_clocks} derived clock(s), {toolchain} {list(clocks_made)}"
+            f"pre-screen and {tool} disagree on clocks made in logic: pre-screen "
+            f"{screen.derived_clocks} derived clock(s), {tool} {list(clocks_made)}"
         )
         _warn(log, limitations[-1])
     with log.open("a") as f:

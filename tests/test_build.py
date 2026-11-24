@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compare builds (`tt_harness.build`): timing-report parsers, the timing gate, real builds.
 
-The fixtures under tests/data/timing/ are excerpts of real tool output from compare builds of
-tt08/tt_um_tinytapeout_logo_screensaver for the Arty, on 2026-11-23:
+The fixtures under tests/data/timing/ are excerpts of real tool output from compare builds for
+the Arty: of tt08/tt_um_tinytapeout_logo_screensaver on 2026-11-23, and (the two dottee files,
+with the lines the flows add about clocks the project makes) of
+ttsky26a/tt_um_algofoogle_dottee on 2026-11-24:
 
 - nextpnr-arty-logo.log: nextpnr-xilinx 0.8.2, two clocks ('clk0' is sys, 'project.clk' is
   pclk; the clock-name column is padded), the pre-route and the post-route report.
@@ -18,11 +20,13 @@ import dataclasses
 import hashlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from tt_harness import build, cli, fetch, manifest, prescreen, tools, verilate
+from tt_harness import project_clocks as pc
 from tt_harness.boards import arty
 from tt_harness.build import ClockPlan, TimingError
 from tt_harness.fetch import Sources
@@ -118,14 +122,16 @@ def test_nextpnr_three_clocks_with_a_project_clock() -> None:
         vsync + "->pclk",
     }
     assert timing[vsync].kind == "project"
-    assert timing[vsync].achieved_mhz == 280.66
+    assert timing[vsync].achieved_mhz == 315.96
+    assert timing[vsync].root_kind == "register" and timing[vsync].signed_off
     assert timing[vsync].constraint_mhz == pytest.approx(PLAN.pclk_mhz)
     assert timing["sys"].kind == "sys" and timing["pclk"].kind == "pclk"
     assert timing[vsync + "->pclk"].kind == "cross"
-    # Between pclk and a project clock: one pclk period less the allowance (50 ns).
-    assert timing[vsync + "->pclk"].setup_slack_ns == pytest.approx(50.0 - 14.56)
+    # Between pclk and a register-made project clock, neither with falling-edge users: one
+    # pclk period less the allowance (50 ns).
+    assert timing[vsync + "->pclk"].setup_slack_ns == pytest.approx(50.0 - 13.32)
     # Between sys and a project clock: S system periods less the allowance (10 ns).
-    assert timing["sys->" + vsync].setup_slack_ns == pytest.approx(10.0 - 4.95)
+    assert timing["sys->" + vsync].setup_slack_ns == pytest.approx(10.0 - 4.76)
     assert build.project_clocks(timing) == ("project.uo_out[3]",)
     assert all(d.met for d in timing.values())
 
@@ -247,8 +253,11 @@ def test_vivado_report_with_a_project_clock() -> None:
         "sys->" + vsync + " (async_default)",  # recovery/removal of its `negedge rst_n`
     }
     assert timing[vsync].kind == "project"
-    assert timing[vsync].constraint_mhz == pytest.approx(PLAN.pclk_mhz, abs=1e-3)
-    assert timing[vsync].setup_slack_ns == 57.741
+    # A register-made clock: both edges on pclk rising edges, half pclk's frequency.
+    assert timing[vsync].root_kind == "register" and timing[vsync].signed_off
+    assert timing[vsync].constraint_mhz == pytest.approx(PLAN.pclk_mhz / 2, abs=1e-3)
+    assert timing[vsync].setup_slack_ns == 117.741
+    assert timing[vsync].requirement_ns == 120.0
     assert timing[vsync + "->pclk"].hold_slack_ns == 0.523
     assert timing["sys->" + vsync + " (async_default)"].setup_slack_ns == 18.795
     assert build.project_clocks(timing) == ("project/hvsync_gen/vsync_reg/Q",)
@@ -256,7 +265,9 @@ def test_vivado_report_with_a_project_clock() -> None:
 
 
 def test_vivado_project_clock_needs_its_mapping() -> None:
-    text = VIVADO_DOTTEE.split("\n", 1)[1]  # without the `tt-harness project clock:` line
+    lines = VIVADO_DOTTEE.splitlines()
+    assert lines[2].startswith("tt-harness project clock: project_clk0 on ")
+    text = "\n".join(lines[:2] + lines[3:]) + "\n"  # without that line
     with pytest.raises(TimingError, match="unexpected clock project_clk0"):
         build.parse_vivado(text, PLAN, LOG)
 
@@ -483,14 +494,21 @@ def _check_real(result: build.BuildResult, sources: Sources, toolchain: str) -> 
     for name in result.project_clocks:
         domain = result.timing[f"{build.PROJECT}{name}"]
         assert domain.kind == "project"
-        # openXC7: the pclk frequency (twice it if half-cycle). Vivado: a register-made clock
-        # has both edges on pclk rising edges (half pclk's frequency), a gate-made one pclk's.
-        allowed = (
-            [PLAN.pclk_mhz * (2 if domain.half_cycle else 1)]
-            if toolchain == "openxc7"
-            else [PLAN.pclk_mhz, PLAN.pclk_mhz / 2]
+        # The only project clock of the pool designs is dottee's vsync register: a flip-flop
+        # on pclk's rising edge. Vivado gives it both edges on pclk rising edges (half
+        # pclk's frequency); openXC7 the pclk frequency (twice it if half-cycle).
+        assert sources.project.id == DOTTEE_ID
+        assert domain.root_kind == "register"
+        assert domain.root_gate_of == 1
+        assert domain.signed_off
+        expected = (
+            PLAN.pclk_mhz / 2
+            if toolchain == "vivado"
+            else PLAN.pclk_mhz * (2 if domain.half_cycle else 1)
         )
-        assert any(domain.constraint_mhz == pytest.approx(f, abs=0.01) for f in allowed)
+        assert domain.constraint_mhz == pytest.approx(expected, abs=0.001)
+    assert all(d.signed_off for d in result.timing.values())
+    assert not any("not signed off" in item for item in result.limitations)
     # The pre-screen finds a clock made in logic exactly when the tools do.
     screen = prescreen.check(sources)
     assert screen.derived_clocks == result.prescreen_derived_clocks
@@ -713,27 +731,6 @@ def test_generated_top_is_immune_to_project_directives(tmp_path: Path) -> None:
     assert text.startswith("`default_nettype wire\n")
 
 
-def test_project_clock_commands() -> None:
-    reg = build.project_clock_command("register")
-    gate = build.project_clock_command("gate")
-    # A flip-flop's clock: both edges on rising edges of its C pin (divide by two).
-    assert "-edges {1 3 5}" in reg and "-source $master $root" in reg
-    assert "-divide_by" not in reg
-    # A gate: pclk's own waveform.
-    assert "-divide_by 1" in gate and "-edges" not in gate
-    tcl = build._VIVADO_CLOCKS.format(
-        sys_period=10.0,
-        input_port="clk100",
-        bufg="pclk_bufg",
-        divide=6,
-        settle=2,
-        settle_minus_1=1,
-        register_command=reg,
-        gate_command=gate,
-    )
-    assert reg in tcl and gate in tcl and "kind $kind" in tcl
-
-
 def test_vivado_achieved_from_pair_requirements() -> None:
     lines = (
         "tt-harness requirement: sys -> sys setup 10.000 ns\n"
@@ -749,45 +746,19 @@ def test_vivado_achieved_from_pair_requirements() -> None:
 
 def test_vivado_half_cycle_worst_path_uses_its_own_requirement() -> None:
     # If pclk's worst path were a 30 ns rise-to-fall path, the frequency is derived from
-    # that requirement, never from the 60 ns period.
+    # that requirement and scaled to the clock's period.
     text = VIVADO_PASS.replace("  pclk             48.768", "  pclk             18.768")
     lines = "tt-harness requirement: pclk -> pclk setup 30.000 ns\n"
     timing = build.parse_vivado(lines + text, PLAN, LOG)
-    assert timing["pclk"].achieved_mhz == pytest.approx(1000 / (30 - 18.768))
-
-
-def test_vivado_register_project_clock_has_twice_the_period() -> None:
-    # A register-made clock (-edges {1 3 5}) has period 120 ns; a gate-made one 60 ns.
-    reg = VIVADO_DOTTEE.replace(
-        "(master pin project/hvsync_gen/vsync_reg/C)",
-        "(master pin project/hvsync_gen/vsync_reg/C) kind register",
-    )
-    with pytest.raises(TimingError, match="period 60.0 ns, not 120.000"):
-        build.parse_vivado(reg, PLAN, LOG)
-    reg = reg.replace(
-        "    project_clk0  {0.000 30.000}     60.000          16.667",
-        "    project_clk0  {0.000 60.000}     120.000         8.333 ",
-    )
-    timing = build.parse_vivado(reg, PLAN, LOG)
-    assert timing["project:project/hvsync_gen/vsync_reg/Q"].constraint_mhz == pytest.approx(
-        1000 / 120
-    )
+    # 44.5 MHz: the clock frequency at which this half-cycle path just closes (Minor 3;
+    # it was 1000 / (30 - 18.768) = 89 MHz, not comparable with the 16.67 MHz constraint).
+    assert timing["pclk"].achieved_mhz == pytest.approx(PLAN.pclk_mhz * 30 / (30 - 18.768))
 
 
 def test_vivado_clock_with_setup_but_no_hold_figures_is_refused() -> None:
     text = VIVADO_PASS.replace("0.192", "   NA", 1)
     with pytest.raises(TimingError, match="only one of setup and hold"):
         build.parse_vivado(text, PLAN, LOG)
-
-
-def test_vivado_clock_without_paths_is_marked() -> None:
-    row = next(ln for ln in VIVADO_PASS.splitlines() if ln.startswith("  pclk ") and "48.768" in ln)
-    fields = row.split()
-    fields[1:9] = ["NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA"]
-    timing = build.parse_vivado(VIVADO_PASS.replace(row, "  " + "  ".join(fields)), PLAN, LOG)
-    assert timing["pclk"].intra_paths is False
-    assert timing["pclk"].achieved_mhz is None
-    assert timing["pclk"].met  # pulse width still checked
 
 
 OPPOSITE = "Info: Max delay posedge project.clk -> negedge project.clk: 40.00 ns\n"
@@ -823,31 +794,6 @@ def test_nextpnr_half_cycle_clock() -> None:
     wrong = _half_cycle(NEXTPNR_PASS).replace("(PASS at 33.33 MHz)", "(PASS at 16.67 MHz)")
     with pytest.raises(TimingError, match="timed at 16.67 MHz, not 33.333"):
         build.parse_nextpnr(wrong, PLAN, LOG)
-
-
-def _without_project_fmax(text: str) -> str:
-    pre, post = _post_route(text)
-    post = "\n".join(ln for ln in post.splitlines() if "'project.uo_out[3]':" not in ln)
-    return pre + post
-
-
-def test_nextpnr_project_clock_with_cells_but_no_fmax_fails() -> None:
-    text = NEXTPNR_DOTTEE.replace(
-        "16.666666666666668 MHz (clocks",
-        "16.666666666666668 MHz (cells 12 rising 12 falling 0 latches 0; clocks",
-    )
-    with pytest.raises(TimingError, match="project.uo_out.*12 clocked cells.*absent"):
-        build.parse_nextpnr(_without_project_fmax(text), PLAN, LOG)
-
-
-def test_nextpnr_project_clock_of_one_cell_has_no_intra_paths() -> None:
-    text = NEXTPNR_DOTTEE.replace(
-        "16.666666666666668 MHz (clocks",
-        "16.666666666666668 MHz (cells 1 rising 1 falling 0 latches 0; clocks",
-    )
-    timing = build.parse_nextpnr(_without_project_fmax(text), PLAN, LOG)
-    d = timing["project:project.uo_out[3]"]
-    assert d.intra_paths is False and d.achieved_mhz is None
 
 
 def test_undeclared_symbols(tmp_path: Path) -> None:
@@ -922,6 +868,665 @@ def test_build_compare_reports_prescreen_disagreement(
     assert "disagree" in capsys.readouterr().err
 
 
+# Fix 2 ---------------------------------------------------------------------------------------
+
+# A small nextpnr log in the format of a compare build of tests/data/projects/clocks (the
+# lines are from one, 2026-11-24, with the cell names shortened): pclk, sys and one
+# register-made project clock, none with falling-edge users.
+MINI_CLOCKS = (
+    "tt-harness clock: domain pclk net 'project_clk' 16.666666666666668 MHz "
+    "(cells 9 rising 9 falling 0 latches 0 intra yes; BUFG pclk_bufg)\n"
+    "tt-harness clock: domain sys net 'clk0' 100.0 MHz "
+    "(cells 113 rising 113 falling 0 latches 0 intra yes; BUFG sys_bufg from clk100)\n"
+    "tt-harness clock: domain project net 'project.div' 16.666666666666668 MHz "
+    "(cells 5 rising 5 falling 0 latches 0 intra yes; clocks ff.C)\n"
+)
+MINI_ROOTS = (
+    "tt-harness clock root: project.div\n"
+    "tt-harness clock contributor: project.div FDRE pclk rising direct no-async\n"
+)
+MINI_REPORT = (
+    "Info: Routing complete.\n"
+    "Info: Max frequency for clock 'project_clk': 287.36 MHz (PASS at 16.67 MHz)\n"
+    "Info: Max frequency for clock        'clk0': 235.13 MHz (PASS at 100.00 MHz)\n"
+    "Info: Max frequency for clock 'project.div': 1218.03 MHz (PASS at 16.67 MHz)\n"
+    "Info: Max delay posedge clk0        -> posedge project_clk: 4.04 ns\n"
+    "Info: Max delay posedge project_clk -> posedge clk0       : 0.92 ns\n"
+    "Info: Max delay posedge project.div -> posedge project_clk: 45.00 ns\n"
+    "Info: Max delay posedge project_clk -> posedge project.div: 1.01 ns\n"
+)
+MINI = MINI_CLOCKS + MINI_ROOTS + MINI_REPORT
+DIV = "project:project.div"
+
+
+def test_nextpnr_pair_without_falling_users_keeps_the_full_period() -> None:
+    timing = build.parse_nextpnr(MINI, PLAN, LOG)
+    # One pclk period less the allowance: 50 ns, as before.
+    assert timing[f"{DIV}->pclk"].setup_slack_ns == pytest.approx(50.0 - 45.0)
+    assert timing[f"{DIV}->pclk"].requirement_ns == pytest.approx(50.0)
+    assert timing[f"pclk->{DIV}"].setup_slack_ns == pytest.approx(50.0 - 1.01)
+    assert all(d.met for d in timing.values())
+    assert timing[DIV].root_kind == "register" and timing[DIV].signed_off
+    assert timing["pclk"].root_kind is None and timing["pclk"].signed_off
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        # nextpnr prints a falling-edge capture as `posedge`: any falling user of either
+        # clock halves the budget of the pair.
+        ("cells 9 rising 9 falling 0", "cells 9 rising 7 falling 2"),  # pclk has some
+        ("cells 5 rising 5 falling 0", "cells 5 rising 0 falling 5"),  # the project clock: all
+        ("cells 5 rising 5 falling 0", "cells 5 rising 4 falling 1"),
+    ],
+)
+def test_nextpnr_pair_with_a_falling_user_gets_half_the_period(old: str, new: str) -> None:
+    assert old in MINI
+    timing = build.parse_nextpnr(MINI.replace(old, new), PLAN, LOG)
+    d = timing[f"{DIV}->pclk"]
+    # Half a pclk period less the allowance: 20 ns. The 45 ns path does not fit.
+    assert d.requirement_ns == pytest.approx(20.0)
+    assert d.setup_slack_ns == pytest.approx(20.0 - 45.0)
+    assert not d.met
+    with pytest.raises(TimingError, match="timing not met in project:project.div->pclk"):
+        build.check(timing, PLAN, LOG)
+    assert timing[f"pclk->{DIV}"].requirement_ns == pytest.approx(20.0)
+    # Pairs with sys are S system periods less the allowance whatever the edges.
+    assert timing["sys->pclk"].requirement_ns == pytest.approx(10.0)
+
+
+def test_nextpnr_pair_with_unknown_edge_counts_gets_half_the_period() -> None:
+    old = " (cells 9 rising 9 falling 0 latches 0 intra yes; BUFG pclk_bufg)"
+    assert old in MINI
+    timing = build.parse_nextpnr(MINI.replace(old, " (BUFG pclk_bufg)"), PLAN, LOG)
+    assert timing[f"{DIV}->pclk"].requirement_ns == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize(
+    "contributor, kind, signed_off",
+    [
+        ("FDRE pclk falling direct no-async", "derived", True),
+        ("LDCE pclk rising direct no-async", "unclassified", False),
+    ],
+)
+def test_nextpnr_project_clock_with_edges_off_the_pclk_rising_edge(
+    contributor: str, kind: str, signed_off: bool
+) -> None:
+    text = MINI.replace("FDRE pclk rising direct no-async", contributor)
+    timing = build.parse_nextpnr(text, PLAN, LOG)
+    assert timing[DIV].root_kind == kind
+    assert timing[DIV].signed_off is signed_off
+    # Its edges may be on pclk falling edges: half a period either way.
+    assert timing[f"{DIV}->pclk"].requirement_ns == pytest.approx(20.0)
+    assert timing[f"pclk->{DIV}"].requirement_ns == pytest.approx(20.0)
+    assert not timing[f"{DIV}->pclk"].met
+
+
+def test_nextpnr_project_clock_without_root_facts_is_unclassified() -> None:
+    timing = build.parse_nextpnr(MINI_CLOCKS + MINI_REPORT, PLAN, LOG)
+    assert timing[DIV].root_kind == "unclassified"
+    assert not timing[DIV].signed_off
+    assert timing[f"{DIV}->pclk"].requirement_ns == pytest.approx(20.0)
+
+
+def _mini_without_fmax(cells: int, intra: str) -> str:
+    """MINI with project.div clocking `cells` cells, the given intra note, and no Fmax line."""
+    old = "(cells 5 rising 5 falling 0 latches 0 intra yes; clocks ff.C)"
+    new = f"(cells {cells} rising {cells} falling 0 latches 0{intra}; clocks ff.C)"
+    assert old in MINI
+    text = MINI.replace(old, new)
+    return "\n".join(ln for ln in text.splitlines() if "clock 'project.div':" not in ln) + "\n"
+
+
+@pytest.mark.parametrize(
+    "cells, intra, passes",
+    [
+        (1, " intra yes", False),  # one cell feeding itself: there are paths, none reported
+        (5, " intra yes", False),
+        (1, " intra no", True),
+        (5, " intra no", True),
+        (1, "", True),  # unknown: a single cell is taken to have none
+        (5, "", False),
+    ],
+)
+def test_nextpnr_clock_without_fmax_line(cells: int, intra: str, passes: bool) -> None:
+    text = _mini_without_fmax(cells, intra)
+    if not passes:
+        with pytest.raises(
+            TimingError,
+            match=rf"project.div \({cells} clocked cells.*absent from the timing report",
+        ):
+            build.parse_nextpnr(text, PLAN, LOG)
+        return
+    d = build.parse_nextpnr(text, PLAN, LOG)[DIV]
+    assert d.intra_paths is False and d.achieved_mhz is None and d.met
+    assert d.root_kind == "register"
+
+
+def test_prepack_counts_a_self_connection_as_an_intra_clock_path() -> None:
+    # The pre-pack script is run by nextpnr; here its netlist walk runs on stand-in objects.
+    class Net:
+        def __init__(self, name: str) -> None:
+            self.name, self.driver = name, None
+
+    class Ref:
+        def __init__(self, cell, port: str) -> None:
+            self.cell, self.port = cell, port
+
+    class Port:
+        def __init__(self, net) -> None:
+            self.net = net
+
+    class Cell:
+        def __init__(self, name: str, kind: str, **ports) -> None:
+            self.name, self.type, self.params = name, kind, []
+            self.ports = Cells({p: Port(n) for p, n in ports.items()})
+
+    class Cells(dict):
+        def __iter__(self):
+            return iter(self.items())
+
+    class Ctx:
+        def __init__(self, cells) -> None:
+            self.cells = Cells({c.name: c for c in cells})
+
+        def addClock(self, net: str, mhz: float) -> None:
+            pass
+
+    def run(loop: bool) -> str:
+        clk100, clk_i, sys, pclk_d, pclk = (
+            Net(n) for n in ("clk100", "i", "clk0", "d", "project_clk")
+        )
+        slow, q, other = Net("slow"), Net("q"), Net("other")
+        ibuf = Cell("ibuf", "IBUF", I=clk100, O=clk_i)
+        sys_bufg = Cell("sys_bufg", "BUFG", I=clk_i, O=sys)
+        pclk_reg = Cell("pclk_reg", "FDRE", C=sys, D=pclk_d, Q=pclk_d)
+        pclk_bufg = Cell("pclk_bufg", "BUFG", I=pclk_d, O=pclk)
+        slow_reg = Cell("slow_reg", "FDRE", C=pclk, D=slow, Q=slow)
+        # One cell on `slow`: Q back into its own CE (loop) or CE from a pclk cell (no loop).
+        user = Cell("user", "FDRE", C=slow, D=other, CE=q if loop else slow, Q=q)
+        feeder = Cell("feeder", "FDRE", C=pclk, D=other, Q=other)
+        for net, cell, port in [
+            (clk_i, ibuf, "O"),
+            (sys, sys_bufg, "O"),
+            (pclk_d, pclk_reg, "Q"),
+            (pclk, pclk_bufg, "O"),
+            (slow, slow_reg, "Q"),
+            (q, user, "Q"),
+            (other, feeder, "Q"),
+        ]:
+            net.driver = Ref(cell, port)
+        ctx = Ctx([ibuf, sys_bufg, pclk_reg, pclk_bufg, slow_reg, user, feeder])
+        out: list[str] = []
+        script = build._PREPACK.format(
+            input_port="clk100", sys_mhz=100.0, pclk_bufg="pclk_bufg", pclk_mhz=PLAN.pclk_mhz
+        )
+        scope = {"ctx": ctx, "print": lambda *a: out.append(" ".join(map(str, a)))}
+        exec(script, scope)  # noqa: S102 (the script nextpnr runs, on stand-in objects)
+        return "\n".join(out) + "\n"
+
+    looped, plain = run(True), run(False)
+    assert "net 'slow'" in looped and "cells 1 rising 1 falling 0 latches 0 intra yes" in looped
+    assert "cells 1 rising 1 falling 0 latches 0 intra no" in plain
+    # The same walk reports what drives each project clock.
+    assert "tt-harness clock root: slow\n" in plain
+    assert "tt-harness clock contributor: slow FDRE pclk rising direct no-async\n" in plain
+    assert pc.classify(pc.parse_roots(plain))["slow"].kind == "register"
+
+
+def test_requirement_ns() -> None:
+    assert PLAN.requirement_ns("sys", "sys") == pytest.approx(10.0)
+    assert PLAN.requirement_ns("sys", "sys", same_edge=False) == pytest.approx(5.0)
+    assert PLAN.requirement_ns("sys", "pclk") == pytest.approx(20.0)
+    assert PLAN.requirement_ns("project", "sys", same_edge=False) == pytest.approx(20.0)
+    assert PLAN.requirement_ns("pclk", "pclk") == pytest.approx(60.0)
+    assert PLAN.requirement_ns("pclk", "project", same_edge=False) == pytest.approx(30.0)
+
+
+def test_nextpnr_sys_opposite_edge_path_is_gated_at_half_a_system_period() -> None:
+    line = "Info: Max delay posedge clk0 -> negedge clk0: 0.50 ns\n"
+    timing = build.parse_nextpnr(MINI + line, PLAN, LOG)
+    d = timing["sys->sys (opposite edges)"]
+    # 5 ns less the 10 ns allowance: no budget at all, so it cannot pass.
+    assert d.requirement_ns == pytest.approx(-5.0)
+    assert not d.met
+
+
+# Vivado: the logo report with one project clock added, as the flow would report it.
+
+
+def _vivado_with_project_clock(kind: str, row: str, extra: str = "") -> str:
+    """VIVADO_PASS plus `project_clk0` of root class `kind` with intra-clock row `row`."""
+    period, wave = (
+        ("120.000", "{0.000 60.000}") if kind == "register" else ("60.000", "{0.000 30.000}")
+    )
+    contributor = {
+        "register": "FDRE pclk rising direct no-async",
+        "derived": "FDRE pclk falling direct no-async",
+        "unclassified": "LDCE pclk falling direct no-async",
+    }[kind]
+    head = (
+        "tt-harness clock root: project/x_reg/Q\n"
+        f"tt-harness clock contributor: project/x_reg/Q {contributor}\n"
+        f"tt-harness project clock: project_clk0 on project/x_reg/Q kind {kind}\n" + extra
+    )
+    summary = next(ln for ln in VIVADO_PASS.splitlines() if ln.startswith("  pclk ") and "{" in ln)
+    intra = next(
+        ln for ln in VIVADO_PASS.splitlines() if ln.startswith("  pclk ") and "48.768" in ln
+    )
+    text = VIVADO_PASS.replace(
+        summary, f"{summary}\n    project_clk0  {wave}     {period}          8.333"
+    )
+    return head + text.replace(intra, f"{intra}\n    project_clk0  {row}")
+
+
+NO_PATHS_ROW = "                                        29.500        0.000        0        12"
+PATHS_ROW = "57.741  0.000  0  12  0.292  0.000  0  12  29.500  0.000  0  12"
+X = "project:project/x_reg/Q"
+
+
+@pytest.mark.parametrize(
+    "kind, mhz, signed_off",
+    [
+        ("register", 1000 / 120, True),
+        ("derived", 1000 / 60, True),
+        ("unclassified", 1000 / 60, False),
+    ],
+)
+def test_vivado_project_clock_records_its_root(kind: str, mhz: float, signed_off: bool) -> None:
+    timing = build.parse_vivado(_vivado_with_project_clock(kind, PATHS_ROW), PLAN, LOG)
+    d = timing[X]
+    assert d.root_kind == kind
+    assert d.signed_off is signed_off
+    assert d.constraint_mhz == pytest.approx(mhz)
+    assert timing["pclk"].root_kind is None and timing["pclk"].signed_off
+    line = build.describe(d)
+    assert f"{kind} clock" in line
+    assert ("NOT SIGNED OFF" in line) == (not signed_off)
+
+
+def test_vivado_project_clock_period_must_match_its_kind() -> None:
+    text = _vivado_with_project_clock("register", PATHS_ROW).replace("120.000   ", "60.000    ")
+    with pytest.raises(TimingError, match="period 60.0 ns, not 120.000"):
+        build.parse_vivado(text, PLAN, LOG)
+
+
+def test_vivado_project_clock_kind_must_match_its_root_facts() -> None:
+    # Constrained as a register clock, but the root is made on pclk's falling edge.
+    text = _vivado_with_project_clock("register", PATHS_ROW).replace(
+        "FDRE pclk rising direct", "FDRE pclk falling direct"
+    )
+    with pytest.raises(TimingError, match="constrained as register.*derived"):
+        build.parse_vivado(text, PLAN, LOG)
+    text = "\n".join(_vivado_with_project_clock("register", PATHS_ROW).splitlines()[2:]) + "\n"
+    with pytest.raises(TimingError, match="no clock root facts"):
+        build.parse_vivado(text, PLAN, LOG)
+
+
+def test_vivado_project_clock_line_in_another_format_is_refused() -> None:
+    text = _vivado_with_project_clock("register", PATHS_ROW).replace(
+        "on project/x_reg/Q kind register",
+        "on project/x_reg/Q from project/x_reg/Q (master pin project/x_reg/C) kind gate",
+    )
+    with pytest.raises(TimingError, match="cannot read"):
+        build.parse_vivado(text, PLAN, LOG)
+
+
+NO_PATHS = "tt-harness no paths: project_clk0 -> project_clk0\n"
+
+
+def test_vivado_project_clock_without_paths_needs_the_pair_report_to_agree() -> None:
+    text = _vivado_with_project_clock("register", NO_PATHS_ROW, NO_PATHS)
+    d = build.parse_vivado(text, PLAN, LOG)[X]
+    assert d.intra_paths is False and d.achieved_mhz is None and d.met
+    # Without the pair report saying so, an empty row is not "no paths".
+    text = _vivado_with_project_clock("register", NO_PATHS_ROW)
+    with pytest.raises(TimingError, match="project_clk0 has no setup or hold figures"):
+        build.parse_vivado(text, PLAN, LOG)
+    # NA in every column is the same.
+    na = "NA  NA  NA  NA  NA  NA  NA  NA  29.500  0.000  0  12"
+    with pytest.raises(TimingError, match="project_clk0 has no setup or hold figures"):
+        build.parse_vivado(_vivado_with_project_clock("register", na), PLAN, LOG)
+    assert not build.parse_vivado(_vivado_with_project_clock("register", na, NO_PATHS), PLAN, LOG)[
+        X
+    ].intra_paths
+
+
+@pytest.mark.parametrize("clock", ["sys", "pclk"])
+def test_vivado_sys_and_pclk_are_never_accepted_without_paths(clock: str) -> None:
+    # Doctored copies of the real report: the clock's own row emptied, as Vivado prints a
+    # clock without paths, with and without a pair-report line claiming there are none.
+    row = next(
+        ln for ln in VIVADO_PASS.splitlines() if ln.split()[:1] == [clock] and len(ln.split()) == 13
+    )
+    fields = row.split()
+    empty = f"{fields[0]}  " + NO_PATHS_ROW
+    na = "  ".join([fields[0], *["NA"] * 8, *fields[9:]])
+    for doctored in (empty, na):
+        for head in ("", f"tt-harness no paths: {clock} -> {clock}\n"):
+            with pytest.raises(TimingError, match=f"{clock} has no setup or hold figures"):
+                build.parse_vivado(head + VIVADO_PASS.replace(row, doctored), PLAN, LOG)
+
+
+def test_no_path_lines_come_from_the_pair_reports(tmp_path: Path) -> None:
+    (tmp_path / "project_clk0-to-project_clk0-setup.rpt").write_text(
+        "Timing Report\n\nNo timing paths found.\n"
+    )
+    (tmp_path / "pclk-to-pclk-setup.rpt").write_text(
+        "Slack (MET) :  1.0ns\n  Requirement:            60.000ns  (pclk rise@60.000ns - ...)\n"
+    )
+    (tmp_path / "sys-to-pclk-hold.rpt").write_text("No timing paths found.\n")
+    assert build._pair_report_lines(tmp_path) == [
+        "tt-harness requirement: pclk -> pclk setup 60.000 ns",
+        "tt-harness no paths: project_clk0 -> project_clk0",
+    ]
+
+
+def test_describe_never_prints_an_incomparable_frequency() -> None:
+    # A clock whose worst path is a half-cycle one: the frequency is the one the clock could
+    # run at (twice the path's delay as a period), and the line says so.
+    text = VIVADO_PASS.replace("  pclk             48.768", "  pclk             18.768")
+    lines = "tt-harness requirement: pclk -> pclk setup 30.000 ns\n"
+    d = build.parse_vivado(lines + text, PLAN, LOG)["pclk"]
+    assert d.requirement_ns == 30.0
+    assert d.achieved_mhz == pytest.approx(PLAN.pclk_mhz * 30 / (30 - 18.768))  # 44.5, not 89
+    line = build.describe(d)
+    assert "44.52 MHz achieved against 16.67 MHz" in line
+    assert "worst setup path has a 30.000 ns requirement" in line
+    # A clock pair is a requirement in ns, never a frequency.
+    lines = (
+        "tt-harness requirement: sys -> pclk setup 20.000 ns\n"
+        "tt-harness requirement: pclk -> sys setup 20.000 ns\n"
+    )
+    timing = build.parse_vivado(lines + VIVADO_PASS, PLAN, LOG)
+    for key in ("sys->pclk", "pclk->sys"):
+        line = build.describe(timing[key])
+        assert "MHz" not in line
+        assert line.startswith("requirement 20.000 ns, setup slack ")
+    # nextpnr pairs too: the budget in ns.
+    line = build.describe(build.parse_nextpnr(MINI, PLAN, LOG)[f"{DIV}->pclk"])
+    assert "MHz" not in line and line.startswith("requirement 50.000 ns, setup slack 5.000 ns")
+
+
+def test_vivado_pair_constraint_is_its_worst_paths_requirement() -> None:
+    # A pair whose worst path has a 30 ns requirement (to a falling edge) is not printed or
+    # scaled against 60 ns.
+    lines = "tt-harness requirement: sys -> pclk setup 30.000 ns\n"
+    d = build.parse_vivado(lines + VIVADO_PASS, PLAN, LOG)["sys->pclk"]
+    assert d.requirement_ns == 30.0
+    assert d.constraint_mhz == pytest.approx(1000 / 30)
+    assert d.achieved_mhz == pytest.approx(1000 / (30 - 17.283))
+
+
+def test_undeclared_symbols_ignores_names_in_initialisers_and_comments(tmp_path: Path) -> None:
+    src = tmp_path / "a.v"
+    src.write_text(
+        "module a(input wire clk, input wire [1:0] sel,\n"
+        "         output reg [3:0] q);\n"
+        "  wire y = ghost & sel[0];\n"
+        "  wire [3:0] z = {phantom, 3'b0}, w;\n"
+        "  // wire commented;\n"
+        "  /* reg blocked; */\n"
+        "  localparam [3:0] K = spectre, L = 4'd2;\n"
+        "  reg [7:0] mem [0:3];\n"
+        "  integer i;\n"
+        "endmodule\n"
+    )
+    names = ["clk", "sel", "q", "y", "z", "w", "K", "L", "mem", "i"]
+    ghosts = ["ghost", "phantom", "commented", "blocked", "spectre"]
+    log = "".join(
+        f"WARNING: [Synth 8-11241] undeclared symbol '{n}', assumed default net type 'wire'\n"
+        for n in names + ghosts
+    )
+    assert build.undeclared_symbols(log, [src]) == sorted(ghosts)
+
+
+def _clock_report(kind: str) -> str:
+    contributor = (
+        "LDCE pclk rising direct no-async"
+        if kind == "unclassified"
+        else (
+            "FDRE pclk rising direct no-async\n"
+            "tt-harness clock contributor: project.div FDRE pclk rising direct no-async"
+        )
+    )
+    return MINI.replace("FDRE pclk rising direct no-async", contributor)
+
+
+def test_build_compare_flags_a_clock_that_is_not_signed_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report = _clock_report("unclassified").replace("45.00 ns", "4.50 ns")
+    _fake_flow(monkeypatch, "openxc7", report)
+    screen = prescreen.Prescreen(0, 0, 1, True, Path("prescreen.log"))
+    monkeypatch.setattr(build.prescreen, "check", lambda sources, out_dir=None: screen)
+    s = _counter()
+    result = build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
+    assert result.bitstream.is_file()  # built and flagged, not refused
+    d = result.timing[DIV]
+    assert d.root_kind == "unclassified" and not d.signed_off
+    assert (
+        "openXC7: project clock project.div is not signed off: a LDCE, not a flip-flop, drives "
+        "it; it was timed as a clock with edges on either pclk edge, which is an assumption"
+    ) in result.limitations
+    assert "tt-harness limitation: openXC7: project clock project.div is not signed off" in (
+        result.log.read_text()
+    )
+    assert "NOT SIGNED OFF" in result.log.read_text()
+
+
+def test_build_compare_limitations_for_a_signed_off_gate_clock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report = _clock_report("register")
+    lines = [ln for ln in report.splitlines() if "clock 'project.div':" not in ln]
+    report = "\n".join(lines).replace("intra yes; clocks ff.C", "intra no; clocks ff.C") + "\n"
+    _fake_flow(monkeypatch, "openxc7", report)
+    screen = prescreen.Prescreen(0, 0, 1, True, Path("prescreen.log"))
+    monkeypatch.setattr(build.prescreen, "check", lambda sources, out_dir=None: screen)
+    s = _counter()
+    result = build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
+    assert result.timing[DIV].signed_off
+    assert not any("not signed off" in item for item in result.limitations)
+    assert (
+        "openXC7: project clock project.div is a gate of 2 flip-flops; a glitch at the gate is "
+        "not timed"
+    ) in result.limitations
+    # The toolchain is named the same way in every entry.
+    assert "openXC7: project:project.div has no paths within its own clock" in result.limitations
+    assert not any(item.startswith("openxc7") for item in result.limitations)
+
+
+def test_build_compare_removes_stale_vivado_backup_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stale = ["vivado_12345.backup.log", "clock-roots.txt", "project-clocks.tcl"]
+    for name in stale:
+        (tmp_path / name).write_text("from an earlier build")
+    seen: list[str] = []
+
+    def implement(job) -> str:
+        seen.extend(p.name for p in tmp_path.iterdir())
+        job.unchecked_bit.write_bytes(b"bit")
+        return NEXTPNR_PASS
+
+    _fake_flow(monkeypatch, "openxc7", NEXTPNR_PASS)
+    flow = dataclasses.replace(build._FLOWS["openxc7"], implement=implement)
+    monkeypatch.setitem(build._FLOWS, "openxc7", flow)
+    s = _counter()
+    build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
+    assert not set(stale) & set(seen)
+
+
+def test_vivado_clock_script_collects_roots_and_runs_the_classifier(tmp_path: Path) -> None:
+    tcl = build.vivado_clocks_tcl(PLAN, arty, tmp_path)
+    assert "create_clock -name sys -period 10.000 [get_ports clk100]" in tcl
+    assert "create_generated_clock -name pclk -divide_by 6" in tcl
+    # Facts for every root, then the constraints written from them by project_clocks.py.
+    assert 'tt_fact "tt-harness clock root: $root"' in tcl
+    assert "all_fanin -quiet -flat -only_cells $root" in tcl
+    roots, out = tmp_path / "clock-roots.txt", tmp_path / "project-clocks.tcl"
+    script = Path(pc.__file__)
+    assert (
+        f"exec /usr/bin/env -i {{{sys.executable}}} -I {{{script}}} {{{roots}}} {{{out}}} "
+        "pclk_bufg/O 60.000"
+    ) in tcl
+    assert f"source {{{out}}}" in tcl
+    assert tcl.index("close $tt_facts") < tcl.index("exec ") < tcl.index(f"source {{{out}}}")
+    # No project-clock waveform is chosen in this script any more.
+    assert "-edges" not in tcl and "kind gate" not in tcl
+    # The approved sys <-> pclk relationship, applied to pclk and every project clock.
+    for line in (
+        "set_multicycle_path -setup -start 2 -from [get_clocks sys] -to $c",
+        "set_multicycle_path -hold -start 2 -from [get_clocks sys] -to $c",
+        "set_multicycle_path -setup -end 2 -from $c -to [get_clocks sys]",
+        "set_multicycle_path -hold -end 1 -from $c -to [get_clocks sys]",
+    ):
+        assert line in tcl
+
+
+# Real builds of the project-clock designs ------------------------------------------------------
+
+CLOCKS = ("clocks", "tt_um_test_clocks")  # register-class clocks: gate, ripple, two registers
+FALLCLK = ("fallclk", "tt_um_test_fallclk")  # a falling-edge register clock and a latch clock
+FALLREG = ("fallreg", "tt_um_test_fallreg")  # the falling-edge register clock alone
+
+
+def _pair_requirements(out: Path, a: str, b: str, tag: str) -> list[tuple[float, str]]:
+    """(requirement ns, the rest of the line) of every path in a pair report."""
+    report = (out / f"{a}-to-{b}-{tag}.rpt").read_text()
+    return [
+        (float(m.group(1)), m.group(2))
+        for m in re.finditer(r"Requirement:\s+(-?[\d.]+)ns\s+\((.*)\)", report)
+    ]
+
+
+def _vivado_names(result: build.BuildResult) -> dict[str, str]:
+    """Signal name -> Vivado clock name, from the build log's mapping lines."""
+    names = {}
+    for m in build._VIVADO_PROJECT_CLOCK.finditer(result.log.read_text()):
+        names[m.group("root")] = m.group("name")
+    return names
+
+
+@pytest.mark.vivado
+@pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
+def test_real_build_vivado_register_class_clocks() -> None:
+    _, result = _local_build(CLOCKS, "vivado")
+    out = result.bitstream.parent
+    names = _vivado_names(result)
+    by_signal = {}
+    for root, name in names.items():
+        signal = next(s for s in ("capg", "div2", "div", "r2") if f"/{s}" in root)
+        by_signal[signal] = (root, name)
+    assert set(by_signal) == {"capg", "div2", "div", "r2"}, names
+    # pclk -> the falling edge of the gate-made and of the ripple-stage clock: those edges
+    # are on pclk rising edges, so the hold requirement is 0 ns (pclk's own waveform gave
+    # -30 ns) and setup is a whole pclk period.
+    for signal in ("capg", "div2"):
+        _, name = by_signal[signal]
+        hold = [r for r in _pair_requirements(out, "pclk", name, "hold") if "fall@" in r[1]]
+        assert hold, f"no hold path to the falling edge of {name}"
+        assert all(abs(req) < 0.001 for req, _ in hold), hold
+        setup = [r for r in _pair_requirements(out, "pclk", name, "setup") if "fall@" in r[1]]
+        assert setup and all(req == 60.0 for req, _ in setup), setup
+    # Two different register-made clocks: `capx` on r2 takes `a` from the div domain. r2 can
+    # rise one pclk period after div, so setup is 60 ns (not 120), and hold stays analysed
+    # at 0 ns.
+    div, r2 = by_signal["div"][1], by_signal["r2"][1]
+    setup = _pair_requirements(out, div, r2, "setup")
+    assert setup and all(req == 60.0 for req, _ in setup), setup
+    hold = _pair_requirements(out, div, r2, "hold")
+    assert hold and all(req == 0.0 for req, _ in hold), hold
+    pair = result.timing[
+        f"{build.PROJECT}{by_signal['div'][0]}->{build.PROJECT}{by_signal['r2'][0]}"
+    ]
+    assert pair.requirement_ns == 60.0
+    assert pair.hold_slack_ns is not None and pair.met
+    # Every project clock is register class, at half pclk's frequency, and signed off.
+    assert len(result.project_clocks) == 4
+    for root in result.project_clocks:
+        d = result.timing[f"{build.PROJECT}{root}"]
+        assert d.root_kind == "register" and d.signed_off
+        assert d.constraint_mhz == pytest.approx(PLAN.pclk_mhz / 2)
+    assert not any("not signed off" in item for item in result.limitations)
+    gate_root = by_signal["capg"][0]
+    assert (
+        f"Vivado: project clock {gate_root} is a gate of 2 flip-flops; a glitch at the gate is "
+        "not timed"
+    ) in result.limitations
+
+
+@pytest.mark.vivado
+@pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
+def test_real_build_vivado_clocks_off_the_pclk_rising_edge() -> None:
+    _, result = _local_build(FALLCLK, "vivado")
+    out = result.bitstream.parent
+    names = _vivado_names(result)
+    (nq_root,) = [r for r in names if "/nq" in r]
+    (lq_root,) = [r for r in names if "/lq" in r]
+    nq, lq = result.timing[f"{build.PROJECT}{nq_root}"], result.timing[f"{build.PROJECT}{lq_root}"]
+    assert nq.root_kind == "derived" and nq.signed_off
+    assert lq.root_kind == "unclassified" and not lq.signed_off
+    assert nq.constraint_mhz == pytest.approx(PLAN.pclk_mhz)
+    assert lq.constraint_mhz == pytest.approx(PLAN.pclk_mhz)
+    # Their edges may be on either pclk edge: half a pclk period for setup and the same edge
+    # for hold, on every path between pclk and them.
+    for root in (nq_root, lq_root):
+        setup = _pair_requirements(out, "pclk", names[root], "setup")
+        assert setup and all(req == 30.0 for req, _ in setup), setup
+        hold = _pair_requirements(out, "pclk", names[root], "hold")
+        assert hold and all(req == 0.0 for req, _ in hold), hold
+    assert [item for item in result.limitations if "not signed off" in item] == [
+        (
+            f"Vivado: project clock {lq_root} is not signed off: a LDCE, not a flip-flop, "
+            "drives it; it was timed as a clock with edges on either pclk edge, which is an "
+            "assumption"
+        )
+    ]
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(not _openxc7_installed(), reason="openXC7 toolchain not installed")
+def test_real_build_openxc7_register_class_clocks() -> None:
+    _, result = _local_build(CLOCKS, "openxc7")
+    assert len(result.project_clocks) == 4
+    for root in result.project_clocks:
+        d = result.timing[f"{build.PROJECT}{root}"]
+        assert d.root_kind == "register" and d.signed_off, (root, d)
+    # pclk has a falling-edge user (`nf`), and two project clocks have only falling-edge
+    # users: every pair among pclk and the project clocks is budgeted at half a period.
+    pairs = {
+        k: d for k, d in result.timing.items() if d.kind == "cross" and "sys" not in k.split("->")
+    }
+    with_pclk = {k: d for k, d in pairs.items() if "pclk" in k.split("->")}
+    assert with_pclk
+    assert all(d.requirement_ns == pytest.approx(20.0) for d in with_pclk.values()), with_pclk
+    # `div` and `r2` have rising-edge users only: a whole period between them.
+    (div_r2,) = [d for k, d in pairs.items() if "div->" in k and k.endswith("r2")]
+    assert div_r2.requirement_ns == pytest.approx(50.0)
+    assert not any("not signed off" in item for item in result.limitations)
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(not _openxc7_installed(), reason="openXC7 toolchain not installed")
+def test_real_build_openxc7_clock_made_on_the_pclk_falling_edge() -> None:
+    # (The latch of the fallclk design cannot be placed by nextpnr-xilinx: "no Bels
+    # remaining of type 'LDCE'".)
+    _, result = _local_build(FALLREG, "openxc7")
+    (root,) = result.project_clocks
+    d = result.timing[f"{build.PROJECT}{root}"]
+    assert d.root_kind == "derived" and d.signed_off
+    assert "falling edge of pclk" in d.root_reason
+    # Its edges are on pclk falling edges: half a period, less the allowance, both ways.
+    pairs = {
+        k: v for k, v in result.timing.items() if v.kind == "cross" and "sys" not in k.split("->")
+    }
+    assert pairs
+    assert all(v.requirement_ns == pytest.approx(20.0) for v in pairs.values()), pairs
+    assert not any("not signed off" in item for item in result.limitations)
+
+
 # Real builds of the local test designs ---------------------------------------------------------
 
 
@@ -970,6 +1575,11 @@ def test_real_build_openxc7_negedge_of_a_register_clock() -> None:
     assert len(result.project_clocks) == 1
     assert not result.timing["pclk"].half_cycle  # pclk itself is used on its rising edge
     assert build.LIMIT_LOCAL_CLOCKS in result.limitations
+    (root,) = result.project_clocks
+    assert result.timing[f"{build.PROJECT}{root}"].root_kind == "register"
+    # The project clock has falling-edge users only (`rising 0 falling 4`): pclk -> it is
+    # budgeted at half a pclk period less the allowance, not at 50 ns.
+    assert result.timing[f"pclk->{build.PROJECT}{root}"].requirement_ns == pytest.approx(20.0)
 
 
 @pytest.mark.vivado
@@ -990,6 +1600,7 @@ def test_real_build_vivado_negedge_of_a_register_clock_is_timed_tightly() -> Non
     (root,) = result.project_clocks
     clock = result.timing[f"{build.PROJECT}{root}"]
     assert clock.constraint_mhz == pytest.approx(PLAN.pclk_mhz / 2)  # -edges {1 3 5}
+    assert clock.root_kind == "register" and clock.signed_off
     # pclk -> the project clock's falling edge: that edge lies on a pclk rising edge, so the
     # hold requirement is 0 (pclk's own falling edge would have given -30 ns).
     report = (result.bitstream.parent / "pclk-to-project_clk0-hold.rpt").read_text()
