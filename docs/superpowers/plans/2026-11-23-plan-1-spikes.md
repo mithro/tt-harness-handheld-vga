@@ -288,3 +288,31 @@ At most three implementers at once.
 ## Not in this plan
 
 The SoC and firmware, VGA capture and framebuffer, gamepad emulator, 7-segment, audio, the Game Bub display, overlay and core package, any run on a board, and the sweep. Those are plan 2, written after the spikes report.
+
+---
+
+### Task 10: First hardware run of the compare build (added 2026-11-24)
+
+Added after the plan was written, when the owner granted use of any fpgas.online device and
+a live Arty A7-35T was found at the PS1 site (`docs/arty-boards.md`). It overrides the
+"no SSH to any host and no contact with any board" global constraint for this task only.
+
+**Files:**
+- Create: `tt_harness/host/run.py`, `tests/test_host_run.py`, `docs/results/2026-11-first-hardware-run.md`
+- Modify: `tt_harness/cli.py`, `docs/arty-boards.md`
+
+**Interfaces:**
+- Consumes: `build.build_compare` and its `BuildResult` (bitstream path), `host.frame.decode`, `verdict.load_reference` / `verdict.compare`, `prescreen.check`, `compare.recorder.frame_length`.
+- Produces:
+  - `run.Board`: `host: str`, `port: int`, `user: str = "pi"`, `uart: str` (a `/dev/serial/by-id/...-if01-port0` path), `loader_args: tuple[str, ...] = ("-b", "arty")`.
+  - `run.board_activity(board) -> Activity` with `busy: bool` and `reasons: tuple[str, ...]`: busy when another session shows terminal activity within the last 10 minutes, or any process holds the UART or runs `openFPGALoader`, `picocom`, `tio`, `minicom`. A login alone is not use.
+  - `run.record(board, bitstream: Path, clocks: int, baud: int, out: Path, timeout_s: float) -> Path`: refuses when `board_activity` is busy; copies the bitstream to the board host; starts a receiver on the board host that opens the UART at `baud` and reads until `frame_length(clocks)` bytes after the frame magic or the timeout; only then loads the bitstream; fetches the raw bytes to `out`; removes its files from the board host; returns `out`. The receiver must be reading before the load so the start of the frame is not lost.
+  - CLI: `tt-harness run-compare <shuttle>/<macro> --host H --port P --uart PATH [--toolchain vivado|openxc7] [--clocks N]`: build (or reuse an existing build), record, decode, verdict; prints the verdict JSON; exit codes as `tt-harness verdict`.
+
+- [ ] **Step 1:** Unit tests with a fake command runner (no network): the receiver is started before the loader and the loader only after the receiver reports it is listening; a busy board is refused with the reasons; remote files are removed on success and on failure; a receiver timeout yields a short recording that the verdict reports as `inconclusive`; the remote commands contain no shell injection from the bitstream name or UART path (reject unexpected characters).
+- [ ] **Step 2:** Run them; expect failures. Implement.
+- [ ] **Step 3:** On the board `ssh -p 10722 pi@ps1.fpgas.online` (Arty A7-35T, UART `/dev/serial/by-id/usb-Digilent_Digilent_USB_Device_210319A764F5-if01-port0`): check activity; run `tt08/tt_um_tinytapeout_logo_screensaver` built with Vivado, `--clocks 6000000`, 1,000,000 baud. Expected: verdict `exact` against the shared reference. Then the same design built with openXC7. Then `ttsky26a/tt_um_algofoogle_dottee` with both.
+- [ ] **Step 4:** Any verdict other than `exact` is investigated to a root cause (first differing clock, what the bytes show, whether the UART dropped data, whether the baud rate is achievable by the board's USB-serial bridge) before the task is reported done. Do not relax the comparison. If 1,000,000 baud is unreliable, find the highest reliable standard rate and say so.
+- [ ] **Step 5:** Leave the board as found: no files left, no processes left; the last bitstream loaded stays (there is no "previous" state to restore), and that is recorded.
+- [ ] **Step 6:** Write `docs/results/2026-11-first-hardware-run.md`: board, date, commands, per run the build toolchain, bytes received, time taken, verdict and first differing clock if any; what was and was not shown. Update `docs/arty-boards.md` with anything learned about using the PS1 boards.
+- [ ] **Step 7:** Commit.
