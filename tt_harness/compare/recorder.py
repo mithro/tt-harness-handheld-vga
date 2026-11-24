@@ -20,13 +20,16 @@ One project clock, with system clock edges counted from t0, the edge at which `p
     t0+S-1..t0+S  sample_strobe high for one cycle
     t0+S          sampler registers uo           (uo has had S cycles to settle)
     t0+S+1        pclk 1 -> 0; byte queued to the UART; CRC updated
+    t0+S+1..t0+S+2  advance high for one cycle
     t0+S+2        clock_index i -> i+1           (pclk low, away from both edges)
     >= t0+2S+2    pclk may rise again, once the UART can accept the next byte
 
 `pclk` is high for S+1 system cycles and low for at least S+1. `clock_index` only changes
 while `pclk` is low and is stable from before a rising edge until after the matching
-falling edge, so a `ReferenceStimulus` fed from it holds `rst_n` steady across both edges
-of every project clock. After the last clock `clock_index` equals `clocks`.
+falling edge. `advance` is high in the cycle at whose end it changes, so a register
+enabled by `advance` changes on the same edge as `clock_index`: a `ReferenceStimulus` fed
+from both makes `rst_n` that way, a register output that is steady across both edges of
+every project clock. After the last clock `clock_index` equals `clocks`.
 """
 
 from __future__ import annotations
@@ -153,7 +156,8 @@ class StepRecorder(Module):
     """Steps the project clock and sends one `uo` byte per project clock in a frame.
 
     Ports: input `uo` (8 bits); outputs `pclk` (project clock, a system-domain register),
-    `clock_index` (32 bits, the project clock about to rise or in progress),
+    `clock_index` (32 bits, the project clock about to rise or in progress), `advance`
+    (high in the cycle at whose end `clock_index` increments),
     `sample_strobe`, `tx` (UART, 8N1, idle high) and `done` (high once the whole frame,
     including the last stop bit, has been sent). See the module docstring for timing.
     """
@@ -182,6 +186,7 @@ class StepRecorder(Module):
         self.uo = Signal(8)
         self.pclk = Signal()
         self.clock_index = Signal(32)
+        self.advance = Signal()
         self.sample_strobe = Signal()
         self.tx = Signal()
         self.done = Signal()
@@ -248,6 +253,7 @@ class StepRecorder(Module):
         )
         fsm.act(
             "ADVANCE",
+            self.advance.eq(1),
             NextValue(self.clock_index, self.clock_index + 1),
             NextValue(timer, settle - 1),
             If(self.clock_index == clocks - 1, NextState("TRAILER")).Else(NextState("RISE")),

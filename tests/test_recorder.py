@@ -47,6 +47,7 @@ class _Bench(Module):
         self.submodules.proj = _CounterProject(self.rec.pclk, self.stim.rst_n)
         self.comb += [
             self.stim.clock_index.eq(self.rec.clock_index),
+            self.stim.advance.eq(self.rec.advance),
             self.rec.uo.eq(self.proj.uo),
         ]
 

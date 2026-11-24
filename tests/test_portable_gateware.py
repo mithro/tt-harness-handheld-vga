@@ -26,7 +26,7 @@ def _sampler():
 
 def _stimulus():
     m = ReferenceStimulus(ui_in=0x12, uio_in=0x34)
-    return m, {m.clock_index, m.ena, m.rst_n, m.ui_in, m.uio_in}
+    return m, {m.clock_index, m.advance, m.ena, m.rst_n, m.ui_in, m.uio_in}
 
 
 def _recorder():

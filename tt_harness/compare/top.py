@@ -85,6 +85,7 @@ class CompareTop(Module):
         )
         self.comb += [
             stim.clock_index.eq(rec.clock_index),
+            stim.advance.eq(rec.advance),
             rec.uo.eq(uo_out),
             self.tx.eq(rec.tx),
             self.done.eq(rec.done),
