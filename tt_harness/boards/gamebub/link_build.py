@@ -35,14 +35,14 @@ from pathlib import Path
 
 from tt_harness import tools, verilate
 from tt_harness.build import (
-    _NEXTPNR_FMAX,
     CHIPDB,
     MAX_JOBS,
+    NEXTPNR_FMAX,
     PRJXRAY_DB,
     STEP_TIMEOUT_S,
     TimingError,
-    _ns,
-    _table_rows,
+    ns_value,
+    table_rows,
 )
 
 from . import link_top
@@ -56,7 +56,7 @@ INPUT_DELAY_MIN_NS = 0.0  # ASSUMPTION: and not before the falling edge
 OUTPUT_DELAY_MAX_NS = 3.0  # ASSUMPTION: MCU setup plus flight time before its rising edge
 OUTPUT_DELAY_MIN_NS = 0.0  # ASSUMPTION: MCU hold requirement 0
 # Direct multi-bit spi -> sys crossings: stable for at least two sys periods (40 ns) before sys
-# samples them (docs result file, section 3); 20 ns is half of that.
+# samples them (docs result file, section 2); 20 ns is half of that.
 CROSSING_MAX_DELAY_NS = 20.0
 
 LOG_NAME = "build.log"
@@ -287,18 +287,18 @@ def parse_vivado_link(result: LinkBuildResult) -> None:
     if bad:
         raise TimingError(f"unconstrained: Vivado check_timing reports {bad}", log)
     periods = {}
-    for row in _table_rows(text, "Clock Summary"):
+    for row in table_rows(text, "Clock Summary"):
         periods[row[0]] = float(row[-2])
     if set(periods) != {"sys", "spi", "spi_rd"}:
         raise TimingError(f"unconstrained: clocks in the design are {sorted(periods)}", log)
     expected = {"sys": SYS_MHZ, "spi": SPI_MHZ, "spi_rd": SPI_READ_MHZ}
     if any(abs(periods[n] - 1000 / mhz) > 0.001 for n, mhz in expected.items()):
         raise TimingError(f"clock periods are {periods}, not the constraints", log)
-    for row in _table_rows(text, "Intra Clock Table"):
+    for row in table_rows(text, "Intra Clock Table"):
         name = row[0]
         if len(row) != 13:
             raise TimingError(f"clock {name} has no setup or hold figures: {row}", log)
-        wns, whs, wpws = _ns(row[1]), _ns(row[5]), _ns(row[9])
+        wns, whs, wpws = ns_value(row[1]), ns_value(row[5]), ns_value(row[9])
         result.clocks[name] = (1000.0 / periods[name], wns, whs)
         if wns < 0 or whs < 0 or wpws < 0:
             raise TimingError(
@@ -306,10 +306,10 @@ def parse_vivado_link(result: LinkBuildResult) -> None:
             )
     if set(result.clocks) != set(expected):
         raise TimingError(f"clock(s) absent from the intra-clock table: {result.clocks}", log)
-    for row in _table_rows(text, "Inter Clock Table"):
+    for row in table_rows(text, "Inter Clock Table"):
         # A pair held only by set_max_delay -datapath_only has no hold figures.
-        wns = _ns(row[2])
-        whs = _ns(row[6]) if len(row) > 6 else None
+        wns = ns_value(row[2])
+        whs = ns_value(row[6]) if len(row) > 6 else None
         if wns is not None and (wns < 0 or (whs is not None and whs < 0)):
             raise TimingError(f"Vivado: inter-clock {row[0]} -> {row[1]} misses timing", log)
     if "All user specified timing constraints are met." not in text:
@@ -498,7 +498,7 @@ def parse_nextpnr_link(result: LinkBuildResult, text: str) -> None:
     if off:
         raise TimingError(f"clock(s) off the global network: {off}", log)
     fmax = {}
-    for m in _NEXTPNR_FMAX.finditer(text):
+    for m in NEXTPNR_FMAX.finditer(text):
         fmax[m["name"]] = (float(m["achieved"]), m["verdict"], float(m["target"]))  # last wins
     for domain, m in clocks.items():
         net = m["net"]
