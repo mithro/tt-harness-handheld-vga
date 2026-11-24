@@ -20,6 +20,7 @@ this document.
 | Simulation | `uv run tt-harness pool-sim --clocks 1300000 --jobs 8` | `work/pool/<shuttle>/<macro>/result.json`, `work/pool/summary.json` | `tmp/pool-sim.log` |
 | Builds | `uv run python scripts/pool_run.py build` | `work/pool/<shuttle>/<macro>/build-<toolchain>.json`; build directories `build/compare/arty-<toolchain>/<shuttle>/<macro>/` with `build.log` | `tmp/pool-build.log` |
 | Hardware | `uv run python scripts/pool_run.py hw --host ps1.fpgas.online --port 10722 --uart /dev/serial/by-id/usb-Digilent_Digilent_USB_Device_210319A764F5-if01-port0 --known-hosts tmp/ps1/known_hosts` | `work/pool/<shuttle>/<macro>/hw-<toolchain>.json`, the recording `hw-<toolchain>.bin` and its measurements `hw-<toolchain>.bin.json` | `tmp/pool-hw.log`, and per run `hw-<toolchain>.log` |
+| Hardware, one repeat | `uv run tt-harness run-compare ttihp0p3/tt_um_algofoogle_fun_vga_clock --toolchain vivado --clocks 6000000 --host ps1.fpgas.online --port 10722 --uart /dev/serial/by-id/usb-Digilent_Digilent_USB_Device_210319A764F5-if01-port0 --known-hosts tmp/ps1/known_hosts --out work/pool/ttihp0p3/tt_um_algofoogle_fun_vga_clock/hw-vivado-repeat.bin` | standard output saved as `hw-vivado-repeat.json` beside the recording | `tmp/hw-repeat.log` |
 | Tables | `uv run python scripts/pool_report.py` | the tables below | |
 
 - `scripts/pool_run.py build` calls `tt_harness.build.build_compare`, the function behind
@@ -30,6 +31,10 @@ this document.
   6000000 ...` once per design and toolchain, one at a time, reusing the bitstreams just
   built. A design and toolchain without a successful build is not run: a failed build
   leaves no bitstream.
+- The build directories are the default ones, which the test suite also builds into. Two
+  of them no longer hold the bitstream that was run (see the note on bitstream hashes
+  under "Builds"); the bitstream of a run is identified by the SHA-256 recorded in its
+  `build-<toolchain>.json` and `hw-<toolchain>.json`, not by the file now in the directory.
 - Tools: Verilator 5.055 devel, Yosys 0.71+77, nextpnr-xilinx 0.8.2 (openXC7), Vivado
   2025.2. Part `xc7a35tcsg324-1`.
 - Inputs: the manifest in the `tinytapeout-vga-videos` checkout (`TT_VIDEOS_REPO` default)
@@ -147,12 +152,53 @@ the recorder (about 110 flip-flops in `sys`). No design uses block RAM or a latc
   exercise can be removed; Vivado evidently removes far more of it than Yosys. This was
   not examined further. It does mean the two bitstreams of that design are not the same
   circuit, and that what hardware checks for it is the logic that matters with idle inputs.
-- The bitstream hashes are of the files this run made. A rebuild does not give the same
-  file: the same openXC7 build of `tt_um_tinytapeout_dvd_screensaver` made minutes apart
-  gave `6f6a7bcd8a95…` and then `d0c073b22605…`. Whether that is a date in the header or a
-  different placement was not looked into.
+- The bitstream hashes are of the files this run made, and those are the files that were
+  loaded on the board (the same hashes are in the hardware table, from each run's JSON).
+  **The openXC7 files of `tt_um_tinytapeout_logo_screensaver` and `tt_um_algofoogle_dottee`
+  now in `build/compare/` are not those files**: a later run of the test suite rebuilt
+  both into the same default directories (a test in `tests/test_build.py` builds there),
+  and they now hash `c0613f2f57c4…` and `69fefee70795…` instead of the recorded
+  `4100d72c7c86…` and `655644f2364c…`. The other build directories are as the run left
+  them.
+- **A rebuild gives a different file with the same contents** (openXC7, checked for those
+  two designs; `tmp/fix1_probes.py`, `tmp/fix1-probes.log`). Each was compared with the
+  bitstream an earlier task built for the same design and settings in the main checkout:
+  the generated top is byte-identical, the FASM is byte-identical, and the configuration
+  data of the two `.bit` files is byte-identical. Only the `.bit` header differs: it
+  carries the path of the frames file, the build date and the build time (`xc7frames2bit`
+  writes them). So the file hash changes on every build and with the directory, while
+  place and route with a fixed seed is reproducible. Vivado's bitstreams were not
+  compared.
 
 ### The three openXC7 failures
+
+All three come down to one thing: **the open flow's allowance on paths from the project
+clock to the system clock refuses them.** No timing problem on the board was demonstrated
+for any of them; Vivado builds all three and all three are `exact` on the board with the
+Vivado bitstream.
+
+**The allowance.** The recorder samples `uo_out` S = 2 system cycles after a project clock
+edge, so a path from a project flip-flop to the sample register really has 20 ns. Vivado
+checks exactly that, clock arrival included. nextpnr-xilinx reports only the data-path
+delay of such a path: it does not model the difference in arrival between `pclk` (a
+register output through a BUFG) and `sys`. The build therefore sets aside
+`CROSS_DOMAIN_ALLOWANCE_CYCLES` = 1 system period, 10 ns, for that unmodelled difference,
+and checks nextpnr's figure against 20 - 10 = 10 ns (`tt_harness/build.py`,
+`parse_nextpnr`). Vivado measures the difference it stands for: its clock path skew on the
+worst `pclk->sys` path is between 2.82 and 3.33 ns in the eight builds
+(`pclk-to-sys-setup.rpt` in each Vivado build directory; `tmp/fix1-probes.log`). A whole
+system period is three times what was measured.
+
+A design whose outputs are registered has about 1 ns on this path and never notices. A
+design whose `uo_out` is combinational logic after its counters does:
+
+| Design | openXC7 `pclk->sys` data path | Against 10 ns | Vivado: data path, skew, slack against 20 ns |
+|---|---|---|---|
+| `tt_um_urish_rings` | 10.68 ns (build, seed 1) | -0.680 ns | 8.910 ns, 2.948 ns, 8.215 ns |
+| `tt_um_algofoogle_fun_vga_clock` | 10.58 ns (with `-nodsp`, review probe) | -0.580 ns | 8.914 ns, 3.287 ns, 7.792 ns |
+| `tt_um_algofoogle_vga` | 10.19 ns (with `-nodsp`, review probe) | -0.190 ns | 8.081 ns, 2.964 ns, 8.685 ns |
+
+For comparison, the five designs that pass have 0.91 to 0.98 ns on it in openXC7.
 
 **`ttihp26a/tt_um_urish_rings`: refused by the timing gate.**
 
@@ -164,21 +210,18 @@ timing not met in pclk->sys (requirement 10.000 ns, setup slack -0.680 ns)
   recorder's sample register. `uo_out`'s colour bits are not registered: they come from
   `hpos`, `vpos` and `frame` through two subtractions, two absolute values, a compare and
   select, and two additions (`src/project.v` lines 45 to 64). nextpnr reports 10.68 ns for
-  it, 4.0 ns of logic and 6.6 ns of routing, against the harness budget of 10 ns.
+  it, 4.0 ns of logic and 6.6 ns of routing.
 - It is not a placement accident: the same netlist placed with seeds 1 to 5 gives 10.68,
-  10.70, 10.99, 10.61 and 10.40 ns (`tmp/rings_seeds.py`, logs in `tmp/rings-seeds/`; an
+  10.70, 10.99, 10.61 and 10.40 ns (`tmp/rings_seeds.py`, `tmp/rings-seeds.log`; an
   investigation only, no bitstream was made).
 - nextpnr itself exits 0: it has no requirement on a path between clocks, and the 10 ns is
-  the harness's budget applied to its report afterwards (see "What "timing met" means").
-  So nextpnr does not optimise this path, and the build's retry with other seeds, which
-  runs only when nextpnr reports a clock below its constraint, did not happen.
-- Vivado times the same path against the 20 ns the recorder really allows, clock insertion
-  included, and meets it with 8.215 ns to spare. The design is slow at its outputs, the
-  openXC7 budget is conservative by one system period, and together they miss by 0.68 ns.
+  applied to its report afterwards. So nextpnr does not optimise this path, and the
+  build's retry with other seeds, which runs only when nextpnr reports a clock below its
+  constraint, did not happen.
 - Consequence: no openXC7 bitstream, so no openXC7 hardware run of this design.
 
-**`ttihp0p3/tt_um_algofoogle_fun_vga_clock` and `ttihp25a/tt_um_algofoogle_vga`:
-nextpnr-xilinx cannot route them.** Both fail the same way:
+**`ttihp0p3/tt_um_algofoogle_fun_vga_clock` and `ttihp25a/tt_um_algofoogle_vga`: stopped in
+the router, and behind that refused by the same gate.** As built, both fail like this:
 
 ```
 place and route (nextpnr-xilinx) failed (exit 255): ERROR: Unrouteable $PACKER_GND_NET sink
@@ -186,21 +229,56 @@ $flatten\project.$<repo>/work/sources/ttihp0p3/tt_um_algofoogle_fun_vga_clock/7c
 (SITEWIRE/DSP48_X1Y38/CARRYCASCIN)
 ```
 
-(`tt_um_algofoogle_vga`: `src/project.v:166$mul$417.CARRYCASCIN`, `DSP48_X0Y46`.)
+(`tt_um_algofoogle_vga`: `src/project.v:166$mul$417.CARRYCASCIN`, `DSP48_X0Y46`. `<repo>`
+stands for the worktree path in the log.)
 
 - Both designs share one line, `wire signed [10:0] product = psubx*psubx + psuby*psuby;`
   with 5-bit operands. Yosys `synth_xilinx` maps each multiplication to a `DSP48E1` (two
   per design). nextpnr-xilinx 0.8.2 places them and then cannot route the constant 0 to a
-  DSP48E1's `CARRYCASCIN` pin. They are the only pool designs with a DSP cell.
-- Vivado builds both with no DSP: it makes the multipliers from LUTs and carry chains.
-- Not tried, because it would change the build: Yosys's `synth_xilinx -nodsp`.
-- A second thing seen in these two logs, before the router failed: the harness's clock
-  scan listed the DSP's unused, tied-off clock pin as a clock made by the project,
-  `tt-harness clock: domain project net '…$mul$420.CLK$const' 16.67 MHz (cells 1 rising 1
-  falling 0 latches 0 intra no; …)`. A constant is not a clock. The build ended before the
-  timing gate, so what the gate would have made of it is not known; it should be looked at
-  together with the DSP question.
+  DSP48E1's `CARRYCASCIN` pin. They are the only pool designs with a DSP cell. Vivado
+  builds both with no DSP, from LUTs and carry chains.
+- **Avoiding the DSP does not make them build.** The reviewer of this task probed it: the
+  builds' own Yosys scripts with `synth_xilinx -nodsp`, then the builds' own nextpnr
+  command, seed 1 (`tmp/review/nodsp_probe.py`; logs `tmp/review/nodsp-fvc.log`,
+  `tmp/review/nodsp-avga.log` and `tmp/review/nodsp/`; no bitstream made, no project file
+  touched). Both then route, and both are refused by the gate: `pclk->sys` 10.58 ns (slack
+  -0.580 ns) and 10.19 ns (slack -0.190 ns). The original logs pointed the same way
+  before the router stopped: nextpnr's estimates after placement were 11.12 and 10.23 ns.
+  So the DSP routing failure is real, but it is the first of two obstacles, and the second
+  is the one `tt_um_urish_rings` meets.
 - Consequence: no openXC7 bitstream and no openXC7 hardware run of either design.
+
+**What could be done about the allowance** (not decided here, and nothing was changed):
+
+- (a) A settle of 3 system cycles. The real requirement becomes 30 ns and the budget
+  20 ns. It costs no run time: stepping is limited by the UART, one project clock per
+  byte, not by the settle.
+- (b) An allowance based on the measured skew, about 3 to 4 ns, instead of a whole system
+  period.
+- (c) Leave it, and accept that designs with slow unregistered outputs are refused by the
+  open flow and can be checked with Vivado only.
+
+**A defect in merged code, seen in the two DSP logs: a constant taken for a clock.** Before
+the router stopped, the build's clock scan printed (`<repo>` as above):
+
+```
+tt-harness clock: domain project net '$flatten\project.$<repo>/work/sources/ttihp0p3/tt_um_algofoogle_fun_vga_clock/7caa0f8f96be1c97d6b1ef31bdea5e1cb2df0de1/src/project.v:165$mul$420.CLK$const' 16.666666666666668 MHz (cells 1 rising 1 falling 0 latches 0 intra no; clocks $flatten\project.$<repo>/work/sources/ttihp0p3/tt_um_algofoogle_fun_vga_clock/7caa0f8f96be1c97d6b1ef31bdea5e1cb2df0de1/src/project.v:165$mul$420.CLK)
+```
+
+- Cause: the scan run inside nextpnr (`_PREPACK` in `tt_harness/build.py`) constrains the
+  net on every cell clock pin that is not already a known clock as a project clock, and
+  does not exclude a net driven by a constant. The unregistered DSP48E1's `CLK` pin is
+  tied off, so its tie-off net becomes a "project clock".
+- Effect, determined by running the build's own parser (`build.parse_nextpnr`) on each of
+  the two logs with a routing-complete marker and the log's own timing lines appended
+  (`tmp/fix1_probes.py`, after the reviewer's `tmp/review/const.py`): it is not a hard
+  failure. The result gains a domain `project:…$mul$420.CLK$const`: "n/a achieved against
+  16.67 MHz, unclassified clock, NOT SIGNED OFF, no paths within the clock", met, with the
+  reason "nothing sequential drives it". Had such a build passed the gate, it would report
+  a project clock the pre-screen denies and limitations that are false.
+- Severity: low. It errs on the conservative side (a spurious not-signed-off clock, never
+  a hidden one), but it misleads. It is confirmed, not fixed here, and belongs in a
+  follow-up together with the DSP question.
 
 ### Limitations reported per build
 
@@ -394,14 +472,20 @@ three openXC7 builds that failed have no bitstream and were not run.
   starting the load to the receiver finishing; the frame itself took 60.06 to 60.07 s from
   header to last byte in every run. "Whole command" is `tt-harness run-compare` start to finish.
 - **One stray byte, once.** In the Vivado run of `tt_um_algofoogle_fun_vga_clock` the
-  receiver got 6,000,014 bytes: a single `0x00` 0.6 ms before the frame header (first byte
-  at 2.4842 s after the load began, header at 2.4848 s), no error counted. The frame after
-  it was complete and its CRC good; the decoder looks for the header and the verdict is
-  `exact`. The same bitstream run again straight afterwards gave 6,000,013 bytes with the
-  header first, and `exact` again (`hw-vivado-repeat.json`). So it is not a property of the
-  bitstream. It arrived at the moment the FPGA is configured, which points at the UART line
-  as the device starts; that was not established. One in fourteen runs here, none in the
-  four runs of the first hardware session.
+  receiver (started 08:22:41 UTC) got 6,000,014 bytes: a single `0x00` at offset 0 and the
+  frame header at offset 1, no error counted. The frame after it was complete and its CRC
+  good; the decoder looks for the header and the verdict is `exact`.
+  - How long before the header the byte arrived is not resolved. The receiver's two
+    timestamps (first byte 2.4842 s after it started, header found at 2.4848 s) are times
+    of read chunks, not of bytes, and the same two timestamps are 0.35 to 1.84 ms apart
+    in the thirteen runs that had no stray byte (0.57 ms in this one). All that can be
+    said is that the byte came within a millisecond or two of the header, at
+    configuration.
+  - The same bitstream was run again at 08:35:23 UTC, 13 minutes and seven runs later:
+    6,000,013 bytes, the header first, `exact` again (`hw-vivado-repeat.json`). One clean
+    repeat shows only that the stray byte is not deterministic for that bitstream.
+  - Where it comes from was not established. One in fourteen runs here, none in the four
+    runs of the first hardware session.
 - **Repeatability.** The two designs run in the first hardware session
   (`tt_um_tinytapeout_logo_screensaver`, `tt_um_algofoogle_dottee`) were rebuilt for this
   run, so these are different bitstream files from those; all four are `exact` again.
@@ -496,9 +580,15 @@ What it showed:
 - With Vivado all eight build, meet timing under the gate, and on the Arty reproduce the
   reference exactly over 6,000,000 clocks.
 - With openXC7 five of the eight build and those five are exact on the Arty as well. The
-  other three do not produce a bitstream: one is refused by the harness's own cross-domain
-  budget by 0.68 ns on a path Vivado passes with 8 ns to spare, and two contain multipliers
-  that Yosys maps to DSP48E1 cells nextpnr-xilinx cannot route.
+  other three do not produce a bitstream, and for all three the reason is the open flow's
+  10 ns allowance on paths from the project clock to the system clock: their unregistered
+  outputs take 10.2 to 10.7 ns against a budget of 10 ns, on paths that really have 20 ns
+  and that Vivado passes with about 8 ns to spare. Two of the three are stopped earlier, in
+  the router, by multipliers Yosys maps to DSP48E1 cells; a probe by the reviewer shows
+  that without the DSP cells they route and then miss the same budget. This is the
+  allowance refusing designs, not a timing problem shown on the board.
+- One defect in merged code was confirmed on the way: the open flow's clock scan takes a
+  DSP's tied-off clock pin for a project clock (low severity, not fixed here).
 - No verdict other than `exact` occurred anywhere, so the `mismatch`, `nondeterministic`
   and `inconclusive` paths were exercised only by the unit tests and by the negative
   control of the first hardware session, not by a pool design.
@@ -507,10 +597,21 @@ What it showed:
 
 What remains for the sweep:
 
-- The two openXC7 questions: designs with multipliers (try `-nodsp`, and see what the
-  clock scan makes of a DSP's tied-off clock pin), and whether the 10 ns cross-domain
-  budget should stay as it is for designs with slow, unregistered outputs. Until then
-  openXC7 will refuse some designs that Vivado builds.
+- **The allowance question.** It blocks three of the eight pool designs in the open flow
+  and will gate every design with slow unregistered outputs. The options are under "The
+  three openXC7 failures": a settle of 3, an allowance from the measured skew, or leaving
+  it and using Vivado for such designs.
+- The DSP48E1 routing failure in nextpnr-xilinx (`-nodsp` gets past it, per the review
+  probe), and the fix for the constant taken as a project clock.
+- **The stray byte before the frame.** Seen once in fourteen runs and not explained.
+  Recording, for every run, how many bytes precede the header would show how often it
+  happens and whether it follows a board, a bitstream or neither.
+- **Verdict paths no pool design exercised**: any verdict other than `exact` on a real
+  design, a half-cycle domain, and a clock that is not signed off. The sweep will meet
+  them first.
+- **Bitstream reproducibility.** For openXC7 the configuration data is reproducible and
+  only the header (path, date, time) changes; a run should identify its bitstream by
+  something that survives a rebuild, and Vivado's bitstreams have not been compared.
 - Everything under "Known gaps": inputs and the gamepad, `uio` and audio, real clock
   speed, more than one board and more than one run per bitstream.
 - The awkward cases of `docs/test-designs.md` (other clock rates and modes, the QSPI
