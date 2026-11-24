@@ -109,8 +109,8 @@ the recorder (about 110 flip-flops in `sys`). No design uses block RAM or a latc
 | `tinytapeout_dvd_screensaver` | ok | 568 | 163 | 33 | 0 | 805 / 163 | 27 s | verilog-2005 | none | none | `d0c073b22605` |
 | `tinytapeout_logo_screensaver` | ok | 579 | 173 | 35 | 0 | 828 / 173 | 29 s | verilog-2005 | none | none | `4100d72c7c86` |
 | `urish_rings` | **failed** (TimingError) | 219 | 141 | 35 | 0 | 501 / 141 | 14 s |
-| `algofoogle_fun_vga_clock` | **failed** (BuildError) | 382 | 183 | 65 | 2 | ? / ? | 16 s |
-| `algofoogle_vga` | **failed** (BuildError) | 314 | 178 | 49 | 2 | ? / ? | 15 s |
+| `algofoogle_fun_vga_clock` | **failed** (BuildError) | 382 | 183 | 65 | 2 | 866 / 183 (from `build.log`) | 16 s |
+| `algofoogle_vga` | **failed** (BuildError) | 314 | 178 | 49 | 2 | 672 / 178 (from `build.log`) | 15 s |
 | `algofoogle_dottee` | ok | 488 | 179 | 66 | 0 | 955 / 179 | 24 s | systemverilog | `project.uo_out[3]` | none | `655644f2364c` |
 | `gamepad_pmod_demo` | ok | 278 | 131 | 33 | 0 | 547 / 131 | 20 s | verilog-2005 | none | none | `c1bb7db7bb96` |
 | `2048_vga_game` | ok | 1608 | 485 | 59 | 0 | 2092 / 485 | 91 s | verilog-2005 | none | none | `0fb9945848ad` |
