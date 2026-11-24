@@ -9,7 +9,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from tt_harness import __version__, build, fetch, manifest, prescreen, reference, verdict
+from tt_harness import __version__, build, fetch, manifest, pool, prescreen, reference, verdict
 from tt_harness.compare.recorder import frame_length
 from tt_harness.core.stimulus import RESET_CLOCKS
 from tt_harness.host import frame
@@ -189,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="shared reference files (default: $TT_REFERENCE_DIR)",
     )
     rc_p.set_defaults(func=_cmd_run_compare)
+    pool.add_parser(sub)
     return parser
 
 
