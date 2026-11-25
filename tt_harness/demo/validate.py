@@ -3,7 +3,9 @@
 
 `validate()` is `validateDemo()` of tt-demo-configurator's `src/lib/demoFile.ts` (Apache-2.0)
 without a chip lookup, ported to Python, where the values in messages are printed with the real
-`str()` the board's `validate()` uses. Where the board's validator and the configurator's differ,
+`str()` the board's `validate()` uses. The structure follows `demoFile.ts` (checked against the
+configurator at commit 8b7c392), not the board's LGPL-2.1 `demo.py`, whose behaviour is only
+described, in `docs/demo-runner.md`. Where the board's validator and the configurator's differ,
 this follows the board: see "Differences" in `docs/demo-runner.md`.
 """
 
@@ -28,7 +30,6 @@ GAMEPAD_BUTTONS: tuple[str, ...] = (
     "r",
 )
 GAMEPAD_PINS = 0x70
-NO_CONTROLLER = 0xFFF
 _TOP_FIELDS = ("version", "shuttle", "projects")
 _ENTRY_FIELDS = ("address", "subtile", "duration_ms", "clock_hz", "ui_in", "steps")
 
@@ -262,18 +263,20 @@ def parse(text: str, shuttle: str) -> DemoFile:
 
 
 def gamepad_bits(controllers: tuple[tuple[str, ...], ...]) -> int:
-    """The 24-bit value a "gamepad" step sends, bit 0 first on the wire.
+    """The 24-bit value a "gamepad" step sends; wire position `n` is bit `n`, sent `n`-th.
 
-    Each controller's buttons set bit `GAMEPAD_BUTTONS.index(name)` of a 12-bit mask. Player 1
-    is the high 12 bits (sent last); the low 12 bits (sent first) are player 2. A controller
-    that is not plugged in is `NO_CONTROLLER` (all twelve bits 1), which is why a validated file
-    never names all twelve buttons.
+    Written from the frame description in `docs/demo-runner.md`: wire positions 0..11 belong to
+    the second controller and 12..23 to the first; within a half, position `k` is button
+    `GAMEPAD_BUTTONS[k]`. A position is 1 when that controller holds the button, and also 1 for
+    every position of a controller that is not listed (an empty socket reads as all ones, which
+    is why a validated file never names all twelve buttons).
     """
     if len(controllers) > 2:
         raise ValueError(f"at most 2 controllers, got {len(controllers)}")
-    masks = [0] * len(controllers)
-    for k, buttons in enumerate(controllers):
-        for b in buttons:
-            masks[k] |= 1 << GAMEPAD_BUTTONS.index(b)
-    masks += [NO_CONTROLLER] * (2 - len(masks))
-    return masks[1] | (masks[0] << 12)
+    word = 0
+    for position in range(2 * len(GAMEPAD_BUTTONS)):
+        slot, k = divmod(position, len(GAMEPAD_BUTTONS))
+        player = 1 - slot  # slot 0 is sent first and is the second controller
+        if player >= len(controllers) or GAMEPAD_BUTTONS[k] in controllers[player]:
+            word |= 1 << position
+    return word

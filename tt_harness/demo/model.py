@@ -3,11 +3,17 @@
 
 The oracle for the firmware's runner: `run()` lists the writes, in order, with the runner's own
 nominal times (its waits, and the 2 ms reset sleep), not wall time.
+
+Provenance: written from `docs/demo-runner.md` alone. That document describes the behaviour of
+the board's `demo.py` (LGPL-2.1, tt-demo-configurator checkout at commit 8b7c392, a copy of the
+firmware's commit c32d62a); no code of it is used here.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import chain, groupby
 
 from tt_harness.demo.validate import Entry, Gamepad, Set, WaitMs, gamepad_bits
 
@@ -28,26 +34,28 @@ class Event:
     value: int
 
 
+def _frame_levels(word: int) -> Iterator[int]:
+    """Every level of a report, repeats included: one bit time per bit, then the latch tail."""
+    wire_bits = [(word >> n) & 1 for n in range(WORD_BITS)]
+    for bit in wire_bits:
+        data = PAD_DATA * bit
+        yield data  # data settles while the clock is low
+        yield data | PAD_CLOCK  # rising edge: the receiver samples
+        yield data
+    held = PAD_DATA * wire_bits[-1]  # the data line still shows the last bit
+    yield held | PAD_LATCH
+    yield held
+    yield 0
+
+
 def gamepad_levels(word: int) -> list[int]:
     """The `ui_in` bits 4..6 values written for one report of `word`, in order.
 
-    Per bit, bit 0 first: data with the clock low, data with the clock high, data with the clock
-    low. Then the latch high and low with the last data bit still on the data line, then all
-    low. A value equal to the one before it (starting from idle, 0) is not written again.
+    The levels of the frame in `docs/demo-runner.md` with each run of equal consecutive levels
+    written once; the line starts idle (0), so a leading 0 is not written either.
     """
-    seq: list[int] = []
-    data = 0
-    for i in range(WORD_BITS):
-        data = PAD_DATA if (word >> i) & 1 else 0
-        seq += [data, data | PAD_CLOCK, data]
-    seq += [data | PAD_LATCH, data, 0]
-    out: list[int] = []
-    last = 0
-    for level in seq:
-        if level != last:
-            out.append(level)
-            last = level
-    return out
+    runs = [level for level, _ in groupby(chain([0], _frame_levels(word)))]
+    return runs[1:]
 
 
 class _Done(Exception):
@@ -88,11 +96,7 @@ def _play_steps(entry: Entry, emit) -> None:
         return
     if sum(s.ms for s in steps if isinstance(s, WaitMs)) <= 0:
         raise ValueError("steps must wait for some time in total")
-    reports: dict[int, list[int]] = {}
-    for i, step in enumerate(steps):
-        if isinstance(step, Gamepad):
-            reports[i] = gamepad_levels(gamepad_bits(step.controllers))
-    report: list[int] | None = None
+    report: list[int] | None = None  # the buttons held: the levels of the last gamepad step
     base = entry.ui_in
     t = 0
 
@@ -101,12 +105,12 @@ def _play_steps(entry: Entry, emit) -> None:
             emit(t, "gamepad", base | level)
 
     while True:
-        for i, step in enumerate(steps):
+        for step in steps:
             if isinstance(step, Set):
                 base = step.value
                 emit(t, "ui_in", step.value)
             elif isinstance(step, Gamepad):
-                report = reports[i]
+                report = gamepad_levels(gamepad_bits(step.controllers))
                 send()
             elif isinstance(step, WaitMs):
                 t += step.ms

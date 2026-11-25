@@ -90,8 +90,10 @@ between. When there are no steps at all, nothing ever resets (32, 552-554).
 
 A `gamepad` step emulates a Gamepad Pmod with no Pmod plugged in. The design reads three of its
 `ui_in` bits: `ui_in[4]` latch (0x10), `ui_in[5]` clock (0x20), `ui_in[6]` data (0x40); mask
-0x70 (74-83). The design's receiver shifts in one data bit per rising clock edge and takes the 24
-bits it has on each rising latch edge. All three lines idle low.
+0x70 (74-83). All three lines idle low. The design's receiver (not the runner) shifts in one
+data bit per rising clock edge and takes the 24 bits it has on each rising latch edge; the runner's
+comments say designs sample on the rising edge (109-111) and the configurator's `decodeGamepad`
+in `src/lib/gamepad.ts` models the receiver that way.
 
 ### The 24-bit word
 
@@ -182,13 +184,26 @@ configurator's `demoFile.ts` differs as follows; its own header names the first.
    (`'\x01'`) and unprintable characters. It also prints an object's keys in JavaScript order,
    where keys that look like integers come first; Python keeps file order.
 4. Duplicate keys: both take the last value. This repository's `parse()` rejects them instead,
-   as `not valid JSON: ...`, so a firmware never has to choose.
+   as `not valid JSON: ...`. That is stricter than the board, by choice: the configurator never
+   writes duplicate keys, so a file with them was not made by it and a firmware need not choose.
+   Likewise `gamepad_bits` raises for more than two controllers, which the board's word code
+   would not (the validator has already limited a file to two).
 5. Text that is not JSON: the detail after `not valid JSON: ` is each parser's own.
 6. The configurator can check a lookup (unknown project, not marked safe); `validate()` here has
    no chip index and does not. The messages for that are in the configurator's `lookup` fixture,
    used here only as a valid file.
 
 No other difference of logic or wording was found in the checks themselves.
+
+## Not covered here
+
+The harness firmware does not need any of these (demo.py 395-425 and nearby):
+
+- autostart: building the runner and starting it at boot;
+- precedence of `/demo.json` over the bundled `/shuttles/<shuttle>.demo.json`;
+- the `demo = yes` switch in config.ini, and the project reset button held at power-up that
+  flips it for one boot;
+- the REPL helpers `start()`, `stop()` and `errors`.
 
 ## Open questions
 
