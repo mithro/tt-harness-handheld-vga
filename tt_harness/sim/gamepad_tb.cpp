@@ -8,7 +8,8 @@
 // Reads commands from standard input, one per line, and answers `show` on standard output:
 //
 //     reset N        rst high for N clocks, then low (restarts the emulator and the receiver)
-//     buttons HEX    the emulator's `buttons` input (24 bits)
+//     rxrst 0|1      holds (1) or releases (0) the receiver alone in reset
+//     buttons HEX   the emulator's `buttons` input (24 bits)
 //     run N          N clocks
 //     frames K       clocks until the emulator's `frame` has pulsed K more times
 //     show           prints "pressed0 pressed1 present latch clock data" (hex, hex, hex, 0/1 x3)
@@ -59,6 +60,11 @@ int main(int argc, char** argv) {
             top->rst = 1;
             for (uint64_t i = 0; i < n; i++) tick(*top);
             top->rst = 0;
+            top->eval();
+        } else if (cmd == "rxrst") {
+            int v = 0;
+            in >> v;
+            top->rx_rst = v;
             top->eval();
         } else if (cmd == "buttons") {
             std::string hex;

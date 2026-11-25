@@ -32,7 +32,7 @@ from tt_harness.core.gamepad import (
 from tt_harness.demo.validate import GAMEPAD_BUTTONS, gamepad_bits
 
 DATA = Path(__file__).parent / "data"
-TRACE = DATA / "demo" / "traces" / "gamepad-two-controllers.json"
+TRACES = DATA / "demo" / "traces"
 RECEIVER = DATA / "gamepad" / "gamepad_pmod.v"
 HARNESS = Path(__file__).resolve().parent.parent / "tt_harness" / "sim" / "gamepad_tb.cpp"
 
@@ -107,11 +107,17 @@ def _run(
     return Frame(levels, raw, frame_cycles)
 
 
-def test_levels_of_one_frame_are_the_runners_levels() -> None:
-    trace = json.loads(TRACE.read_text())
-    runner_levels = trace["reports"]["start_and_a"]
-    word = gamepad_bits((("start",), ("a",)))
-    assert word == 0x008100
+@pytest.mark.parametrize(
+    ("trace_name", "report", "controllers", "word"),
+    [
+        ("gamepad-two-controllers", "start_and_a", (("start",), ("a",)), 0x008100),
+        ("gamepad-resent-after-reset", "none", (), 0xFFFFFF),
+    ],
+)
+def test_levels_of_one_frame_are_the_runners_levels(trace_name, report, controllers, word) -> None:
+    trace = json.loads((TRACES / f"{trace_name}.json").read_text())
+    runner_levels = trace["reports"][report]
+    assert gamepad_bits(controllers) == word
     emu = GamepadEmulator(SIM_FREQ)
     frame = _run(emu, emu.frame_clocks - 1, word)  # one frame, ends before the next starts
     assert len(frame.frame_cycles) == 1
@@ -176,6 +182,22 @@ def test_constants_derive_from_the_clock_frequency(freq: int) -> None:
     assert emu.slot_clocks == max(4, round(freq * CLOCK_HALF_PERIOD_US / 1_000_000))
     assert emu.frame_clocks == round(freq / FRAME_RATE_HZ)
     assert emu.frame_clocks > FRAME_SLOTS * emu.slot_clocks
+
+
+def test_frames_are_one_default_period_apart() -> None:
+    emu = GamepadEmulator(SIM_FREQ)
+    frame = _run(emu, 3 * emu.frame_clocks, 0x008100)
+    assert len(frame.frame_cycles) == 3
+    gaps = {b - a for a, b in zip(frame.frame_cycles, frame.frame_cycles[1:], strict=False)}
+    assert gaps == {round(SIM_FREQ / FRAME_RATE_HZ)} == {1667}
+
+
+def test_frames_are_one_given_period_apart() -> None:
+    emu = GamepadEmulator(SIM_FREQ, frame_rate_hz=2000)
+    frame = _run(emu, 4 * emu.frame_clocks, 0x008100)
+    assert len(frame.frame_cycles) == 4
+    gaps = {b - a for a, b in zip(frame.frame_cycles, frame.frame_cycles[1:], strict=False)}
+    assert gaps == {round(SIM_FREQ / 2000)} == {500}
 
 
 def test_a_frame_period_shorter_than_a_frame_is_refused() -> None:
@@ -250,11 +272,16 @@ assert RECEIVER_OUTPUTS == GAMEPAD_BUTTONS
 
 
 class _Bench(Module):
-    """Emulator -> gamepad_pmod_dual, one clock. `rst` resets both."""
+    """Emulator -> the real `gamepad_pmod_dual` or `gamepad_pmod_single`, one clock.
 
-    def __init__(self, clk_freq_hz: int) -> None:
+    `rst` resets both; `rx_rst` resets the receiver alone. With the single receiver `pressed1`
+    is 0 and bit 1 of `present` is 0.
+    """
+
+    def __init__(self, clk_freq_hz: int, receiver: str = "dual") -> None:
         self.clock_domains.cd_sys = ClockDomain()
         self.rst = Signal()
+        self.rx_rst = Signal()
         self.buttons = Signal(24)
         self.frame = Signal()
         self.latch = Signal()
@@ -274,11 +301,12 @@ class _Bench(Module):
             self.clock.eq(emu.clock),
             self.data.eq(emu.data),
         ]
-        wires = {name: Signal(2, name=f"w_{name}") for name in RECEIVER_OUTPUTS}
-        is_present = Signal(2)
+        width = 2 if receiver == "dual" else 1
+        wires = {name: Signal(width, name=f"w_{name}") for name in RECEIVER_OUTPUTS}
+        is_present = Signal(width)
         self.specials += Instance(
-            "gamepad_pmod_dual",
-            i_rst_n=~self.rst,
+            f"gamepad_pmod_{receiver}",
+            i_rst_n=~(self.rst | self.rx_rst),
             i_clk=self.cd_sys.clk,
             i_pmod_data=emu.data,
             i_pmod_clk=emu.clock,
@@ -289,20 +317,17 @@ class _Bench(Module):
         self.comb += [
             self.present.eq(is_present),
             self.pressed0.eq(Cat(*[w[0] for w in wires.values()])),
-            self.pressed1.eq(Cat(*[w[1] for w in wires.values()])),
         ]
+        if receiver == "dual":
+            self.comb += self.pressed1.eq(Cat(*[w[1] for w in wires.values()]))
 
 
-@pytest.fixture(scope="module", params=FREQS, ids=[f"{f}Hz" for f in FREQS])
-def bench(request, tmp_path_factory) -> Path:
-    """The Verilated bench for one project clock frequency; returns its executable."""
-    if tools.find("verilator") is None:
-        pytest.skip("verilator not installed")
-    work = tmp_path_factory.mktemp(f"gamepad-bench-{request.param}")
-    top = _Bench(request.param)
+def _build_bench(work: Path, clk_freq_hz: int, receiver: str) -> Path:
+    top = _Bench(clk_freq_hz, receiver)
     ios = {
         top.cd_sys.clk,
         top.rst,
+        top.rx_rst,
         top.buttons,
         top.frame,
         top.latch,
@@ -333,6 +358,24 @@ def bench(request, tmp_path_factory) -> Path:
     rc = verilate.run(cmd, log, work, verilate.BUILD_TIMEOUT_S)
     assert rc == 0, f"verilator failed, see {log}"
     return obj / "Vtop"
+
+
+@pytest.fixture(scope="module", params=FREQS, ids=[f"{f}Hz" for f in FREQS])
+def bench(request, tmp_path_factory) -> Path:
+    """The Verilated bench (dual receiver) for one project clock frequency: the executable."""
+    if tools.find("verilator") is None:
+        pytest.skip("verilator not installed")
+    work = tmp_path_factory.mktemp(f"gamepad-bench-{request.param}")
+    return _build_bench(work, request.param, "dual")
+
+
+@pytest.fixture(scope="module", params=FREQS, ids=[f"{f}Hz" for f in FREQS])
+def single_bench(request, tmp_path_factory) -> Path:
+    """The same with `gamepad_pmod_single`."""
+    if tools.find("verilator") is None:
+        pytest.skip("verilator not installed")
+    work = tmp_path_factory.mktemp(f"gamepad-single-bench-{request.param}")
+    return _build_bench(work, request.param, "single")
 
 
 @dataclass(frozen=True)
@@ -450,3 +493,110 @@ def test_every_reset_gives_a_complete_first_frame(bench) -> None:
     )
     assert first == second
     assert (first.pressed0, first.pressed1, first.present) == (_mask("l"), _mask("r"), 3)
+
+
+# The single-controller receiver (the common case) ---------------------------------------------
+#
+# `gamepad_pmod_single` has a 12-bit shift register, so after the 24 bits of a frame it holds the
+# last 12 sent: player 1 (word bits 12..23). Player 2's half has been shifted out. A player 1
+# that is absent (twelve ones) reads as "not present" and no buttons, whatever player 2 holds.
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
+def test_single_receiver_reads_each_button_of_player_1(single_bench) -> None:
+    words = [gamepad_bits(((name,),)) for name in GAMEPAD_BUTTONS]
+    for name, seen in zip(GAMEPAD_BUTTONS, _receive(single_bench, words), strict=True):
+        assert (seen.pressed0, seen.present) == (_mask(name), 1), name
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
+def test_single_receiver_reports_player_1_only_while_player_2_holds_another(single_bench) -> None:
+    names = GAMEPAD_BUTTONS
+    cases = [(name, names[(i + 5) % len(names)]) for i, name in enumerate(names)]
+    words = [gamepad_bits(((one,), (two,))) for one, two in cases]
+    for (one, two), seen in zip(cases, _receive(single_bench, words), strict=True):
+        assert one != two
+        assert (seen.pressed0, seen.present) == (_mask(one), 1), (one, two)
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
+def test_single_receiver_with_player_1_absent_and_player_2_present(single_bench) -> None:
+    # `gamepad_bits` cannot say "player 1 absent, player 2 present" (an absent controller is
+    # always the last one listed), so the word is built by hand: player 2 holds start in bits
+    # 0..11, player 1's bits 12..23 are twelve ones, "no controller".
+    word = 0xFFF000 | _mask("start")
+    seen = _receive(single_bench, [word])[0]
+    # The receiver's register holds twelve ones: not present, no button held.
+    assert (seen.pressed0, seen.present) == (0, 0)
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
+def test_single_receiver_with_no_controllers(single_bench) -> None:
+    seen = _receive(single_bench, [gamepad_bits(()), gamepad_bits(((), ()))])
+    assert (seen[0].pressed0, seen[0].present) == (0, 0)  # none listed: twelve ones
+    assert (seen[1].pressed0, seen[1].present) == (0, 1)  # both present, nothing held
+
+
+# A receiver that is reset while the emulator keeps running ------------------------------------
+
+
+def _decode(register: int) -> tuple[int, int, int]:
+    """What `gamepad_pmod_dual` decodes from its 24-bit `data_reg`: (pressed0, pressed1, present)."""
+
+    def one(bits: int) -> tuple[int, int]:
+        if bits == 0xFFF:
+            return 0, 0
+        # `b` is bit 11 of the register and button 0, `r` bit 0 and button 11.
+        return sum(((bits >> (11 - k)) & 1) << k for k in range(12)), 1
+
+    p0, present0 = one(register & 0xFFF)
+    p1, present1 = one(register >> 12)
+    return p0, p1, present0 | present1 << 1
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
+def test_receiver_released_from_reset_mid_frame_is_right_within_two_frames(bench, request) -> None:
+    freq = request.node.callspec.params["bench"]
+    emu = GamepadEmulator(freq)
+    slot = emu.slot_clocks
+    word = gamepad_bits((("l", "up"), ("select",)))
+    # The receiver is held in reset through the whole first frame. The second frame starts
+    # `frame_clocks - 74 * slot` clocks after the first `frame` pulse; release in the middle of
+    # slot 30 (data phase of bit 10), so the receiver sees the rising clock edges of bits 10..23.
+    to_release = emu.frame_clocks - 74 * slot + 30 * slot + slot // 2
+    seen = _script(
+        bench,
+        [
+            "rxrst 1",
+            "reset 4",
+            f"buttons {word:x}",
+            "frames 1",
+            "show",  # still in reset: not present
+            f"run {to_release}",
+            "rxrst 0",
+            "frames 1",
+            "show",  # the frame that was half seen
+            "frames 1",
+            "show",  # the next, whole frame
+        ],
+    )
+    held, partial, whole = seen
+    assert (held.pressed0, held.pressed1, held.present) == (0, 0, 0)
+    # The shift register starts at all ones, so the half-seen frame gives 14 ones... of the
+    # register's 24 bits the low 14 are the bits that were sent, the rest are the reset ones.
+    # The receiver decodes that: wrong buttons for one frame, as with the real Pmod.
+    register = 0xFFFFFF
+    for n in range(10, 24):
+        register = (register << 1 | (word >> n) & 1) & 0xFFFFFF
+    assert (partial.pressed0, partial.pressed1, partial.present) == _decode(register)
+    assert (partial.pressed0, partial.pressed1) != (_mask("l", "up"), _mask("select"))
+    assert (whole.pressed0, whole.pressed1, whole.present) == (
+        _mask("l", "up"),
+        _mask("select"),
+        3,
+    )
