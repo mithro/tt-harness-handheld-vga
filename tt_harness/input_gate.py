@@ -25,7 +25,12 @@ the crossing that causes metastability inside the design. The compare build has 
 does not ask for this check; wiring it into the demo builds is a later task.
 `yosys_driver_clocks` follows the clock net back through clock buffers (`BUFG`, `IBUF`,
 `BUFGCE`, ...) and reports every net name on the way, since a buffer's output net is often
-renamed by the tools; the check passes when the expected name is among them. The Vivado report
+renamed by the tools, and the cells walked (`ClockTrace`). A `BUFGCE` is a clock GATE, so
+walking through it reports a gated clock under the name of the clock it was made from: the
+check passes on the expected name, and it is the CALLER that decides which traces are
+acceptable (`allowed_trace`; the later build task will require exactly the project clock's
+own buffer chain). The walk stops at any other cell (a LUT gating a clock), which fails. The
+check fails closed: see `clock_offenders`. The Vivado report
 gives the net on the flip-flop's `C` pin as Vivado names it (the clock buffer's output net),
 so the expected name is that one. The Vivado Tcl for this field has not been run
 (no Vivado in the session that wrote it): it is checked against a hand-written sample report.
@@ -54,6 +59,7 @@ and without it) and puts no logic on a path.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 CLOCK_PORT = "clk"
 INPUT_PORTS = ("ui_in", "uio_in", "ena", "rst_n")  # every project input but the clock
@@ -240,6 +246,22 @@ def summary(drivers: dict[str, tuple[str, ...]]) -> tuple[tuple[str, str], ...]:
     return tuple((port, "/".join(sorted(set(kinds)))) for port, kinds in sorted(drivers.items()))
 
 
+@dataclass(frozen=True)
+class ClockTrace:
+    """What clocks a flip-flop: the net names found on its clock pin and what was walked.
+
+    `names`: every net name on the way back from the `C` pin (sorted). `cells`: the types of
+    the clock buffers walked through, nearest the flip-flop first (a `BUFGCE` in it means the
+    clock is gated by an enable). `stopped_at`: the type of the first cell that is not a
+    clock buffer (a LUT gating the clock, say) or None when the walk ended at a net with no
+    driver (a port). The Vivado report gives only the net on the `C` pin: `cells` is empty.
+    """
+
+    names: tuple[str, ...]
+    cells: tuple[str, ...] = ()
+    stopped_at: str | None = None
+
+
 def _bit_names(module: dict) -> dict:
     names: dict = {}
     for name, net in module["netnames"].items():
@@ -250,13 +272,15 @@ def _bit_names(module: dict) -> dict:
 
 def yosys_driver_clocks(
     netlist: dict, top: str, nets: dict[str, str]
-) -> dict[str, tuple[tuple[str, ...] | None, ...]]:
-    """Per port and bit: the net names on the clock of the flip-flop driving it, or None.
+) -> dict[str, tuple[ClockTrace | None, ...]]:
+    """Per port and bit: the `ClockTrace` of the flip-flop driving it, or None.
 
-    The clock pin is `C`; the net is followed back through clock buffers (`CLOCK_BUFFERS`)
-    and the names of every net on the way are returned, sorted, so a renamed buffer output
-    does not hide the name of the net it came from. A bit that is not driven by a
-    flip-flop (a constant, a missing net, a LUT) gives None: `offenders` already fails those.
+    The clock pin is `C`; the net is followed back through clock buffers (`CLOCK_BUFFERS`),
+    collecting the names of every net on the way, so a renamed buffer output does not hide
+    the net it came from. The walk stops at any other cell (`stopped_at`): a clock gated by
+    logic is not the clock it was made from. A bit not driven by a flip-flop, or a flip-flop
+    with no `C` connection, gives None, as does a net that is not in the netlist; `None` is
+    never acceptable to `clock_offenders`.
     """
     module = netlist["modules"][top]
     driver = {}
@@ -269,63 +293,95 @@ def yosys_driver_clocks(
     out = {}
     for port, name in nets.items():
         net = module["netnames"].get(name)
-        kinds: list[tuple[str, ...] | None] = []
+        traces: list[ClockTrace | None] = []
         for bit in net["bits"] if net else []:
             found = driver.get(bit)
-            if found is None or found[0] not in FLIP_FLOPS or found[1] != "Q":
-                kinds.append(None)
+            clock_bits = found[2]["connections"].get("C", []) if found else []
+            if found is None or found[0] not in FLIP_FLOPS or found[1] != "Q" or not clock_bits:
+                traces.append(None)
                 continue
-            clock_bits = found[2]["connections"].get("C", [])
             seen: list[str] = []
-            current = clock_bits[0] if clock_bits else None
+            cells: list[str] = []
+            stopped: str | None = None
+            current = clock_bits[0]
             for _ in range(16):  # a chain of buffers; bounded against a loop
-                if current is None:
-                    break
                 seen += names.get(current, [])
                 buf = driver.get(current)
-                if buf is None or buf[0] not in CLOCK_BUFFERS:
+                if buf is None:
                     break
+                if buf[0] not in CLOCK_BUFFERS:
+                    stopped = buf[0]
+                    break
+                cells.append(buf[0])
                 inputs = buf[2]["connections"].get("I", [])
-                current = inputs[0] if inputs else None
-            kinds.append(tuple(sorted(set(seen))))
-        out[port] = tuple(kinds) if kinds else (None,)
+                if not inputs:
+                    break
+                current = inputs[0]
+            traces.append(ClockTrace(tuple(sorted(set(seen))), tuple(cells), stopped))
+        out[port] = tuple(traces) if traces else (None,)
     return out
 
 
 def parse_vivado_clocks(
     text: str, nets: dict[str, str]
-) -> dict[str, tuple[tuple[str, ...] | None, ...]]:
-    """Per port and bit: the clock net a flip-flop driver reports, as a one-name tuple, or None.
+) -> dict[str, tuple[ClockTrace | None, ...]]:
+    """Per port and bit: the clock net a flip-flop driver reports, as a `ClockTrace`, or None.
 
-    Raises ValueError as `parse_vivado` does for an incomplete report or an unknown port.
+    Raises ValueError as `parse_vivado` does for an incomplete report or an unknown port. A
+    port with no line gives (None,), like `parse_vivado`'s `MISSING`.
     """
     parse_vivado(text, nets)  # the same validity rules
     found: dict[str, list] = {port: [] for port in nets}
     for m in _REPORT_LINE.finditer(text):
-        found[m.group("port")].append((m.group("clock"),) if m.group("clock") else None)
+        found[m.group("port")].append(ClockTrace((m.group("clock"),)) if m.group("clock") else None)
     return {port: tuple(v) or (None,) for port, v in found.items()}
 
 
 def clock_offenders(
     drivers: dict[str, tuple[str, ...]],
-    clocks: dict[str, tuple[tuple[str, ...] | None, ...]],
+    clocks: dict[str, tuple[ClockTrace | None, ...]],
     expected: str,
+    allowed_trace: tuple[str, ...] | None = None,
 ) -> list[str]:
-    """One line per input driven by a flip-flop whose clock net is not `expected`.
+    """One line per bit that cannot be shown to be a flip-flop on the `expected` clock net.
 
-    A flip-flop with no reported clock net fails (the tools could not say what clocks it).
-    Constants and folded constants have no clock and pass; anything else that is not a
-    flip-flop is `offenders`' business.
+    Fails closed. Every bit of every port in `drivers` must be a constant (`CONSTANT`,
+    `FOLDED`: no clock needed) or a flip-flop with a clock entry that names `expected` and
+    whose walk did not stop at a non-buffer cell. A missing port in `clocks`, a different
+    number of entries than bits, a `None` entry, a wrong net, a gated clock, or a driver
+    that is neither constant nor flip-flop is an offender, named `port[bit]`.
+
+    `allowed_trace`, if given, is the exact tuple of clock buffer types the clock may pass
+    through (the later build task pins it to the project clock's own chain); otherwise any
+    chain of buffers is accepted and it is the caller's business to look at `ClockTrace.cells`.
     """
     out = []
     for port in sorted(drivers):
-        for kind, clock in zip(drivers[port], clocks.get(port, ()), strict=False):
-            if kind not in FLIP_FLOPS:
+        kinds = drivers[port]
+        entries = clocks.get(port)
+        flops = [i for i, k in enumerate(kinds) if k in FLIP_FLOPS]
+        if entries is not None and len(entries) != len(kinds) and flops:
+            out.append(f"{port}: {len(kinds)} bits but {len(entries)} clock entries")
+            continue
+        for bit, kind in enumerate(kinds):
+            where = f"{port}[{bit}]"
+            if kind in (CONSTANT, FOLDED):
                 continue
-            if not clock:
-                out.append(f"{port} is driven by a {kind} with no known clock net")
-            elif expected not in clock:
-                out.append(
-                    f"{port} is driven by a {kind} clocked by {'/'.join(clock)}, not {expected}"
-                )
-    return sorted(set(out))
+            if kind not in FLIP_FLOPS:
+                out.append(f"{where}: driven by {kind}, not a flip-flop")
+            elif entries is None:
+                out.append(f"{where}: no clock data")
+            elif entries[bit] is None:
+                out.append(f"{where}: no clock net")
+            else:
+                trace = entries[bit]
+                if trace.stopped_at is not None:
+                    out.append(f"{where}: clock gated by a {trace.stopped_at}")
+                elif expected not in trace.names:
+                    out.append(f"{where}: clocked by {'/'.join(trace.names)}, not {expected}")
+                elif allowed_trace is not None and trace.cells != tuple(allowed_trace):
+                    out.append(
+                        f"{where}: clock passes through {'/'.join(trace.cells) or 'nothing'}, "
+                        f"not {'/'.join(allowed_trace) or 'nothing'}"
+                    )
+    return out

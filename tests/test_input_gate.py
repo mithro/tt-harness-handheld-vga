@@ -363,6 +363,8 @@ def test_build_result_carries_the_input_drivers(
 # `rst_n` and `ui_in` registered in the project clock domain, `ena` in the other one). The Vivado
 # report is HAND-WRITTEN in the format `vivado_tcl` emits: Vivado was not available when this
 # was written, so the Tcl's clock lines are not verified against a real run.
+# The check fails closed: a flip-flop driver needs a clock entry for every bit, equal to the
+# expected net; anything missing, short, long or None is an offender.
 
 CLOCK_NETS = {
     "ui_in": "pin_ui_in",
@@ -370,46 +372,140 @@ CLOCK_NETS = {
     "rst_n": "pin_rst_n",
 }
 CLOCK_TOP = "clock_domains_fixture"
+Trace = input_gate.ClockTrace
 
 
 def _clock_case() -> dict:
     return json.loads((DATA / "yosys-clock-domains.json").read_text())
 
 
-def test_gate_rejects_register_in_the_wrong_domain_yosys() -> None:
+def _good(net: str = "project_clk") -> Trace:
+    return Trace((net,), ())
+
+
+def _ok_inputs() -> tuple[dict, dict]:
+    drivers = {"ena": ("FDRE",), "ui_in": ("FDRE",) * 2, "uio_in": (input_gate.FOLDED,)}
+    clocks = {"ena": (_good(),), "ui_in": (_good(),) * 2}
+    return drivers, clocks
+
+
+def test_clock_check_all_good_passes_and_constants_need_no_clock() -> None:
+    drivers, clocks = _ok_inputs()
+    assert input_gate.clock_offenders(drivers, clocks, "project_clk") == []
+    drivers = drivers | {"rst_n": (input_gate.CONSTANT,)}
+    assert input_gate.clock_offenders(drivers, clocks, "project_clk") == []
+
+
+@pytest.mark.parametrize(
+    "mutate, expect",
+    [
+        (lambda d, c: c.pop("ena"), "ena[0]: no clock data"),  # missing port
+        (lambda d, c: c.__setitem__("ui_in", (_good(),)), "ui_in: 2 bits but 1 clock entries"),
+        (lambda d, c: c.__setitem__("ui_in", (_good(),) * 3), "ui_in: 2 bits but 3 clock entries"),
+        (lambda d, c: c.__setitem__("ena", (None,)), "ena[0]: no clock net"),
+        (lambda d, c: c.__setitem__("ui_in", (_good(), None)), "ui_in[1]: no clock net"),
+        (lambda d, c: c.__setitem__("ena", (_good("sys_clk"),)), "ena[0]: clocked by sys_clk"),
+        (lambda d, c: c.clear(), "ena[0]: no clock data"),
+        (lambda d, c: d.__setitem__("ena", ("LUT2",)), "ena[0]: driven by LUT2"),
+        (lambda d, c: d.__setitem__("ena", (input_gate.MISSING,)), "ena[0]: driven by missing"),
+    ],
+)
+def test_clock_check_fails_closed(mutate, expect: str) -> None:
+    drivers, clocks = _ok_inputs()
+    mutate(drivers, clocks)
+    out = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    assert out, "the gate passed with missing or wrong clock data"
+    assert any(expect in line for line in out), out
+
+
+def test_a_clock_trace_through_a_gate_is_reported_and_can_be_pinned() -> None:
+    drivers = {"ena": ("FDRE",)}
+    gated = {"ena": (Trace(("project_clk",), ("BUFGCE", "BUFG")),)}
+    assert input_gate.clock_offenders(drivers, gated, "project_clk") == []  # caller's choice
+    out = input_gate.clock_offenders(drivers, gated, "project_clk", allowed_trace=("BUFG",))
+    assert out and "BUFGCE/BUFG" in out[0]
+    exact = {"ena": (Trace(("project_clk",), ("BUFG",)),)}
+    assert input_gate.clock_offenders(drivers, exact, "project_clk", allowed_trace=("BUFG",)) == []
+
+
+def test_yosys_clock_domains() -> None:
     case = _clock_case()
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
     assert drivers["ena"] == ("FDRE",) and drivers["rst_n"] == ("FDRE",)
-    assert input_gate.offenders(drivers) == []  # a glitch-free driver, but in which domain?
+    assert input_gate.offenders(drivers) == []  # glitch-free drivers, but in which domain?
     clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
     # The clock buffer's output net is renamed by the tool; the chain reaches the port name.
-    assert "project_clk" in clocks["rst_n"][0] and "project_clk" in clocks["ui_in"][0]
-    assert "sys_clk" in clocks["ena"][0]
-    (bad,) = input_gate.clock_offenders(drivers, clocks, "project_clk")
-    assert bad.startswith("ena is driven by a FDRE clocked by ") and bad.endswith(
-        "sys_clk, not project_clk"
+    assert "project_clk" in clocks["rst_n"][0].names and "project_clk" in clocks["ui_in"][0].names
+    assert "sys_clk" in clocks["ena"][0].names
+    assert clocks["rst_n"][0].cells and set(clocks["rst_n"][0].cells) <= set(
+        input_gate.CLOCK_BUFFERS
     )
-    # Asked the other way round, the other registers are the wrong ones.
+    (bad,) = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    assert bad.startswith("ena[0]: clocked by ") and "sys_clk" in bad
     wrong = input_gate.clock_offenders(drivers, clocks, "sys_clk")
-    assert [w.split()[0] for w in wrong] == ["rst_n", "ui_in"]
+    assert {w.split("[")[0].split(":")[0] for w in wrong} == {"rst_n", "ui_in"}
     assert len(clocks["ui_in"]) == 8
 
 
-def test_a_flip_flop_without_a_clock_net_fails_the_domain_check() -> None:
+def test_yosys_missing_net_and_missing_clock_pin_are_offenders() -> None:
     case = _clock_case()
+    nets = CLOCK_NETS | {"absent": "no_such_net"}
+    drivers = input_gate.yosys_drivers(case, CLOCK_TOP, nets)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, nets)
+    assert drivers["absent"] == (input_gate.MISSING,) and clocks["absent"] == (None,)
+    assert any(
+        line.startswith("absent[0]")
+        for line in input_gate.clock_offenders(drivers, clocks, "project_clk")
+    )
     for cell in case["modules"][CLOCK_TOP]["cells"].values():
         if cell["type"] == "FDRE":
             cell["connections"].pop("C", None)
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
     clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
     out = input_gate.clock_offenders(drivers, clocks, "project_clk")
-    assert out and all("no known clock net" in line for line in out)
+    assert len(out) == 1 + 1 + 8 and all("no clock net" in line for line in out)
 
 
-def test_clock_check_ignores_constants_and_other_drivers() -> None:
-    drivers = {"ena": (input_gate.FOLDED,), "ui_in": ("LUT2",), "rst_n": (input_gate.CONSTANT,)}
-    clocks = {"ena": (None,), "ui_in": (None,), "rst_n": (None,)}
-    assert input_gate.clock_offenders(drivers, clocks, "project_clk") == []
+def _lut_gated(case: dict, kind: str) -> dict:
+    """The fixture with the `ena` flip-flop's clock driven through a cell of type `kind`."""
+    module = case["modules"][CLOCK_TOP]
+    cells = module["cells"]
+    ena_bit = module["netnames"]["pin_ena"]["bits"][0]
+    flop = next(
+        c for c in cells.values() if c["type"] == "FDRE" and ena_bit in c["connections"]["Q"]
+    )
+    source = flop["connections"]["C"][0]
+    gated = 99999
+    flop["connections"]["C"] = [gated]
+    if kind.startswith("LUT"):
+        pins = {"I0": "input", "I1": "input", "O": "output"}
+        conns = {"I0": [source], "I1": [source]}
+    else:
+        pins = {"I": "input", "CE": "input", "O": "output"}
+        conns = {"I": [source], "CE": ["1"]}
+    cells["gate"] = {"type": kind, "port_directions": pins, "connections": conns | {"O": [gated]}}
+    return case
+
+
+def test_a_clock_gated_by_a_lut_stops_at_the_lut_and_fails() -> None:
+    case = _lut_gated(_clock_case(), "LUT2")
+    drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    assert clocks["ena"][0].stopped_at == "LUT2"
+    # Even asked for the clock the gate is fed from, a gated clock is not that clock.
+    out = input_gate.clock_offenders(drivers, clocks, "sys_clk")
+    assert any(line.startswith("ena[0]") and "LUT2" in line for line in out)
+
+
+def test_a_clock_gated_by_a_bufgce_is_reported_with_the_bufgce_in_the_trace() -> None:
+    case = _lut_gated(_clock_case(), "BUFGCE")
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    trace = clocks["ena"][0]
+    assert trace.cells[0] == "BUFGCE" and "sys_clk" in trace.names
+    drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
+    # The caller decides: pinned to the buffer chain of the project clock, a BUFGCE fails.
+    out = input_gate.clock_offenders(drivers, clocks, "sys_clk", allowed_trace=trace.cells[1:])
+    assert any(line.startswith("ena[0]") and "BUFGCE" in line for line in out)
 
 
 def test_gate_rejects_register_in_the_wrong_domain_vivado() -> None:
@@ -418,20 +514,37 @@ def test_gate_rejects_register_in_the_wrong_domain_vivado() -> None:
     drivers = input_gate.parse_vivado(text, nets)
     assert drivers["rst_n"] == ("FDCE",) and drivers["ui_in"] == ("FDRE", "FDRE")
     clocks = input_gate.parse_vivado_clocks(text, nets)
-    assert clocks["rst_n"] == (("project_clk",),)
+    assert clocks["rst_n"] == (Trace(("project_clk",), ()),)
     assert clocks["uio_in"] == (None,)
     folded = input_gate.fold_constants(drivers, frozenset({"uio_in"}))
     assert input_gate.offenders(folded) == []
-    assert input_gate.clock_offenders(folded, clocks, "project_clk") == [
-        "ena is driven by a FDRE clocked by sys_clk, not project_clk"
-    ]
-    # A flip-flop line with no clock field fails, and the old report format still parses.
-    bare = text.replace(" clock project_clk\n", "\n", 1)
-    bare_clocks = input_gate.parse_vivado_clocks(bare, nets)
-    out = input_gate.clock_offenders(folded, bare_clocks, "project_clk")
-    assert any("no known clock net" in line for line in out)
+    out = input_gate.clock_offenders(folded, clocks, "project_clk")
+    assert out == ["ena[0]: clocked by sys_clk, not project_clk"]
+
+
+def test_vivado_report_gaps_are_offenders() -> None:
+    text = (DATA / "vivado-clock-domains.rpt").read_text()
+    nets = CLOCK_NETS | {"uio_in": "stimulus_uio_in"}
+    consts = frozenset({"uio_in"})
+
+    def run(report: str) -> list[str]:
+        drivers = input_gate.fold_constants(input_gate.parse_vivado(report, nets), consts)
+        clocks = input_gate.parse_vivado_clocks(report, nets)
+        return input_gate.clock_offenders(drivers, clocks, "project_clk")
+
+    # a flip-flop line with no clock field
+    assert any("no clock net" in x for x in run(text.replace(" clock project_clk\n", "\n", 1)))
+    # a port the report does not mention at all
+    lines = [ln for ln in text.splitlines() if " rst_n " not in ln]
+    assert any(x.startswith("rst_n[0]") for x in run("\n".join(lines) + "\n"))
+    # the old report format still parses; its flip-flop has no clock, so the check fails
     old = _vivado("registered")
-    assert input_gate.parse_vivado_clocks(old, NETS)["rst_n"] == (None,)
+    old_drivers = input_gate.fold_constants(input_gate.parse_vivado(old, NETS), CONSTANTS)
+    old_clocks = input_gate.parse_vivado_clocks(old, NETS)
+    assert old_clocks["rst_n"] == (None,)
+    assert input_gate.clock_offenders(old_drivers, old_clocks, "project_clk") == [
+        "rst_n[0]: no clock net"
+    ]
 
 
 def test_vivado_tcl_reports_the_clock_net_of_a_flip_flop_driver() -> None:
