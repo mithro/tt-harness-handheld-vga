@@ -232,7 +232,10 @@ def test_one_clock_of_skew_on_any_crossing_wire_breaks_nothing(kind: str, late_n
     assert out["n"] is not None, "done never rose"
     assert out["crc"] == zlib.crc32(toy_bytes(n))
     assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(n))}
-    assert_clean(rec.pins)
+    blocks = assert_clean(rec.pins)
+    if kind in ("abort_restart", "restart"):
+        # the first check was CUT by the newer command (not run to its end and then replaced)
+        assert len(blocks) == 2 and blocks[0][0] < 25, blocks
 
 
 @pytest.mark.slow
