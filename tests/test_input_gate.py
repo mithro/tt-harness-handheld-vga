@@ -401,7 +401,10 @@ def test_clock_check_all_good_passes_and_constants_need_no_clock() -> None:
     [
         (lambda d, c: c.pop("ena"), "ena[0]: no clock data"),  # missing port
         (lambda d, c: c.__setitem__("ui_in", (_good(),)), "ui_in: 2 bits but 1 clock entries"),
+        (lambda d, c: c.__setitem__("ui_in", (_good(),)), "ui_in[1]: unchecked"),
+        (lambda d, c: c.__setitem__("ui_in", (_good(),)), "ui_in[0]: unchecked"),
         (lambda d, c: c.__setitem__("ui_in", (_good(),) * 3), "ui_in: 2 bits but 3 clock entries"),
+        (lambda d, c: c.__setitem__("ui_in", (_good(),) * 3), "ui_in[1]: unchecked"),
         (lambda d, c: c.__setitem__("ena", (None,)), "ena[0]: no clock net"),
         (lambda d, c: c.__setitem__("ui_in", (_good(), None)), "ui_in[1]: no clock net"),
         (lambda d, c: c.__setitem__("ena", (_good("sys_clk"),)), "ena[0]: clocked by sys_clk"),
@@ -551,3 +554,28 @@ def test_vivado_tcl_reports_the_clock_net_of_a_flip_flop_driver() -> None:
     tcl = input_gate.vivado_tcl(NETS, "/out/project-inputs.rpt")
     assert "REF_PIN_NAME == C" in tcl and "get_nets -quiet -of_objects $cpin" in tcl
     assert 'driver $kind$clock"' in tcl
+
+
+def test_a_clock_chain_longer_than_the_hop_limit_is_an_offender() -> None:
+    case = _clock_case()
+    module = case["modules"][CLOCK_TOP]
+    cells = module["cells"]
+    ena_bit = module["netnames"]["pin_ena"]["bits"][0]
+    flop = next(
+        c for c in cells.values() if c["type"] == "FDRE" and ena_bit in c["connections"]["Q"]
+    )
+    source = flop["connections"]["C"][0]
+    previous = source
+    for hop in range(input_gate.MAX_CLOCK_HOPS + 4):  # a chain of plain buffers
+        out_bit = 90000 + hop
+        cells[f"hop{hop}"] = {
+            "type": "BUFG",
+            "port_directions": {"I": "input", "O": "output"},
+            "connections": {"I": [previous], "O": [out_bit]},
+        }
+        previous = out_bit
+    flop["connections"]["C"] = [previous]
+    drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    out = input_gate.clock_offenders(drivers, clocks, "sys_clk")
+    assert any(line.startswith("ena[0]") and "more than" in line for line in out), out

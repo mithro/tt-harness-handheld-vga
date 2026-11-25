@@ -14,72 +14,104 @@ cleared by `start` and `abort`), `crc` (valid while `done`). `project`: `uo_out`
 `override`, `override_rst`, `override_ui_in` (outputs, direct flip-flop outputs; see
 `ProjectSlot.attach`). Constructor `ui_in` is the reference's fixed `ui_in`; `uio_in` is the
 slot's constant 0, which is what every pool design's reference uses. N = 0 gives the CRC of
-nothing (0).
+nothing (0). `sys_hz` and `min_project_hz` size the launch delay (below).
+
+Guarantee at the project's pins. Each accepted `start` gives the design exactly ONE clean
+sequence: the slot's normal values, then the override (`ena` 1, reference `ui_in`) with
+`rst_n` high for one clock, low for exactly 10 clocks, high again while counting, then the
+override released and the normal values back. There is never an on/off/on of `ena` or `ui_in`
+or a pulse of `rst_n`, whatever the timing of `start`, `abort` and a restart, at any project
+clock from `min_project_hz` up and across clock stops. An aborted or reset check is cut short
+(its low phase may be shorter than 10) but is still one block. Consecutive sequences are
+separated by at least `MIN_GAP_CLOCKS` project clocks of fully normal pins (derived below).
 
 Protocol (sys on the left, project on the right; every arrow is a two-flop `MultiReg`)::
 
-    sys regs: run, pend, done, gen (toggle), n_hold          project regs: running, fin, my_gen
+    sys regs: run, pend, done, gen (toggle), n_hold, dly      project: state, my_gen, fin, rel
 
     start  -> pend, n_req := clocks
-    pend & ~run & (my_gen_s == gen)   launch:  gen toggles, run := 1, n_hold := n_req
-        run ---------------------------------> run_s
-        gen ---------------------------------> gen_s
-                                                IDLE: my_gen := gen_s; if run_s: begin
-                                                RUNNING / FIN: if ~run_s or gen_s != my_gen: unwind
-        (my_gen, fin) --- Gray: one bit at a time ---> my_gen_s, fin_s
-    run & my_gen_s == gen & fin_s     accept:  run := 0, done := 1
-    abort                             run := 0, pend := 0, done := 0     (next sys clock)
-    system reset                      run, pend, done := 0   (gen, n_req, n_hold are not reset)
+    pend & ~run & my_gen_s == gen & rel_s     launch:  run := 1, n_hold := n_req, dly := D
+        run ----------------------------------------> run_s
+    D sys clocks later (dly 1 -> 0)           gen toggles
+        gen ----------------------------------------> gen_s
+                      IDLE (rel = 1):  run_s & gen_s != my_gen  -> BEGIN  (rel := 0)
+                                       ~run_s & gen_s != my_gen -> my_gen := gen_s (consume, nothing runs)
+                      BEGIN (2 edges): my_gen := gen_s; if run_s: RUN (override on) else UNWIND
+                      RUN / FIN:       ~run_s -> UNWIND (override off, fin := 0)
+                      UNWIND (3 edges) -> IDLE, rel := 1
+        (my_gen, fin, rel) --- each its own MultiReg ---> my_gen_s, fin_s, rel_s
+    run & dly == 0 & my_gen_s == gen & fin_s  accept:  run := 0, done := 1
+    abort                                     run := 0, pend := 0, done := 0, dly := 0   (next sys clock)
+    system reset                              run, pend, done, dly := 0   (gen, n_req, n_hold not reset)
 
-Why a late or early arrival is harmless, signal by signal:
+The begin rule. The project begins a check only from IDLE (`rel` = 1, i.e. the override is
+off and the reset chain is back to normal) and only when it sees BOTH `run_s` high AND `gen_s`
+different from `my_gen`; it sets `my_gen := gen_s` at that begin and never while idle with `run_s`
+high, so an early `run_s` does nothing. The launch rule. The system side launches only when the
+project has consumed the previous generation (`my_gen_s == gen`) AND is fully released
+(`rel_s`), so a new check cannot start while the previous one is still unwinding.
 
-- `run` (level, sys -> project): it can only start a check from IDLE, and a dip of `run` too
-  short for the project to see is covered by `gen`; `run` low is the abort of a check in
-  progress, seen whenever the project clock next runs. A `start` that is not aborted stays
-  as `run` high while the clock is stopped and runs when it resumes (chosen: "requested,
-  clock stopped, not aborted" runs; an aborted one never does, because the level is gone
-  before the clock returns).
-- `gen` (toggle, sys -> project): changes only at a launch, and a launch needs the project to
-  have caught up with the previous one (`my_gen_s == gen`), so at most ONE change is ever in
-  flight and a change cannot be cancelled by a second one. Whatever the project is doing
-  (idle, running, finished, frozen mid-run by a stopped clock), a change makes it unwind and
-  look at `run` afresh. So a missed dip of `run` (abort then a quick re-launch, or a reset
-  then a launch) restarts the check instead of continuing the old one. A skew of one project
-  clock between `run` and `gen` only costs one extra unwind and restart.
-- `n_hold` (32 bits, sys -> project, no synchroniser): it changes only at a launch, which needs
-  the project to have caught up, i.e. to have already read N at its `begin` (the same edge at
-  which `my_gen` took the new value). It is read at `begin`, at least two project clocks after
-  the launch edge.
-- `(my_gen, fin)` (project -> sys): two flops that change only on different clock edges, so
-  the pair is a 2-bit Gray sequence and a sample is always a value it really held (even though
-  each bit has its own synchroniser). `my_gen_s == gen` means "the project has seen the
-  latest launch", `fin_s` with it means "and it finished that launch": a finished flag of
-  an older launch is paired with an older `my_gen` and cannot be accepted, nor can a check that
-  was aborted (run is 0), so a `done` is always for the most recent `start`.
+Why `run` and `gen` can be seen in either order and it is still right. The simulator has no
+skew, but two synchronisers on signals that change on the same edge can differ by a project clock
+in either direction. Here they never change together: `run` rises at the launch and `gen` toggles
+`D` system clocks later, `D = 3 x ceil(sys_hz / min_project_hz) + 4`: at least three project
+clocks of the slowest supported project clock (the same 0.39 MHz threshold as `clock_running`),
+so the project always sees `run_s` high no later than `gen_s` changes: `run_s` high with `gen_s`
+unchanged does nothing, and the toggle then starts exactly one begin. If the project clock is
+stopped both are settled when it resumes. An abort before `gen` toggles cancels the launch
+(nothing crossed that the project would act on: `run_s` rises and falls with `gen_s` unchanged).
+An abort after it leaves the project to consume the generation: `~run_s & gen_s != my_gen`
+consumes it without a begin (`gen` is a toggle, a single change in flight, since a launch waits
+for `my_gen_s == gen`), or, if the project got there first, to begin and then unwind (an abort
+during a check, still one block). A project clock slower than `min_project_hz` is outside the
+supported range (the `D` argument fails): at-speed checks need a clock the slot reports as
+running.
+
+Abort, system reset, clock stopped:
+- abort and system reset clear `run`, `pend`, `done` at the next system clock, whatever the
+  project clock does, so `busy` and `done` read 0 one system clock after the abort pulse;
+- a `start` requested and not aborted stays as `run` (and, after `D`, `gen`) while the clock is
+  stopped and runs when it resumes; an aborted one never runs: either `gen` never toggled, or
+  `run_s` is low when the project sees `gen_s` change, and the generation is consumed;
+- after a system reset `gen` keeps its value (toggles are never reset): a launch waits for
+  `my_gen_s == gen` (the project consuming any unconsumed change, or still running and
+  unwinding because `run` is low) and for `rel_s`, then toggles: the same argument as without a
+  reset;
+- a `start` given while the previous run is still unwinding waits in `pend` (visible as
+  `busy`, never blocking the system side) until the project is released, then launches once; a
+  `start` given while `busy` is ignored.
+
+Why each signal is safe when it arrives early or late:
+- `run` (level, sys -> project): above. Dropping it is the one way a check ends early: the
+  project acts whenever it next runs, at most `UNWIND_CLOCKS` project clocks after the clock
+  runs.
+- `gen` (toggle, sys -> project): changes only at a launch (single change in flight).
+- `n_hold` (32 bits, sys -> project, no synchroniser): changes only at the launch, `D` clocks
+  before `gen`, and a launch needs the project idle, so it is stable for the whole begin
+  and is read at BEGIN, at least two project clocks after `gen_s` changed.
+- `my_gen`, `rel`, `fin` (project -> sys), each through its own `MultiReg`. They are read in
+  two combinations only: `(my_gen, rel)` for the launch and `(my_gen, fin)` for `done`. In each
+  pair the two bits never change on the same project edge and consecutive changes are at least
+  two project edges apart (BEGIN lasts 2 edges: `rel` falls on the first, `my_gen` changes on the
+  second; `rel` rises 3 edges after the unwind and `my_gen` has not changed since; `fin`
+  rises ~14 edges after `my_gen`), so a sample of a pair is always a value the pair really
+  held, provided the skew of two synchronisers (about one `sys` clock) is less than that
+  separation: a project clock of at most 50 MHz gives 2 x 20 ns against 20 ns. The accepted
+  `done` needs `my_gen_s == gen`, so an older generation's `fin` or an aborted check cannot
+  be accepted; the launch needs `rel_s`, so it cannot begin during an unwind.
 - `crc` (32 bits, project -> sys, no synchroniser): `crc_out` is written once per check, one
-  project clock BEFORE `fin` rises, and not written again until a later check completes,
-  which needs a new launch that clears `done` first. `sys` reads it only while `done` is high.
-  A skew between the 32 bits is therefore harmless (the value is stable for longer than any
-  synchroniser's resolution time). A max-delay constraint belongs to the later build task.
-- `done`/`busy`/`pend`: sys-only registers. Abort is registered in the next system clock:
-  `busy` and `done` read 0 ONE SYSTEM CLOCK after the abort pulse, whatever the project clock
-  does (including stopped). A system reset clears them the same way, and `gen` is deliberately
-  not reset so that the toggle and the project's copy keep agreeing.
-- A `start` given while a previous (aborted) run is still unwinding is held in `pend`
-  (visible as `busy`, never blocking the system side) until the project has caught up with
-  the previous launch; it is then launched once. No start is lost or doubled; a start
-  given while `busy` is ignored.
+  project clock BEFORE `fin` rises, and not written again until a later check completes, which
+  needs a new launch that first clears `done`; `sys` reads it only while `done` is high.
+- `done`, `busy`, `pend`, `dly`: sys-only registers.
 
-Unwind. When `run` falls (abort, reset, a `done` accepted) or `gen` changes, a check in progress
-returns to idle by itself: `override` and `override_rst` drop, the slot's final registers
-carry the normal controls to the pins one clock later, and the reset chain releases `rst_n`
-two clocks after that (all flip-flop outputs, no glitch). Bound: `UNWIND_CLOCKS` = 8 project
-clocks after `run` fell, counted from the first project clock after the request reaches the
-project; with the clock stopped it happens when the clock resumes. The result of an unwound
-check is never reported.
+Not proven here, for the build task: the returning status bits (`my_gen`, `rel`, `fin`) and the
+32-bit buses `crc` and `n_hold`, which cross without synchronisers or on the argument that
+they are stable, need a skew / maximum-delay constraint of less than one project period
+between the bits of one pair or bus (20 ns at 50 MHz), because the arguments above hold the
+stable value for at least two project clocks and tolerate about one sys clock of skew, no more.
 
-What the check does, in project clocks. Let A be the clock edge at which the project begins
-(IDLE with `run_s` high). Edge A + j is the j-th edge after it::
+What the check does, in project clocks. Let A be the clock edge at which BEGIN acts (the
+second BEGIN edge). Edge A + j is the j-th edge after it::
 
     A        override on, reset requested
     A+1      pin_ena = 1, pin_ui_in = reference ui_in   (slot's final registers); FF1 low
@@ -94,13 +126,22 @@ What the check does, in project clocks. Let A be the clock edge at which the pro
     then     `crc_out := ~crc_acc` (final XOR), override released, and one project clock later
              `fin` rises
 
-The check is held for at least 13 clocks even when N is small. When it finishes, the override
-is released and the pins revert at once to the slot's normal values (ena, ui_in and
-rst_n as the software set them); the design's INTERNAL state is where the stimulus left it
-(running), and software resets it afterwards. The reset from the check is synchronous (D of the
-slot's first reset flip-flop), so the two reset sources need no logic on the pin; if software holds
-the reset request asserted the design stays in reset and the CRC is of a design held in reset
-(the check still completes).
+The check is held for at least 13 clocks even when N is small. When it finishes the override
+is released and the pins revert to the slot's normal values (ena, ui_in and rst_n as the
+software set them); the design's INTERNAL state stays where the stimulus left it (running), and
+software resets it afterwards. The reset from the check goes through D of the slot's first
+reset flip-flop, so there is no logic on the pin; if software holds the reset request asserted
+the design stays in reset and the CRC is of a design held in reset.
+
+Unwind and gap, in project edges. `run_s` low is seen after edges e1, e2 (two flops); the FSM
+acts on e3 = u: override and `rstq` drop; the slot's final registers carry `ena` and `ui_in`
+to the pins on u + 1, the reset chain returns `rst_n` high on u + 2 (FF1 on u + 1, FF2 on
+u + 2), and `rel` rises on u + 3. `UNWIND_CLOCKS` = 5: `ena`/`ui_in` are normal within 4 edges
+of the first edge that samples `run` low (e1..u+1), plus one for a first flop that resolves
+late; `RESET_BACK_CLOCKS` = `UNWIND_CLOCKS` + 2 for `rst_n`. The earliest next begin is the
+BEGIN edge after the IDLE edge u + 4: A >= u + 6, the override reaches the pins after A + 1 >=
+u + 7, so the pins are normal at least from u + 2 to u + 6: `MIN_GAP_CLOCKS` = 5 samples (the
+launch delay makes it far longer in practice).
 
 Interpreting the CRC. After a design that was already running, the result equals the
 reference only for designs whose reset initialises ALL their state; run straight after
@@ -113,6 +154,8 @@ recovers it, one system clock later; nothing then ever runs on the project side.
 
 from __future__ import annotations
 
+from math import ceil
+
 from migen import Cat, Constant, If, Module, Signal
 from migen.genlib.cdc import MultiReg
 
@@ -120,13 +163,33 @@ from tt_harness.compare.recorder import crc32_update
 from tt_harness.core.stimulus import RESET_CLOCKS
 
 MIN_CLOCKS_BEFORE_RELEASE = RESET_CLOCKS + 3  # edges after A before the sequence can complete
-UNWIND_CLOCKS = 8
+UNWIND_CLOCKS = 5
+RESET_BACK_CLOCKS = UNWIND_CLOCKS + 2
+MIN_GAP_CLOCKS = 5
+DEFAULT_SYS_HZ = 50_000_000
+DEFAULT_MIN_PROJECT_HZ = 390_000  # the `clock_running` threshold
+
+S_IDLE, S_BEGIN, S_RUN, S_FIN, S_UNW = range(5)
+
+
+def launch_delay(sys_hz: int, min_project_hz: int) -> int:
+    """System clocks between `run` rising and `gen` toggling (`D` above)."""
+    return 3 * ceil(sys_hz / min_project_hz) + 4
 
 
 class AtSpeedCheck(Module):
-    def __init__(self, ui_in: int = 0) -> None:
+    def __init__(
+        self,
+        ui_in: int = 0,
+        sys_hz: int = DEFAULT_SYS_HZ,
+        min_project_hz: int = DEFAULT_MIN_PROJECT_HZ,
+    ) -> None:
         if not 0 <= ui_in <= 0xFF:
             raise ValueError(f"ui_in must be 0..255, got {ui_in}")
+        if sys_hz < 1 or min_project_hz < 1:
+            raise ValueError("sys_hz and min_project_hz must be positive")
+        d = launch_delay(sys_hz, min_project_hz)
+        self.launch_delay = d
         # sys side
         self.start = Signal()
         self.abort = Signal()
@@ -141,16 +204,20 @@ class AtSpeedCheck(Module):
         self.override_ui_in = Signal(8)
 
         # ---- sys ----
-        gen = Signal(reset_less=True)
-        run = Signal()
+        self.gen = gen = Signal(reset_less=True)
+        self.run_level = run = Signal()
         pend = Signal()
+        dly = Signal(max=d + 1)
         n_req = Signal(32, reset_less=True)
         self.n_hold = n_hold = Signal(32, reset_less=True)
         gen_p_s = Signal()  # the project's my_gen, in sys
+        rel_s = Signal()
         fin_s = Signal()
         caught_up = Signal()
+        launch = Signal()
         self.comb += [
             caught_up.eq(gen_p_s == gen),
+            launch.eq(pend & ~run & caught_up & rel_s),
             self.busy.eq(run | pend),
         ]
         self.sync += [
@@ -160,15 +227,10 @@ class AtSpeedCheck(Module):
                 n_req.eq(self.clocks),
                 self.done.eq(0),
             ),
-            If(
-                pend & ~run & caught_up,
-                gen.eq(~gen),
-                run.eq(1),
-                pend.eq(0),
-                n_hold.eq(n_req),
-            ),
-            If(run & caught_up & fin_s, run.eq(0), self.done.eq(1)),
-            If(self.abort, run.eq(0), pend.eq(0), self.done.eq(0)),
+            If(launch, run.eq(1), pend.eq(0), n_hold.eq(n_req), dly.eq(d)),
+            If(run & (dly != 0), dly.eq(dly - 1), If(dly == 1, gen.eq(~gen))),
+            If(run & (dly == 0) & caught_up & fin_s, run.eq(0), self.done.eq(1)),
+            If(self.abort, run.eq(0), pend.eq(0), self.done.eq(0), dly.eq(0)),
         ]
 
         # ---- project ----
@@ -177,13 +239,16 @@ class AtSpeedCheck(Module):
         gen_s = Signal()
         my_gen = Signal(reset_less=True)
         fin = Signal(reset_less=True)
+        rel = Signal(reset=1, reset_less=True)
         self.specials += [
             MultiReg(run, run_s, odomain="project", n=2),
             MultiReg(gen, gen_s, odomain="project", n=2),
             MultiReg(my_gen, gen_p_s, odomain="sys", n=2),
+            MultiReg(rel, rel_s, odomain="sys", n=2),
             MultiReg(fin, fin_s, odomain="sys", n=2),
         ]
-        running = Signal(reset_less=True)
+        state = Signal(3, reset_less=True)
+        tmr = Signal(2, reset_less=True)
         cnt = Signal(32, reset_less=True)
         left = Signal(32, reset_less=True)
         win = Signal(reset_less=True)
@@ -195,67 +260,86 @@ class AtSpeedCheck(Module):
         fin_pending = Signal(reset_less=True)
         ovr = Signal(reset_less=True)
         rstq = Signal(reset_less=True)
+        new_gen = Signal()
         complete = Signal()
-        unwind = Signal()
-        idle = Signal()
         self.comb += [
-            unwind.eq(~run_s | (gen_s != my_gen)),
-            idle.eq(~running & ~fin & ~fin_pending),
-            complete.eq(running & fin_data & (cnt >= MIN_CLOCKS_BEFORE_RELEASE)),
+            new_gen.eq(gen_s != my_gen),
+            complete.eq(fin_data & (cnt >= MIN_CLOCKS_BEFORE_RELEASE)),
             self.override.eq(ovr),
             self.override_rst.eq(rstq),
             self.override_ui_in.eq(Constant(ui_in, 8)),
             self.crc.eq(crc_out),
         ]
+
+        def to_unwind():
+            return [
+                state.eq(S_UNW),
+                tmr.eq(2),
+                ovr.eq(0),
+                rstq.eq(0),
+                fin.eq(0),
+                fin_data.eq(0),
+                fin_pending.eq(0),
+                win.eq(0),
+            ]
+
         sp += [
             samp.eq(self.uo_out),
             samp_v.eq(win),
             If(samp_v, crc_acc.eq(Cat(*crc32_update(crc_acc, samp)))),
             If(
-                running,
-                cnt.eq(cnt + 1),
-                If(cnt == RESET_CLOCKS - 1, rstq.eq(0)),
-                If((cnt == 2) & (left != 0), win.eq(1)),
-                If((cnt == 2) & (left == 0), fin_data.eq(1)),
-                If(win & (left == 1), win.eq(0)),
-                If(win, left.eq(left - 1)),
-                If(samp_v & ~win, fin_data.eq(1)),
-            ),
-            If(
-                complete,
-                crc_out.eq(~crc_acc),
-                ovr.eq(0),
-                rstq.eq(0),
-                running.eq(0),
-                fin_data.eq(0),
-                fin_pending.eq(1),
-            ),
-            If(fin_pending, fin.eq(1), fin_pending.eq(0)),
-            # Unwind: the request went away or a new launch arrived. Nothing is reported.
-            If(
-                (running | fin | fin_pending) & unwind,
-                ovr.eq(0),
-                rstq.eq(0),
-                running.eq(0),
-                fin_data.eq(0),
-                fin_pending.eq(0),
-                fin.eq(0),
-                win.eq(0),
-            ),
-            # Idle: follow `gen`, and begin when a check is requested.
-            If(
-                idle,
-                my_gen.eq(gen_s),
-                If(
-                    run_s,
-                    running.eq(1),
-                    cnt.eq(0),
-                    left.eq(n_hold),
-                    win.eq(0),
-                    fin_data.eq(0),
-                    crc_acc.eq(0xFFFFFFFF),
-                    ovr.eq(1),
-                    rstq.eq(1),
+                state == S_IDLE,
+                If(run_s & new_gen, state.eq(S_BEGIN), tmr.eq(1), rel.eq(0)).Elif(
+                    ~run_s & new_gen, my_gen.eq(gen_s)
                 ),
+            )
+            .Elif(
+                state == S_BEGIN,
+                If(
+                    tmr != 0,
+                    tmr.eq(tmr - 1),
+                ).Else(
+                    my_gen.eq(gen_s),
+                    If(
+                        run_s,
+                        state.eq(S_RUN),
+                        cnt.eq(0),
+                        left.eq(n_hold),
+                        win.eq(0),
+                        fin_data.eq(0),
+                        crc_acc.eq(0xFFFFFFFF),
+                        ovr.eq(1),
+                        rstq.eq(1),
+                    ).Else(*to_unwind()),
+                ),
+            )
+            .Elif(
+                state == S_RUN,
+                If(~run_s, *to_unwind()).Else(
+                    cnt.eq(cnt + 1),
+                    If(cnt == RESET_CLOCKS - 1, rstq.eq(0)),
+                    If((cnt == 2) & (left != 0), win.eq(1)),
+                    If((cnt == 2) & (left == 0), fin_data.eq(1)),
+                    If(win & (left == 1), win.eq(0)),
+                    If(win, left.eq(left - 1)),
+                    If(samp_v & ~win, fin_data.eq(1)),
+                    If(
+                        complete,
+                        crc_out.eq(~crc_acc),
+                        ovr.eq(0),
+                        rstq.eq(0),
+                        fin_data.eq(0),
+                        fin_pending.eq(1),
+                        state.eq(S_FIN),
+                    ),
+                ),
+            )
+            .Elif(
+                state == S_FIN,
+                If(~run_s, *to_unwind()).Elif(fin_pending, fin.eq(1), fin_pending.eq(0)),
+            )
+            .Elif(
+                state == S_UNW,
+                If(tmr != 0, tmr.eq(tmr - 1)).Else(state.eq(S_IDLE), rel.eq(1)),
             ),
         ]

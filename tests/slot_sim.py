@@ -43,7 +43,7 @@ def edge_times(period: int, offset: int, until: int) -> list[int]:
     return list(range(offset, until + 1, period))
 
 
-def _lowerings(ce: Signal):
+def _lowerings(ce: Signal, late: tuple = ()):
     class _Model(Module):
         def __init__(self, f: AsyncClearFlop):
             qd = Signal(reset_less=True)
@@ -68,7 +68,11 @@ def _lowerings(ce: Signal):
 
     class _GatedMultiRegImpl(Module):
         def __init__(self, dr: MultiReg):
-            regs = [Signal(len(dr.i), reset_less=True) for _ in range(dr.n)]
+            # A synchroniser one project clock slower than the others models the worst skew
+            # between two signals that changed on the same system edge (a first flop that
+            # resolves late); `late` lists the signals whose crossing is made slower.
+            stages = dr.n + (1 if any(dr.i is x for x in late) else 0)
+            regs = [Signal(len(dr.i), reset_less=True) for _ in range(stages)]
             sd = getattr(self.sync, dr.odomain)
             src = dr.i
             for reg in regs:
@@ -102,9 +106,11 @@ def run(
     tick_gens=(),
     project: tuple[int, int] | None = (39_700, 5_050),
     vcd: str | None = None,
+    late: tuple = (),
 ) -> None:
     """Run `dut` (made with `gate`) until every non-passive generator has finished.
 
+    `late`: signals whose `MultiReg` into `project` gets one extra stage (skew injection).
     `project` is the project clock's (period, offset): its first rising edge is at time
     `offset` ps and it then rises every `period` ps (period even). None is a clock that
     never toggles at all (its domain has no clock in the simulation). Offsets that are
@@ -121,6 +127,6 @@ def run(
         dut,
         gens,
         clocks=clocks,
-        special_overrides=_lowerings(dut.ce_project),
+        special_overrides=_lowerings(dut.ce_project, tuple(late)),
         vcd_name=vcd,
     )

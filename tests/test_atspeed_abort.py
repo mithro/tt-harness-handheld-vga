@@ -25,19 +25,18 @@ import zlib
 
 import pytest
 from migen import ClockDomain, Module, Signal
+from pin_check import REF_UI, SW_UI, assert_clean
 from slot_sim import gate, run
 from test_atspeed import _Toy, toy_bytes, waits
 
-from tt_harness.core.atspeed import AtSpeedCheck
+from tt_harness.core.atspeed import UNWIND_CLOCKS, AtSpeedCheck
 from tt_harness.core.slot import ProjectSlot
 
-SW_UI = 0x11
-REF_UI = 0x5A
 # Project clock settings: (period ps, first edge ps). Normal, slow (1 MHz), fast (about 50 MHz).
 CLOCKS = {"normal": (39_700, 5_050), "slow": (1_000_000, 5_050), "fast": (20_100, 4_050)}
-# Pins are back to the slot's normal values this many project clocks after an abort or reset:
-# run_s low (2 flops + the edge that acts) + the final registers + the 2-flop reset chain.
-UNWIND_CLOCKS = 8
+# Every project clock these tests use is at least 1 MHz: a shorter launch delay than the
+# default (390 kHz), so the simulations stay short. The default is used by the Verilator tests.
+MIN_PROJECT_HZ = 1_000_000
 
 
 class Bench(Module):
@@ -46,7 +45,7 @@ class Bench(Module):
         self.submodules.slot = slot = ProjectSlot(
             None, Signal(), 100_000_000, 25_175_000, sim_clock=True
         )
-        self.submodules.check = check = AtSpeedCheck(ui_in=REF_UI)
+        self.submodules.check = check = AtSpeedCheck(ui_in=REF_UI, min_project_hz=MIN_PROJECT_HZ)
         slot.attach(check)
         self.submodules.toy = _Toy(slot)
 
@@ -103,9 +102,9 @@ def go(b: Bench, sysgen, rec: Recorder, project=CLOCKS["normal"]) -> None:
     run(b, [sysgen], [rec.project()], tick_gens=[], project=project)
 
 
-def go2(b: Bench, sysgen, rec: Recorder, project) -> None:
+def go2(b: Bench, sysgen, rec: Recorder, project, late: tuple = ()) -> None:
     # `sys`-rate recorder as a second sys generator
-    run(b, [sysgen, rec.sys()], [rec.project()], project=project)
+    run(b, [sysgen, rec.sys()], [rec.project()], project=project, late=late)
 
 
 def wait_done(b: Bench, limit: int = 8_000):
@@ -197,6 +196,7 @@ def test_abort_at_every_stage_stops_the_check_and_its_result_never_appears(
         assert not out["leak_after"], f"override still on after the unwind bound (k={k})"
         assert out["n"] is not None, (k, out)
         assert out["crc"] == zlib.crc32(toy_bytes(25)), (k, out)
+        assert_clean(rec.pins)
         after = rec.done_crcs[out["done_before_new"] :]
         assert after and set(after) == {zlib.crc32(toy_bytes(25))}, (k, after[:3])
 
@@ -277,6 +277,7 @@ def test_stop_the_clock_mid_check_abort_restart_the_clock_start_again(clock: str
     assert out["flags"] == (0, 0)
     assert out["n"] is not None and out["crc"] == zlib.crc32(toy_bytes(33))
     assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(33))}
+    assert_clean(rec.pins)
 
 
 @pytest.mark.parametrize(
@@ -398,6 +399,7 @@ def test_start_immediately_after_abort_is_held_and_runs_the_new_check(clock: str
         assert out["busy"] == 1 and out["n"] is not None, (k, out)
         assert out["crc"] == zlib.crc32(toy_bytes(27)), (k, out)
         assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(27))}, (k, rec.done_crcs[:3])
+        assert_clean(rec.pins)
 
 
 def test_abort_in_the_same_cycle_as_start_wins() -> None:
@@ -479,6 +481,7 @@ def test_aborted_and_restarted_with_the_clock_stopped_runs_only_the_last_start(
     assert out["busy"] == 1
     assert out["crc"] == zlib.crc32(toy_bytes(33))
     assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(33))}
+    assert_clean(rec.pins)
 
 
 @pytest.mark.parametrize(

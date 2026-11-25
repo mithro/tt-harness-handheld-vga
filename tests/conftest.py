@@ -12,10 +12,12 @@ not run the tests while a build into that tree is in progress.)
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import build_tree
 import pytest
+from _pytest.mark.expression import Expression
 
 SLOW_REASON = "slow: run with --run-slow"
 
@@ -33,8 +35,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def slow_selected(config: pytest.Config) -> bool:
-    """`slow` tests run when asked for: `--run-slow`, or a `-m` expression naming `slow`."""
-    return bool(config.getoption("--run-slow")) or "slow" in (config.getoption("-m") or "")
+    """`slow` tests run when asked for: `--run-slow`, or a `-m` expression that names `slow`
+    and is true for a test whose only marker is `slow` (so `slow` and `toolchain or slow`
+    select them; `not slow` and the standard fast command, which does not mention it, do not)."""
+    if config.getoption("--run-slow"):
+        return True
+    expr = config.getoption("-m") or ""
+    if not re.search(r"\bslow\b", expr):
+        return False
+    return Expression.compile(expr).evaluate(lambda name: name == "slow")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

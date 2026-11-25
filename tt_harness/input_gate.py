@@ -80,6 +80,7 @@ _REPORT_LINE = re.compile(
     re.MULTILINE,
 )
 CLOCK_BUFFERS = ("BUFG", "IBUF", "BUFGCE", "BUFH", "BUFHCE")  # one clock input, pin I
+MAX_CLOCK_HOPS = 16  # a longer chain is not a plain buffer chain: it fails the check
 
 
 def instance_connections(top_verilog: str, instance: str) -> dict[str, str]:
@@ -304,7 +305,7 @@ def yosys_driver_clocks(
             cells: list[str] = []
             stopped: str | None = None
             current = clock_bits[0]
-            for _ in range(16):  # a chain of buffers; bounded against a loop
+            for _ in range(MAX_CLOCK_HOPS):
                 seen += names.get(current, [])
                 buf = driver.get(current)
                 if buf is None:
@@ -317,6 +318,8 @@ def yosys_driver_clocks(
                 if not inputs:
                     break
                 current = inputs[0]
+            else:  # not a plain buffer chain: too long (or a loop)
+                stopped = f"more than {MAX_CLOCK_HOPS} clock buffers"
             traces.append(ClockTrace(tuple(sorted(set(seen))), tuple(cells), stopped))
         out[port] = tuple(traces) if traces else (None,)
     return out
@@ -359,16 +362,19 @@ def clock_offenders(
     for port in sorted(drivers):
         kinds = drivers[port]
         entries = clocks.get(port)
-        flops = [i for i, k in enumerate(kinds) if k in FLIP_FLOPS]
-        if entries is not None and len(entries) != len(kinds) and flops:
+        mismatch = entries is not None and len(entries) != len(kinds)
+        if mismatch and any(k in FLIP_FLOPS for k in kinds):
             out.append(f"{port}: {len(kinds)} bits but {len(entries)} clock entries")
-            continue
         for bit, kind in enumerate(kinds):
             where = f"{port}[{bit}]"
             if kind in (CONSTANT, FOLDED):
                 continue
             if kind not in FLIP_FLOPS:
                 out.append(f"{where}: driven by {kind}, not a flip-flop")
+            elif mismatch:
+                out.append(
+                    f"{where}: unchecked ({len(entries)} clock entries for {len(kinds)} bits)"
+                )
             elif entries is None:
                 out.append(f"{where}: no clock data")
             elif entries[bit] is None:
@@ -376,7 +382,7 @@ def clock_offenders(
             else:
                 trace = entries[bit]
                 if trace.stopped_at is not None:
-                    out.append(f"{where}: clock gated by a {trace.stopped_at}")
+                    out.append(f"{where}: clock not a plain buffer chain: {trace.stopped_at}")
                 elif expected not in trace.names:
                     out.append(f"{where}: clocked by {'/'.join(trace.names)}, not {expected}")
                 elif allowed_trace is not None and trace.cells != tuple(allowed_trace):

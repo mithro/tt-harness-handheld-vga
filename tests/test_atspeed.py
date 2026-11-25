@@ -43,7 +43,7 @@ class _Bench(Module):
         self.submodules.slot = slot = ProjectSlot(
             None, Signal(), 100_000_000, clock_hz, sim_clock=sim_clock
         )
-        self.submodules.check = check = AtSpeedCheck()
+        self.submodules.check = check = AtSpeedCheck(min_project_hz=1_000_000)
         slot.attach(check)
         if sim_clock:
             self.submodules.toy = _Toy(slot)
@@ -85,6 +85,23 @@ def test_crc_of_a_toy_design_matches_the_definition(n: int) -> None:
 
     run(b, [sysgen()])
     assert out["crc"] == zlib.crc32(toy_bytes(n))
+
+
+def test_start_at_a_few_phases_gives_the_same_crc() -> None:
+    """Fast subset of `test_restart_start_phases_and_busy_flags`: three project clock phases
+    against the system clock, one start delay each, one check each."""
+    expected = zlib.crc32(toy_bytes(40))
+    for offset, delay in ((50, 0), (14_050, 1), (29_050, 3)):
+        b = bench()
+        out: dict = {}
+
+        def sysgen():
+            yield b.slot.rst_n.eq(1)
+            yield from waits(30 + delay)
+            yield from do_check(b, 40, out, "crc")
+
+        run(b, [sysgen()], project=(39_700, offset))
+        assert out["crc"] == expected, (offset, delay, out)
 
 
 @pytest.mark.slow
@@ -246,7 +263,7 @@ class _Sim:
         return r.stdout.splitlines()
 
     def limit(self, n: int) -> int:
-        return (n + 200) * (self.proj_ps + 100)
+        return (n + 1000) * (self.proj_ps + 100)  # the launch delay is ~400 sys clocks
 
     def check_script(self, n: int, settle_ps: int = 2_000_000) -> list[str]:
         return [

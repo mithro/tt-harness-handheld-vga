@@ -38,6 +38,10 @@ class _Item:
         (True, "", True),
         (False, "slow", True),
         (False, "toolchain or slow", True),
+        (False, "not slow", False),
+        (False, "slow and not vivado", True),
+        (False, "not slow and not toolchain", False),
+        (False, "slowly", False),
     ],
 )
 def test_slow_tests_run_only_when_asked_for(run_slow: bool, expr: str, selected: bool) -> None:
