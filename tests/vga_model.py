@@ -14,8 +14,8 @@ and a frame likewise vertically, with the vsync pulse after v_front lines. At di
 design's clock is D times the pixel clock: each pixel is held for D clocks.
 
 `vsync_phase` says where within a line the vsync level changes: "line_start" (x = 0, as a
-counter that compares y does) or "hsync" (at the first clock of the hsync pulse, so both
-sync edges coincide). `dirty` makes the clocks of a divided pixel other than the middle one
+counter that compares y does), "hsync" (at the first clock of the hsync pulse, so both
+sync edges coincide) or "after_hsync" (at the end of the hsync pulse, after its leading edge). `dirty` makes the clocks of a divided pixel other than the middle one
 (clock D // 2) carry a wrong colour, to show which clock a capture samples.
 
 Pin assignment (written out here, from the Tiny VGA Pmod and the vgacap stream map):
@@ -91,6 +91,8 @@ class VgaModel:
 
     def _vsync_active(self, x: int, y: int) -> bool:
         if self.vsync_phase == "hsync" and x < self.h_active + self.h_front:
+            y = (y - 1) % self.v_total
+        if self.vsync_phase == "after_hsync" and x < self.h_active + self.h_front + self.h_sync:
             y = (y - 1) % self.v_total
         start = self.v_active + self.v_front
         return start <= y < start + self.v_sync

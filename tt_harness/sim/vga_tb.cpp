@@ -15,7 +15,7 @@
 //
 //     clocks_per_line=800 lines_per_frame=525 hsync_width=96 vsync_lines=2 hsync_positive=1
 //     vsync_positive=1 frames=3 locked=1 no_signal=0 first_publish=813601 first_locked=1233601
-//     frames_done=5 writes=1536000
+//     frames_done=5 writes=1536000 bad_writes=0
 //
 // (on one line; first_* are -1 if never). With --out, a snapshot of the framebuffer is
 // appended to FILE at every `frame_done`: the clock (8 bytes, little endian), then WIDTH *
@@ -117,6 +117,7 @@ int main(int argc, char** argv) {
     long long first_locked = -1;
     uint64_t frames_done = 0;
     uint64_t writes = 0;
+    uint64_t bad_writes = 0;
     for (uint64_t c = 0; c < clocks; c++) {
         top->uo_out = dump[c];
         top->eval();
@@ -131,7 +132,11 @@ int main(int argc, char** argv) {
         }
         if (top->we) {
             writes++;
-            if (top->addr < shadow.size()) shadow[top->addr] = top->data;
+            if (top->addr < shadow.size()) {
+                shadow[top->addr] = top->data;
+            } else {
+                bad_writes++;  // a write outside the framebuffer: a bug in the capture
+            }
         }
         tick(*top);
     }
@@ -140,14 +145,20 @@ int main(int argc, char** argv) {
     std::printf(
         "clocks_per_line=%u lines_per_frame=%u hsync_width=%u vsync_lines=%u hsync_positive=%u "
         "vsync_positive=%u frames=%u locked=%u no_signal=%u first_publish=%lld first_locked=%lld "
-        "frames_done=%llu writes=%llu\n",
+        "frames_done=%llu writes=%llu bad_writes=%llu\n",
         static_cast<unsigned>(top->clocks_per_line), static_cast<unsigned>(top->lines_per_frame),
         static_cast<unsigned>(top->hsync_width), static_cast<unsigned>(top->vsync_lines),
         static_cast<unsigned>(top->hsync_positive), static_cast<unsigned>(top->vsync_positive),
         static_cast<unsigned>(top->frames), static_cast<unsigned>(top->locked),
         static_cast<unsigned>(top->no_signal), first_publish, first_locked,
-        static_cast<unsigned long long>(frames_done), static_cast<unsigned long long>(writes));
+        static_cast<unsigned long long>(frames_done), static_cast<unsigned long long>(writes),
+        static_cast<unsigned long long>(bad_writes));
     std::fflush(stdout);
     top->final();
+    if (bad_writes > 0) {
+        std::fprintf(stderr, "vga_tb: %llu writes with an address outside the framebuffer\n",
+                     static_cast<unsigned long long>(bad_writes));
+        return 1;
+    }
     return 0;
 }

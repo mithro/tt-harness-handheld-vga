@@ -534,11 +534,14 @@ def design_colour(model, x, y) -> int:
 def row_shift(model) -> int:
     """Rows by which a capture at v_offset = vsync lines + back porch is below the design's.
 
-    Counter-based designs (the model's too) start a line before its hsync pulse, so the line
-    that begins at an hsync edge is followed by the next design line's picture: the capture,
-    like vgacap and the reference frames, shows the design one line low.
+    Valid only for a vsync edge at or before the hsync leading edge in the line ("line_start"
+    and "hsync" phases): counter-based designs (the model's too) start a line before its hsync
+    pulse, so the line that begins at an hsync edge is followed by the next design line's
+    picture, and the capture, like vgacap and the reference frames, shows the design one line
+    low. The exact shift depends on where the design puts its vsync edge: with it after the
+    hsync edge ("after_hsync") it is 2 (`test_a_vsync_after_the_hsync_edge_shifts_two_lines`).
     """
-    return 1
+    return 2 if model.vsync_phase == "after_hsync" else 1
 
 
 def colour_of(value: int) -> int:
@@ -765,27 +768,29 @@ def test_blank_writes_zeros_for_the_frames_that_start_while_it_is_asserted() -> 
     values = list(model.stream(7 * n))
     vedges = pin_active_edges(values, VSYNC_BIT, False)
     cap = make_capture(16, 8, model, 20, 10)
-    # Blank goes up after frame 1's picture is complete (during its blanking, so the
-    # clear sweep it starts is over before frame 2's picture) and comes down in the middle
-    # of frame 3, after that frame's vsync edge: frame 3 is still all zeros.
+    # Blank goes up just after frame 1's picture is complete, and comes down in the middle of
+    # frame 3, after that frame's vsync edge: frame 3 is still all zeros. The clear sweep
+    # (128 clocks) is still running at frame 2's vsync edge, so frame 2 is held off (nothing
+    # of it is written, and it has no frame_done); frame 3 is the first frame written.
     frames = expected_writes(model, values, 16, 8, 20, 10)
     up = frames[1][-1][0] + 5  # just after frame 1's last write
+    assert up + 128 > vedges[2] > up
     down = vedges[3] + 12
     events = {up: [cap.blank.eq(1)], down: [cap.blank.eq(0)]}
     writes, done = capture_run(cap, values, events)
     # (frames[k] is the frame that starts at vedges[k])
     snaps = _snapshots(writes, done)
-    assert len(snaps) >= 5
+    assert len(snaps) == 5  # frames 0, 1, 3, 4, 5
     picture = {a: d for _, a, d in frames[1]}
     assert all(len(s) == 128 for s in snaps)
     assert snaps[1] == picture  # frame 1, before blank
-    assert all(v == 0 for v in snaps[2].values())  # frame 2 starts after blank went up
-    assert all(v == 0 for v in snaps[3].values())  # frame 3: blank was up at its boundary
-    assert snaps[4] == {a: d for _, a, d in frames[4]}  # frame 4 is the picture again
-    # Frame 2 and 3 each wrote the whole buffer, in zeros, in the usual way.
-    for k in (2, 3):
-        expected = [(c, a, 0) for c, a, _ in frames[k]]
-        assert [w for w in writes if frames[k][0][0] <= w[0] <= frames[k][-1][0]] == expected
+    assert all(v == 0 for v in snaps[2].values())  # frame 3: blank was up at its boundary
+    assert snaps[3] == {a: d for _, a, d in frames[4]}  # frame 4 is the picture again
+    expected = [(c, a, 0) for c, a, _ in frames[3]]
+    assert [w for w in writes if frames[3][0][0] <= w[0] <= frames[3][-1][0]] == expected
+    assert not [
+        w for w in writes if frames[2][0][0] <= w[0] <= frames[2][-1][0] and w[0] > up + 128
+    ]
 
 
 def test_blank_clears_the_buffer_when_there_is_no_signal() -> None:
@@ -1157,10 +1162,12 @@ def run_bench(bench: Path, dump: Path, clocks: int, settings=None, snapshots: Pa
     cmd = [str(bench), "--dump", str(dump), "--clocks", str(clocks)]
     if settings is not None:
         cmd += ["--settings", *map(str, settings)]
+    cmd += ["--size", str(FB_WIDTH), str(FB_HEIGHT)]  # also makes the harness check addresses
     if snapshots is not None:
-        cmd += ["--size", str(FB_WIDTH), str(FB_HEIGHT), "--out", str(snapshots)]
+        cmd += ["--out", str(snapshots)]
     done = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
     assert done.returncode == 0, done.stderr
+    assert "bad_writes=0" in done.stdout
     return {k: int(v) for k, v in (item.split("=") for item in done.stdout.split())}
 
 
@@ -1426,3 +1433,120 @@ def test_pool_design_frame_matches_reference(vga_bench, tmp_path) -> None:
         assert (width, height) == (640, 480)
         hits = [i for i, f in enumerate(cut) if rgb_of(f["pixels"]) == rgb]
         assert len(hits) == 1, f"the reference's frame 2 matches frames {hits}"
+
+
+# Writes stay inside the buffer ---------------------------------------------------------------
+
+# A small mode with a buffer size that is not a power of two (10 x 7 = 70): 20 x 12 clocks,
+# picture 10 x 7, so a frame is 240 clocks.
+TINY = {
+    "h_active": 10,
+    "h_front": 2,
+    "h_sync": 3,
+    "h_back": 5,
+    "v_active": 7,
+    "v_front": 1,
+    "v_sync": 2,
+    "v_back": 2,
+}
+
+
+def test_no_write_is_ever_outside_the_buffer_whatever_the_blank_pulse_start() -> None:
+    """A blank pulse at every start time of a running picture; never an address >= w * h."""
+    model = VgaModel(**TINY)
+    assert model.clocks_per_frame == 240
+    cap = make_capture(10, 7, model, h_offset=3 + 5, v_offset=2 + 2)
+    spacing = 73  # a whole sweep (70 clocks) and its release apart, coprime to the frame
+    pulses = 240
+    values = list(model.stream(pulses * spacing + 200))
+    events = {}
+    for k in range(pulses):
+        events[40 + k * spacing] = [cap.blank.eq(1)]
+        events[41 + k * spacing] = [cap.blank.eq(0)]
+    writes, _ = capture_run(cap, values, events)
+    assert len(writes) >= 70 * pulses  # all the sweeps ran
+    bad = [w for w in writes if w[1] >= 70]
+    pulses_hit = {(w[0] - 40) // spacing for w in bad}
+    assert not bad, (
+        f"{len(bad)} writes outside the buffer after {len(pulses_hit)} of {pulses} blank-pulse "
+        f"start times, first {bad[0]}"
+    )
+    starts = {(40 + k * spacing) % 240 for k in range(pulses)}
+    assert len(starts) == 240  # every start time of the frame was tried
+
+
+def test_after_a_sweep_the_first_frame_is_clean_and_whole() -> None:
+    model = VgaModel(**TINY)
+    values = list(model.stream(12 * model.clocks_per_frame))
+    cap = make_capture(10, 7, model, 8, 4)
+    vedges = pin_active_edges(values, VSYNC_BIT, False)
+    # a one-clock blank pulse in the middle of the picture of frame 2
+    start = vedges[2] + 6 * 20 + 14
+    events = {start: [cap.blank.eq(1)], start + 1: [cap.blank.eq(0)]}
+    writes, done = capture_run(cap, values, events)
+    frames = expected_writes(model, values, 10, 7, 8, 4)
+    # Picture writes are suppressed from the sweep until the next vsync edge: frame 2 is
+    # never completed (no frame_done for it), frame 3 onwards are whole pictures.
+    assert len(done) == len(frames) - 1
+    snaps = _snapshots(writes, done)
+    assert snaps[2] == {a: d for _, a, d in frames[3]}
+    assert snaps[3] == {a: d for _, a, d in frames[4]}
+    assert all(w[1] < 70 for w in writes)
+
+
+def test_normal_capture_never_writes_outside_the_buffer() -> None:
+    model = VgaModel(**TINY)
+    values = list(model.stream(6 * model.clocks_per_frame))
+    for width, height, h_step, v_step, h_offset, v_offset in (
+        (10, 7, 1, 1, 8, 4),
+        (9, 5, 1, 1, 8, 4),
+        (5, 3, 2, 2, 8, 4),
+        (10, 7, 1, 1, 12, 9),  # offsets that run off the end of the line and the frame
+        (7, 7, 3, 2, 8, 4),
+    ):
+        cap = make_capture(width, height, model, h_offset, v_offset, h_step=h_step, v_step=v_step)
+        writes, _ = capture_run(cap, values)
+        assert writes
+        assert all(0 <= a < width * height for _, a, _ in writes), (width, height, h_step)
+
+
+def test_a_vsync_after_the_hsync_edge_shifts_two_lines() -> None:
+    # The relation between v_offset and the design's rows is design-dependent: here vsync
+    # changes at the end of the hsync pulse, after its leading edge, and the capture is two
+    # design lines low (one for a vsync before or on the edge).
+    for phase, shift in (("line_start", 1), ("hsync", 1), ("after_hsync", 2)):
+        model = small(vsync_phase=phase)
+        assert row_shift(model) == shift
+        values = list(model.stream(3 * model.clocks_per_frame))
+        cap = make_capture(16, 8, model, 20, 10)
+        writes, _ = capture_run(cap, values)
+        assert writes
+        for _, addr, data in writes:
+            assert data == design_colour(model, addr % 16, addr // 16 + shift), phase
+
+
+def test_a_one_clock_sync_glitch_drops_lock_for_two_frames() -> None:
+    model = small()
+    n = model.clocks_per_frame
+    values = list(model.stream(9 * n))
+    # One clock of hsync going active in the middle of the picture area of line 3 of frame 4
+    # (hsync is negative: high, the glitch is a 1-clock low).
+    glitch = 4 * n + 3 * 40 + 5
+    assert values[glitch] >> HSYNC_BIT & 1
+    values[glitch] &= ~(1 << HSYNC_BIT)
+    t = vga.VgaTiming()
+    seen = trace(t, values, observe_timing(t))
+    pubs = [c for c in range(1, len(values)) if seen["frames"][c] != seen["frames"][c - 1]]
+    # Every measurement changes only on a publication, glitch or not.
+    for c in range(1, len(values)):
+        if measured(seen, c) != measured(seen, c - 1):
+            assert c in pubs
+    after = next(i for i, c in enumerate(pubs) if c > glitch)
+    locked = [seen["locked"][c] for c in pubs]
+    lines = [seen["lines_per_frame"][c] for c in pubs]
+    assert locked[0] == 0  # the first measurement is alone
+    assert lines[after] == 21 and lines[after + 1] == 20  # the extra edge, in one frame only
+    assert locked[after - 1] == 1  # locked before
+    assert locked[after] == 0  # the corrupted frame
+    assert locked[after + 1] == 0  # and the one after: it differs from the corrupted one
+    assert all(locked[after + 2 :])  # then locked again

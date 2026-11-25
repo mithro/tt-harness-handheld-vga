@@ -33,7 +33,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from migen import READ_FIRST, Cat, If, Memory, Module, Mux, Signal
+from migen import READ_FIRST, Cat, If, Memory, Module, Mux, Signal, bits_for
 
 PIXEL_BITS = 6
 
@@ -158,6 +158,12 @@ def classify(
 
     A match is refused if there is no sync pulse or the picture would not fit in the line or
     the frame after those offsets.
+
+    The vertical offset is the convention of `VgaCapture`'s docstring: the same as vgacap's
+    and the reference renders'; the picture lands on the design's own rows one line low
+    for most counter-based designs, and software may adjust `v_offset` by a line or two.
+    Known limit: a hsync (or vsync) with exactly 50% duty reads as negative polarity
+    (`VgaTiming` takes the shorter phase, a tie is negative); that is not a valid video mode.
 
     `clock_hz` (the project clock; 0 if unknown) only fills in the refresh rate in the mode's
     name, `clock_hz / (clocks_per_line * lines_per_frame)`. It never decides or vetoes a
@@ -441,18 +447,21 @@ class VgaCapture(Module):
       second, 4 the third). A pixel is held for `divider` clocks by the design, so the
       other clocks are not used; a design that changes colour within a pixel is sampled
       mid-pixel. `we`, `addr` and `data` are high one clock after the sampled clock.
-    - Lines are counted from the vsync leading edge as the vgacap frame reconstruction
-      (and so the reference frames) does: the first hsync leading edge at or after the clock of
-      that edge (one on the same clock counts) starts line 0, each later hsync leading edge
-      the next line. Row y is stored from line `v_offset + y * v_step`, with the pixels
-      counted from that line's own hsync leading edge. So the picture is that of the line
-      structure VGA modes are tabulated in (a line starts at its hsync pulse), which is not
-      how a counter-based design's lines run: there a line starts in the picture, before its
-      hsync pulse, so the hsync edge that starts "line k" is followed by the design's line
-      k + 1, and with `v_offset` = vsync lines + back porch the capture is one design line
-      low (the design's first line is not stored, the last stored row is the blank line after
-      the picture). vgacap and the reference frames are the same; `v_offset` one less moves
-      the picture up to the design's own rows.
+    - Vertical convention. Lines are counted from the vsync leading edge as the vgacap frame
+      reconstruction does, and the reference renders (which this project compares with) do:
+      the first hsync leading edge at or after the clock of that edge (one on the same clock
+      counts) starts line 0, each later hsync leading edge the next line, and row y is stored
+      from line `v_offset + y * v_step`, pixels counted from that line's own hsync leading
+      edge. The picture top is therefore `v_offset` = vsync lines + back porch lines after
+      the vsync edge, the way a standard monitor reads the mode. How that lands on the
+      design's own rows depends on where the design puts its vsync edge in the line, which
+      the sync pins alone cannot tell. For a design whose vsync edge precedes its hsync
+      edge in the same line (the common tt-vga template: a counter-based design whose
+      line starts in the picture, before the hsync pulse, and whose vsync changes at the
+      line start) the hsync edge that starts "line k" is followed by the design's line
+      k + 1: the design's own line 0 is not shown and one blank line appears at the bottom
+      (the DVD screensaver: row 0 is its line 1). With vsync after the hsync edge in the line
+      it is two lines. `v_offset` is a register: software may adjust it by a line or two.
     - Pixels with x >= width and rows with y >= height are not written, so a larger mode
       is cropped to its top left.
     - `frame_done` is high for one clock, the one after the write of address
@@ -464,12 +473,22 @@ class VgaCapture(Module):
     goes high with no clear done since it last was low, the whole buffer is cleared at once:
     `we` high for `width * height` clocks from address 0, data 0 (this is what blanks the
     screen when no sync pulse arrives, because then there is no frame boundary to wait for).
-    The picture rows that would be written during the clear are lost. Nothing is written
-    for a frame that has no vsync edge, nor for a line that has no hsync edge.
+    Picture writes are held off from the start of a clear until the next vsync leading edge
+    that comes after the clear has finished (a vsync edge during the clear does not count):
+    the frame in progress is not completed (no `frame_done`) and is never continued from
+    the middle of a row. So if sync returns, or blank is pulsed, during a clear, the buffer
+    holds zeros (plus possibly nothing else), and the first complete picture is the second
+    frame after the clear's end at the latest: within two frames of the sweep ending it is a
+    clean whole picture, never a partial one. Nothing is written for a frame that has no
+    vsync edge, nor for a line that has no hsync edge.
+
+    One rule covers every case: `we` is never high with an `addr` outside
+    `0 .. width * height - 1` (one guard on the next address, whatever state the rest is
+    in), including for sizes that are not powers of two.
 
     Settings are used as they are at the clock they matter: change them between frames or
-    accept one garbled frame. The first clock after reset is never an edge. About 87
-    flip-flops for 640 x 480.
+    accept one garbled frame. The first clock after reset is never an edge. About 89
+    flip-flops for 640 x 480 (Yosys).
     """
 
     def __init__(self, width: int, height: int) -> None:
@@ -540,15 +559,34 @@ class VgaCapture(Module):
             last_row.eq(row_now == n - width),
         ]
 
+        hold = Signal()  # picture writes are suppressed until the next vsync edge (after a clear)
+        sweep_start, line_load = Signal(), Signal()
+        addr_next = Signal(bits_for(n))  # the address of the next clock: one place decides it
+        self.comb += [
+            sweep_start.eq(self.blank & ~swept & ~sweeping),
+            line_load.eq(h_edge & (vwait_now == 1)),
+            addr_next.eq(
+                Mux(
+                    sweep_start,
+                    0,
+                    Mux(
+                        sweeping,
+                        self.addr + 1,
+                        Mux(line_load, row_now, Mux(self.we, self.addr + 1, self.addr)),
+                    ),
+                )
+            ),
+        ]
+
         self.sync += [
             self.we.eq(0),
             self.frame_done.eq(self.we & (self.addr == n - 1) & ~sweeping),
-            If(self.we, self.addr.eq(self.addr + 1)),
+            self.addr.eq(addr_next),
             If(
                 col_on,
                 If(
                     wait == 0,
-                    self.we.eq(1),
+                    If(~hold, self.we.eq(1)),
                     self.data.eq(Mux(blank_frame, 0, sample)),
                     x.eq(x + 1),
                     wait.eq(pitch - 1),
@@ -560,6 +598,7 @@ class VgaCapture(Module):
                 vwait.eq(v_off + 1),
                 row_next.eq(0),
                 blank_frame.eq(self.blank),
+                If(~sweeping, hold.eq(0)),
             ),
             If(
                 h_edge,
@@ -569,32 +608,32 @@ class VgaCapture(Module):
                 If(
                     vwait_now == 1,
                     col_on.eq(1),
-                    self.addr.eq(row_now),
                     row_next.eq(row_now + width),
                     vwait.eq(Mux(last_row, 0, v_step)),
                 ).Elif(vwait_now > 1, vwait.eq(vwait_now - 1)),
             ),
-            # The clear sweep wins over the picture.
+            # The clear sweep wins over the picture, and holds it off until the next frame.
             If(~self.blank, swept.eq(0)),
             If(
-                self.blank & ~swept & ~sweeping,
+                sweep_start,
                 sweeping.eq(1),
+                hold.eq(1),
                 self.we.eq(1),
-                self.addr.eq(0),
                 self.data.eq(0),
             ),
             If(
                 sweeping,
                 self.we.eq(1),
                 self.data.eq(0),
-                self.addr.eq(self.addr + 1),
                 If(
                     self.addr == n - 1,
-                    self.we.eq(0),
                     sweeping.eq(0),
                     swept.eq(1),
                 ),
             ),
+            # The one rule for the write strobe: never with an address outside the buffer,
+            # whatever state the rest is in.
+            If(addr_next >= n, self.we.eq(0)),
         ]
 
 
@@ -610,12 +649,14 @@ class Framebuffer(Module):
     the address presented before a read-clock edge is on `rd_data` after it (`rd_data` is a
     register: no asynchronous read), the form the tools map to block RAM. Yosys
     `synth_xilinx` on the generated Verilog gives 15 RAMB36E1 for 320 x 240 (460,800 bits)
-    and 57 for 640 x 480 (1,843,200 bits; the Arty A7-100T has 135), no distributed RAM and
-    no other memory logic than a few multiplexers for the block outputs.
+    and 57 for 640 x 480 (1,843,200 bits), no distributed RAM and no other memory logic than
+    a few multiplexers for the block outputs. 640 x 480 does not fit an Arty A7-35T (50
+    RAMB36), which is why the Arty build uses 320 x 240 (15 of 50); the A7-100T has 135.
 
     There is no handshake and no double buffering: a reader may see a frame while it is being
-    overwritten (tearing), and a read of an address in the clock it is written returns the
-    old or the new pixel, never a mix. `VgaCapture.frame_done` marks the end of a frame for
+    overwritten (tearing), and for a pixel being written at the very moment it is read (the
+    two ports on the same address) the read data is undefined for that one read (Xilinx
+    block RAM documents invalid data for such a collision); acceptable for a display. `VgaCapture.frame_done` marks the end of a frame for
     readers that want to start a scan there.
     """
 
