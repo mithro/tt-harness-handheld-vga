@@ -1,0 +1,26 @@
+{
+ "comment": "set 6, wait 40, set 7, wait 250 loops. Selection writes ui_in 7, then step 0 writes 6 at once, step 2 writes 7 at 40, the pass ends at 290 (end of the last wait): rst_n low at 290, high at 292 (2 ms sleep), then the steps start again at 292 (ui_in 6), 332 (ui_in 7); the next pass ends at 582, the next at 874. ui_in is only rewritten by the steps. The duration timer (1000 ms, two projects) fires at 1000, before the pass that would end at 1166, so the trace ends with next.",
+ "entry": {"address": 260, "subtile": 0, "duration_ms": 1000, "clock_hz": 25000000, "ui_in": 7, "steps": [{"set": 6}, {"wait_ms": 40}, {"set": 7}, {"wait_ms": 250}]},
+ "total_projects": 2,
+ "until_ms": 1000,
+ "events": [
+  [0, "ena", 1],
+  [0, "clock_hz", 25000000],
+  [0, "ui_in", 7],
+  [0, "ui_in", 6],
+  [40, "ui_in", 7],
+  [290, "rst_n", 0],
+  [292, "rst_n", 1],
+  [292, "ui_in", 6],
+  [332, "ui_in", 7],
+  [582, "rst_n", 0],
+  [584, "rst_n", 1],
+  [584, "ui_in", 6],
+  [624, "ui_in", 7],
+  [874, "rst_n", 0],
+  [876, "rst_n", 1],
+  [876, "ui_in", 6],
+  [916, "ui_in", 7],
+  [1000, "next", 0]
+ ]
+}

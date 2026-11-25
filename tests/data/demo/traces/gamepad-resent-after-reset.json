@@ -1,0 +1,27 @@
+{
+ "comment": "Steps: set 2, gamepad [] (no controller: word 0xffffff, every bit 1), wait 10. Selection writes ui_in 0, set writes 2 (the new base), the report is written over base 2 at time 0. The pass ends at 10: rst_n low 10, high 12; then, because a report was sent, it is sent again at 12 (base 2), and only then do the steps restart at 12: set 2, then the report again. Levels for all-ones data: bit 0: 64,96,64; bits 1..23: 96,64 each (data level unchanged so left out); latch: 80 (64|16), 64, 0. 52 levels.",
+ "entry": {"address": 907, "subtile": 0, "duration_ms": 500, "clock_hz": 1000, "ui_in": 0, "steps": [{"set": 2}, {"gamepad": []}, {"wait_ms": 10}]},
+ "total_projects": 1,
+ "until_ms": 12,
+ "reports": {
+  "none": [
+   64, 96, 64,
+   96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64,
+   96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64,
+   96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64, 96, 64,
+   80, 64, 0
+  ]
+ },
+ "events": [
+  [0, "ena", 1],
+  [0, "clock_hz", 1000],
+  [0, "ui_in", 0],
+  [0, "ui_in", 2],
+  [0, "report", "none", 2],
+  [10, "rst_n", 0],
+  [12, "rst_n", 1],
+  [12, "report", "none", 2],
+  [12, "ui_in", 2],
+  [12, "report", "none", 2]
+ ]
+}

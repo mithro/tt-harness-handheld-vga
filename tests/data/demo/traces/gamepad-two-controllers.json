@@ -1,0 +1,24 @@
+{
+ "comment": "Two controllers: player 1 holds start (bit 3), player 2 holds a (bit 8). Word = 0x100 | (0x008 << 12) = 0x008100, so bits 8 and 15 are 1, sent bit 0 first. ui_in is 1, so every written byte is 1 | level. Levels (bit 4 latch = 16, bit 5 clock = 32, bit 6 data = 64): bits 0..7 are 0: (32,0) eight times; bit 8 is 1: 64,96,64; bit 9 is 0: 0,32,0 (data falls while the clock is low); bits 10..14: (32,0) five times (data already 0); bit 15 is 1: 64,96,64; bit 16 is 0: 0,32,0; bits 17..23: (32,0) seven times; latch: 16 then 0 (the final all-low write repeats that 0, so it is left out). 54 levels, all at time 0 after the selection writes; the pass would end at 100 so until_ms 99 shows exactly one report. The 'report' event form is expanded by the test: [t, 'report', name, base] is one gamepad event per level, value base|level.",
+ "entry": {"address": 907, "subtile": 0, "duration_ms": 20000, "clock_hz": 25175000, "ui_in": 1, "steps": [{"gamepad": [{"buttons": ["start"]}, {"buttons": ["a"]}]}, {"wait_ms": 100}]},
+ "total_projects": 1,
+ "until_ms": 99,
+ "reports": {
+  "start_and_a": [
+   32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0,
+   64, 96, 64,
+   0, 32, 0,
+   32, 0, 32, 0, 32, 0, 32, 0, 32, 0,
+   64, 96, 64,
+   0, 32, 0,
+   32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0, 32, 0,
+   16, 0
+  ]
+ },
+ "events": [
+  [0, "ena", 1],
+  [0, "clock_hz", 25175000],
+  [0, "ui_in", 1],
+  [0, "report", "start_and_a", 1]
+ ]
+}
