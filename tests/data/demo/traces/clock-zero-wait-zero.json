@@ -1,0 +1,17 @@
+{
+ "comment": "clock_hz 0 means stop the clock: a clock_hz event with value 0 at selection. Steps wait 0 (no wait, no time passes), wait 30, set 9. A set that is the last step is followed at once by the reset: set at 30, rst_n low at 30, high at 32. The steps restart at 32: wait 0 passes at once, the 30 ms wait ends at 62, set 9, reset 62..64; the next wait would end at 94, after until_ms 70. One project, so no next.",
+ "entry": {"address": 10, "subtile": 1, "duration_ms": 500, "clock_hz": 0, "ui_in": 3, "steps": [{"wait_ms": 0}, {"wait_ms": 30}, {"set": 9}]},
+ "total_projects": 1,
+ "until_ms": 70,
+ "events": [
+  [0, "ena", 1],
+  [0, "clock_hz", 0],
+  [0, "ui_in", 3],
+  [30, "ui_in", 9],
+  [30, "rst_n", 0],
+  [32, "rst_n", 1],
+  [62, "ui_in", 9],
+  [62, "rst_n", 0],
+  [64, "rst_n", 1]
+ ]
+}

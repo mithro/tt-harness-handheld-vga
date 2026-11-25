@@ -1,0 +1,12 @@
+[
+ "project 0: \"steps\" must be a list",
+ "project 1 step 0: must be an object with exactly one key: {'set': 1, 'wait_ms': 2}",
+ "project 1 step 1: must be an object with exactly one key: 5",
+ "project 1 step 2: \"set\" must be an integer 0..255, got 300",
+ "project 1 step 3: \"set\" must be an integer 0..255, got 1",
+ "project 1 step 4: \"wait_ms\" must be an integer >= 0, got -1",
+ "project 1 step 5: unknown step {'press': 1}",
+ "project 1 step 6: must be an object with exactly one key: {}",
+ "project 1: \"steps\" must wait for some time in total",
+ "project 2: \"steps\" must wait for some time in total"
+]

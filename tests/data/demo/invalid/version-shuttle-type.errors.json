@@ -1,0 +1,5 @@
+[
+ "\"version\" must be 1, got 2",
+ "\"shuttle\" is \"tt09\" but this chip is \"ttsky25a\"",
+ "\"projects\" must be a non-empty list"
+]

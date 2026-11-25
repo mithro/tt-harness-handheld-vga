@@ -1,0 +1,12 @@
+[
+ "\"version\" must be 1, got True",
+ "project 0: must be an object",
+ "project 1: missing \"steps\"",
+ "project 2: unknown field \"name\"",
+ "project 3: \"address\" must be an integer >= 0, got -1",
+ "project 3: \"subtile\" must be an integer >= 0, got 0",
+ "project 3: \"duration_ms\" must be an integer > 0, got 0",
+ "project 3: \"clock_hz\" must be an integer >= 0, got -5",
+ "project 3: \"ui_in\" must be an integer 0..255, got 256",
+ "project 4: \"ui_in\" must be an integer 0..255, got True"
+]

@@ -1,0 +1,12 @@
+{
+ "comment": "No steps, two projects in the list: enable, clock, ui_in at time 0, nothing else, then the duration timer (100 ms) ends the entry with a next event. Written by hand from docs/demo-runner.md, Selecting an entry and The duration timer.",
+ "entry": {"address": 907, "subtile": 0, "duration_ms": 100, "clock_hz": 25000000, "ui_in": 5, "steps": []},
+ "total_projects": 2,
+ "until_ms": 100,
+ "events": [
+  [0, "ena", 1],
+  [0, "clock_hz", 25000000],
+  [0, "ui_in", 5],
+  [100, "next", 0]
+ ]
+}

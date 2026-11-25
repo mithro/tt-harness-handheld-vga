@@ -1,0 +1,6 @@
+{"version": true, "shuttle": "ttsky25a", "projects": [
+ "nope",
+ {"address": 907, "subtile": 0, "duration_ms": 15000, "clock_hz": 1, "ui_in": 0},
+ {"address": 907, "subtile": 0, "duration_ms": 15000, "clock_hz": 1, "ui_in": 0, "steps": [], "name": "x"},
+ {"address": -1, "subtile": "0", "duration_ms": 0, "clock_hz": -5, "ui_in": 256, "steps": []},
+ {"address": 907, "subtile": 0, "duration_ms": 15000, "clock_hz": 1, "ui_in": true, "steps": []}]}

@@ -1,0 +1,4 @@
+{"version": 1, "shuttle": "x\"y'z", "projects": [
+ {"address": 907, "subtile": 0, "duration_ms": 15000, "clock_hz": 1, "ui_in": 0, "steps": [
+  {"set": 1, "x": [null, "it's", {"q": 1.5, "s": "say \"hi\"", "t": "both ' and \""}]},
+  "it's", 1e22, 2.5e-7, null, true, [1, 2.0], "tab\there", {"wait_ms": 0}]}]}
