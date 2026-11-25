@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from migen import ClockDomain, Instance, Module, Signal, ResetSignal
+from migen import Cat, ClockDomain, Instance, Module, ResetSignal, Signal
 from migen.fhdl import verilog
 from migen.sim import run_simulation
 
@@ -84,8 +84,9 @@ def _run(
     raw: list[int] = []
     frame_cycles: list[int] = []
 
+    emu.buttons.reset = word  # in place before the first edge
+
     def gen():
-        yield emu.buttons.eq(word)
         for cycle in range(cycles):
             if change and cycle in change:
                 yield emu.buttons.eq(change[cycle])
@@ -133,7 +134,7 @@ def test_timing_is_exact_in_clock_cycles() -> None:
     emu = GamepadEmulator(SIM_FREQ)
     hold = emu.slot_clocks
     assert hold == 4  # CLOCK_HALF_PERIOD_US * 1 MHz
-    assert emu.frame_clocks == SIM_FREQ // FRAME_RATE_HZ
+    assert emu.frame_clocks == round(SIM_FREQ / FRAME_RATE_HZ) == 1667
     word = gamepad_bits((("start",), ("a",)))
     frame = _run(emu, 2 * emu.frame_clocks, word)
     # `_run` records cycle n after the clock edge n+1 of the simulator, so output index i is
@@ -146,9 +147,10 @@ def test_timing_is_exact_in_clock_cycles() -> None:
     first = (FRAME_SLOTS - 1) * hold
     assert frame.frame_cycles == [first, first + emu.frame_clocks]
     # The next frame starts exactly one frame period after the first.
-    assert frame.raw[emu.frame_clocks : emu.frame_clocks + FRAME_SLOTS * hold] == frame.raw[
-        : FRAME_SLOTS * hold
-    ]
+    assert (
+        frame.raw[emu.frame_clocks : emu.frame_clocks + FRAME_SLOTS * hold]
+        == frame.raw[: FRAME_SLOTS * hold]
+    )
     # Idle between frames: all three low.
     assert set(frame.raw[FRAME_SLOTS * hold - hold : emu.frame_clocks]) == {0}
 
@@ -286,15 +288,9 @@ class _Bench(Module):
         )
         self.comb += [
             self.present.eq(is_present),
-            self.pressed0.eq(_cat([w[0] for w in wires.values()])),
-            self.pressed1.eq(_cat([w[1] for w in wires.values()])),
+            self.pressed0.eq(Cat(*[w[0] for w in wires.values()])),
+            self.pressed1.eq(Cat(*[w[1] for w in wires.values()])),
         ]
-
-
-def _cat(bits):
-    from migen import Cat
-
-    return Cat(*bits)
 
 
 @pytest.fixture(scope="module", params=FREQS, ids=[f"{f}Hz" for f in FREQS])
@@ -362,7 +358,9 @@ def _script(bench: Path, lines: list[str]) -> list[Seen]:
     out = []
     for row in done.stdout.splitlines():
         p0, p1, present, latch, clock, data = row.split()
-        out.append(Seen(int(p0, 16), int(p1, 16), int(present, 16), int(latch), int(clock), int(data)))
+        out.append(
+            Seen(int(p0, 16), int(p1, 16), int(present, 16), int(latch), int(clock), int(data))
+        )
     return out
 
 
@@ -442,10 +440,9 @@ def test_buttons_change_only_between_frames_as_the_receiver_sees(bench) -> None:
 
 @pytest.mark.toolchain
 @pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
-def test_receiver_restarts_after_a_reset_of_the_design(bench) -> None:
-    # The receiver alone is reset (as the demo runner's reset pulse does); the emulator keeps
-    # sending, so the next frame restores the buttons. Here both are reset: the first frame
-    # after the reset is complete and correct.
+def test_every_reset_gives_a_complete_first_frame(bench) -> None:
+    # Both are reset, as at power-up: the first frame after the reset is complete and the
+    # receiver decodes it, however often that is repeated.
     word = gamepad_bits((("l",), ("r",)))
     first, second = _script(
         bench,

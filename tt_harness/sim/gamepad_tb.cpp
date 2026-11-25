@@ -31,9 +31,9 @@ namespace {
 constexpr uint64_t kFrameLimitClocks = 20'000'000;
 
 void tick(Vtop& top) {
-    top.cd_sys_clk = 0;
+    top.sys_clk = 0;
     top.eval();
-    top.cd_sys_clk = 1;
+    top.sys_clk = 1;
     top.eval();
 }
 
@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     const std::unique_ptr<VerilatedContext> ctx{new VerilatedContext};
     ctx->commandArgs(argc, argv);
     const auto top = std::make_unique<Vtop>(ctx.get());
-    top->cd_sys_clk = 0;
+    top->sys_clk = 0;
     top->rst = 0;
     top->buttons = 0;
     top->eval();
