@@ -21,7 +21,9 @@ from tt_harness.demo.validate import (
 DATA = Path(__file__).parent / "data" / "demo"
 SHUTTLE = "ttsky25a"
 VALID = sorted((DATA / "valid").glob("*.json"))
-INVALID = sorted(p for p in (DATA / "invalid").glob("*.json") if not p.name.endswith(".errors.json"))
+INVALID = sorted(
+    p for p in (DATA / "invalid").glob("*.json") if not p.name.endswith(".errors.json")
+)
 
 ONE_ENTRY = {
     "address": 907,
@@ -94,15 +96,17 @@ def test_float_where_integer_required_is_rejected():
 def test_booleans_are_not_integers():
     for field in ("address", "subtile", "duration_ms", "clock_hz", "ui_in"):
         errors = validate.validate(conf_with(**{field: True}), SHUTTLE)
-        assert errors == [f'project 0: "{field}" must be '
-                          + {
-                              "address": "an integer >= 0",
-                              "subtile": "an integer >= 0",
-                              "duration_ms": "an integer > 0",
-                              "clock_hz": "an integer >= 0",
-                              "ui_in": "an integer 0..255",
-                          }[field]
-                          + ", got True"]
+        assert errors == [
+            f'project 0: "{field}" must be '
+            + {
+                "address": "an integer >= 0",
+                "subtile": "an integer >= 0",
+                "duration_ms": "an integer > 0",
+                "clock_hz": "an integer >= 0",
+                "ui_in": "an integer 0..255",
+            }[field]
+            + ", got True"
+        ]
     assert validate.validate({**conf_with(), "version": True}, SHUTTLE) == [
         '"version" must be 1, got True'
     ]
