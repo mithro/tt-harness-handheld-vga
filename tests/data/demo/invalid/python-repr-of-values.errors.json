@@ -1,0 +1,12 @@
+[
+ "\"shuttle\" is \"x\"y'z\" but this chip is \"ttsky25a\"",
+ "project 0 step 0: must be an object with exactly one key: {'set': 1, 'x': [None, \"it's\", {'q': 1.5, 's': 'say \"hi\"', 't': 'both \\' and \"'}]}",
+ "project 0 step 1: must be an object with exactly one key: it's",
+ "project 0 step 2: must be an object with exactly one key: 1e+22",
+ "project 0 step 3: must be an object with exactly one key: 2.5e-07",
+ "project 0 step 4: must be an object with exactly one key: None",
+ "project 0 step 5: must be an object with exactly one key: True",
+ "project 0 step 6: must be an object with exactly one key: [1, 2.0]",
+ "project 0 step 7: must be an object with exactly one key: tab\there",
+ "project 0: \"steps\" must wait for some time in total"
+]

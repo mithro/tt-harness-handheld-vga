@@ -1,0 +1,2 @@
+{"version": 1, "shuttle": "ttsky25a", "projects": [
+ {"address": true, "subtile": false, "duration_ms": true, "clock_hz": true, "ui_in": false, "steps": [{"set": true}, {"wait_ms": true}]}]}

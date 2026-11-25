@@ -1,0 +1,4 @@
+{"version": 1, "shuttle": "ttsky25a", "projects": [
+ {"address": 907, "subtile": 0, "duration_ms": 15000, "clock_hz": 25175000, "ui_in": 0, "steps": [{"gamepad": {}}, {"gamepad": [{"buttons": []}, {"buttons": []}, {"buttons": []}]}, {"gamepad": ["a"]}, {"gamepad": [{"buttons": [], "player": 1}]}, {"gamepad": [{"buttons": "a"}]}, {"gamepad": [{"buttons": ["A", "start", 1, ["x"]]}]}, {"gamepad": [{"buttons": ["a", "b"]}, {"buttons": ["b", "b"]}]}, {"gamepad": [{"buttons": ["b", "y", "select", "start", "up", "down", "left", "right", "a", "x", "l", "r"]}]}, {"gamepad": [{"buttons": [true]}]}, {"gamepad": [{"buttons": []}], "wait_ms": 1}, {"wait_ms": 1}]},
+ {"address": 907, "subtile": 0, "duration_ms": 15000, "clock_hz": 0, "ui_in": 112, "steps": [{"set": 16}, {"set": 15}, {"gamepad": []}, {"set": 300}, {"wait_ms": 10}]},
+ {"address": 907, "subtile": 0, "duration_ms": 15000, "clock_hz": 0, "ui_in": 112, "steps": [{"set": 16}, {"wait_ms": 10}]}]}
