@@ -14,7 +14,21 @@ classified (its driver is the Q pin of a flip-flop). The three constant inputs (
 removed the nets. They are accepted (`FOLDED`) because the generated top assigns each net
 only a literal, which is read from that Verilog source and not from the netlist. A tool fault
 that left a constant input driven by logic would show up as a missing net and pass. The gate
-also does not check which clock domain the flip-flop driving `rst_n` is in.
+also does not check which clock domain the flip-flop driving `rst_n` is in, unless the caller
+asks (next paragraph).
+
+Clock domain (added for the demo build, where the project has its own clock). For each
+flip-flop that drives a project input the report also names the net on the flip-flop's clock
+pin, and `clock_offenders` fails any whose clock is not the expected (project clock) net,
+which the caller names. A register of the `sys` domain driving a project input is exactly
+the crossing that causes metastability inside the design. The compare build has one clock and
+does not ask for this check; wiring it into the demo builds is a later task.
+`yosys_driver_clocks` follows the clock net back through clock buffers (`BUFG`, `IBUF`,
+`BUFGCE`, ...) and reports every net name on the way, since a buffer's output net is often
+renamed by the tools; the check passes when the expected name is among them. The Vivado report
+gives the net on the flip-flop's `C` pin as Vivado names it (the clock buffer's output net),
+so the expected name is that one. The Vivado Tcl for this field has not been run
+(no Vivado in the session that wrote it): it is checked against a hand-written sample report.
 
 Finding the nets. The project is flattened into the top by Yosys and its hierarchy is rebuilt
 by Vivado, so "the project's `rst_n` port" is not a reliable name in either netlist. The nets
@@ -55,8 +69,11 @@ _END = "tt-harness project inputs: end"
 
 _CONNECTION = re.compile(r"\.(\w+)\(\s*([^()\s]*)\s*\)")
 _REPORT_LINE = re.compile(
-    rf"^{re.escape(_LINE)}(?P<port>\w+) net (?P<net>\S+) driver (?P<driver>\S+)\s*$", re.MULTILINE
+    rf"^{re.escape(_LINE)}(?P<port>\w+) net (?P<net>\S+) driver (?P<driver>\S+)"
+    r"(?: clock (?P<clock>\S+))?\s*$",
+    re.MULTILINE,
 )
+CLOCK_BUFFERS = ("BUFG", "IBUF", "BUFGCE", "BUFH", "BUFHCE")  # one clock input, pin I
 
 
 def instance_connections(top_verilog: str, instance: str) -> dict[str, str]:
@@ -174,7 +191,16 @@ def vivado_tcl(nets: dict[str, str], report: str) -> str:
         '                set kind "$kind.[get_property REF_PIN_NAME $drv]"',
         "            }",
         "        }",
-        f'        puts $tt_inputs "{_LINE}$port net $net driver $kind"',
+        '        set clock ""',
+        "        if {[llength $drv] == 1} {",
+        "            set cell [get_cells -of_objects $drv]",
+        "            if {[lsearch {FDRE FDSE FDCE FDPE} [get_property REF_NAME $cell]] >= 0} {",
+        "                set cpin [get_pins -quiet -of_objects $cell -filter {REF_PIN_NAME == C}]",
+        "                set cnet [get_nets -quiet -of_objects $cpin]",
+        '                if {[llength $cnet] == 1} { set clock " clock $cnet" }',
+        "            }",
+        "        }",
+        f'        puts $tt_inputs "{_LINE}$port net $net driver $kind$clock"',
         "    }",
         "}",
     ]
@@ -212,3 +238,94 @@ def offenders(drivers: dict[str, tuple[str, ...]]) -> list[str]:
 def summary(drivers: dict[str, tuple[str, ...]]) -> tuple[tuple[str, str], ...]:
     """(port, what drives it) for a result: one word per port when all its bits agree."""
     return tuple((port, "/".join(sorted(set(kinds)))) for port, kinds in sorted(drivers.items()))
+
+
+def _bit_names(module: dict) -> dict:
+    names: dict = {}
+    for name, net in module["netnames"].items():
+        for bit in net["bits"]:
+            names.setdefault(bit, []).append(name)
+    return names
+
+
+def yosys_driver_clocks(
+    netlist: dict, top: str, nets: dict[str, str]
+) -> dict[str, tuple[tuple[str, ...] | None, ...]]:
+    """Per port and bit: the net names on the clock of the flip-flop driving it, or None.
+
+    The clock pin is `C`; the net is followed back through clock buffers (`CLOCK_BUFFERS`)
+    and the names of every net on the way are returned, sorted, so a renamed buffer output
+    does not hide the name of the net it came from. A bit that is not driven by a
+    flip-flop (a constant, a missing net, a LUT) gives None: `offenders` already fails those.
+    """
+    module = netlist["modules"][top]
+    driver = {}
+    for cell in module["cells"].values():
+        for port, direction in cell.get("port_directions", {}).items():
+            if direction == "output":
+                for bit in cell["connections"].get(port, []):
+                    driver[bit] = (cell["type"], port, cell)
+    names = _bit_names(module)
+    out = {}
+    for port, name in nets.items():
+        net = module["netnames"].get(name)
+        kinds: list[tuple[str, ...] | None] = []
+        for bit in net["bits"] if net else []:
+            found = driver.get(bit)
+            if found is None or found[0] not in FLIP_FLOPS or found[1] != "Q":
+                kinds.append(None)
+                continue
+            clock_bits = found[2]["connections"].get("C", [])
+            seen: list[str] = []
+            current = clock_bits[0] if clock_bits else None
+            for _ in range(16):  # a chain of buffers; bounded against a loop
+                if current is None:
+                    break
+                seen += names.get(current, [])
+                buf = driver.get(current)
+                if buf is None or buf[0] not in CLOCK_BUFFERS:
+                    break
+                inputs = buf[2]["connections"].get("I", [])
+                current = inputs[0] if inputs else None
+            kinds.append(tuple(sorted(set(seen))))
+        out[port] = tuple(kinds) if kinds else (None,)
+    return out
+
+
+def parse_vivado_clocks(
+    text: str, nets: dict[str, str]
+) -> dict[str, tuple[tuple[str, ...] | None, ...]]:
+    """Per port and bit: the clock net a flip-flop driver reports, as a one-name tuple, or None.
+
+    Raises ValueError as `parse_vivado` does for an incomplete report or an unknown port.
+    """
+    parse_vivado(text, nets)  # the same validity rules
+    found: dict[str, list] = {port: [] for port in nets}
+    for m in _REPORT_LINE.finditer(text):
+        found[m.group("port")].append((m.group("clock"),) if m.group("clock") else None)
+    return {port: tuple(v) or (None,) for port, v in found.items()}
+
+
+def clock_offenders(
+    drivers: dict[str, tuple[str, ...]],
+    clocks: dict[str, tuple[tuple[str, ...] | None, ...]],
+    expected: str,
+) -> list[str]:
+    """One line per input driven by a flip-flop whose clock net is not `expected`.
+
+    A flip-flop with no reported clock net fails (the tools could not say what clocks it).
+    Constants and folded constants have no clock and pass; anything else that is not a
+    flip-flop is `offenders`' business.
+    """
+    out = []
+    for port in sorted(drivers):
+        for kind, clock in zip(drivers[port], clocks.get(port, ()), strict=False):
+            if kind not in FLIP_FLOPS:
+                continue
+            if not clock:
+                out.append(f"{port} is driven by a {kind} with no known clock net")
+            elif expected not in clock:
+                out.append(
+                    f"{port} is driven by a {kind} clocked by {'/'.join(clock)}, not {expected}"
+                )
+    return sorted(set(out))

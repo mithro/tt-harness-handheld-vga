@@ -1,0 +1,6 @@
+tt-harness project input: ui_in net pin_ui_in[0] driver FDRE clock project_clk
+tt-harness project input: ui_in net pin_ui_in[1] driver FDRE clock project_clk
+tt-harness project input: uio_in net stimulus_uio_in driver missing
+tt-harness project input: ena net pin_ena driver FDRE clock sys_clk
+tt-harness project input: rst_n net pin_rst_n driver FDCE clock project_clk
+tt-harness project inputs: end

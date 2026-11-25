@@ -355,3 +355,86 @@ def test_build_result_carries_the_input_drivers(
     s = _counter()
     result = build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
     assert result.input_drivers == ()
+
+
+# Which clock the driving flip-flop is on -------------------------------------------------------
+#
+# The Yosys case is a real netlist (scripts/input_gate_clock_fixtures.py: a tiny Migen design,
+# `rst_n` and `ui_in` registered in the project clock domain, `ena` in the other one). The Vivado
+# report is HAND-WRITTEN in the format `vivado_tcl` emits: Vivado was not available when this
+# was written, so the Tcl's clock lines are not verified against a real run.
+
+CLOCK_NETS = {
+    "ui_in": "pin_ui_in",
+    "ena": "pin_ena",
+    "rst_n": "pin_rst_n",
+}
+CLOCK_TOP = "clock_domains_fixture"
+
+
+def _clock_case() -> dict:
+    return json.loads((DATA / "yosys-clock-domains.json").read_text())
+
+
+def test_gate_rejects_register_in_the_wrong_domain_yosys() -> None:
+    case = _clock_case()
+    drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
+    assert drivers["ena"] == ("FDRE",) and drivers["rst_n"] == ("FDRE",)
+    assert input_gate.offenders(drivers) == []  # a glitch-free driver, but in which domain?
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    # The clock buffer's output net is renamed by the tool; the chain reaches the port name.
+    assert "project_clk" in clocks["rst_n"][0] and "project_clk" in clocks["ui_in"][0]
+    assert "sys_clk" in clocks["ena"][0]
+    (bad,) = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    assert bad.startswith("ena is driven by a FDRE clocked by ") and bad.endswith(
+        "sys_clk, not project_clk"
+    )
+    # Asked the other way round, the other registers are the wrong ones.
+    wrong = input_gate.clock_offenders(drivers, clocks, "sys_clk")
+    assert [w.split()[0] for w in wrong] == ["rst_n", "ui_in"]
+    assert len(clocks["ui_in"]) == 8
+
+
+def test_a_flip_flop_without_a_clock_net_fails_the_domain_check() -> None:
+    case = _clock_case()
+    for cell in case["modules"][CLOCK_TOP]["cells"].values():
+        if cell["type"] == "FDRE":
+            cell["connections"].pop("C", None)
+    drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    out = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    assert out and all("no known clock net" in line for line in out)
+
+
+def test_clock_check_ignores_constants_and_other_drivers() -> None:
+    drivers = {"ena": (input_gate.FOLDED,), "ui_in": ("LUT2",), "rst_n": (input_gate.CONSTANT,)}
+    clocks = {"ena": (None,), "ui_in": (None,), "rst_n": (None,)}
+    assert input_gate.clock_offenders(drivers, clocks, "project_clk") == []
+
+
+def test_gate_rejects_register_in_the_wrong_domain_vivado() -> None:
+    text = (DATA / "vivado-clock-domains.rpt").read_text()
+    nets = CLOCK_NETS | {"uio_in": "stimulus_uio_in"}
+    drivers = input_gate.parse_vivado(text, nets)
+    assert drivers["rst_n"] == ("FDCE",) and drivers["ui_in"] == ("FDRE", "FDRE")
+    clocks = input_gate.parse_vivado_clocks(text, nets)
+    assert clocks["rst_n"] == (("project_clk",),)
+    assert clocks["uio_in"] == (None,)
+    folded = input_gate.fold_constants(drivers, frozenset({"uio_in"}))
+    assert input_gate.offenders(folded) == []
+    assert input_gate.clock_offenders(folded, clocks, "project_clk") == [
+        "ena is driven by a FDRE clocked by sys_clk, not project_clk"
+    ]
+    # A flip-flop line with no clock field fails, and the old report format still parses.
+    bare = text.replace(" clock project_clk\n", "\n", 1)
+    bare_clocks = input_gate.parse_vivado_clocks(bare, nets)
+    out = input_gate.clock_offenders(folded, bare_clocks, "project_clk")
+    assert any("no known clock net" in line for line in out)
+    old = _vivado("registered")
+    assert input_gate.parse_vivado_clocks(old, NETS)["rst_n"] == (None,)
+
+
+def test_vivado_tcl_reports_the_clock_net_of_a_flip_flop_driver() -> None:
+    tcl = input_gate.vivado_tcl(NETS, "/out/project-inputs.rpt")
+    assert "REF_PIN_NAME == C" in tcl and "get_nets -quiet -of_objects $cpin" in tcl
+    assert 'driver $kind$clock"' in tcl
