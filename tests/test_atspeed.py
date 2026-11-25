@@ -43,7 +43,7 @@ class _Bench(Module):
         self.submodules.slot = slot = ProjectSlot(
             None, Signal(), 100_000_000, clock_hz, sim_clock=sim_clock
         )
-        self.submodules.check = check = AtSpeedCheck(min_project_hz=1_000_000)
+        self.submodules.check = check = AtSpeedCheck()
         slot.attach(check)
         if sim_clock:
             self.submodules.toy = _Toy(slot)

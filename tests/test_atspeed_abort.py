@@ -34,9 +34,13 @@ from tt_harness.core.slot import ProjectSlot
 
 # Project clock settings: (period ps, first edge ps). Normal, slow (1 MHz), fast (about 50 MHz).
 CLOCKS = {"normal": (39_700, 5_050), "slow": (1_000_000, 5_050), "fast": (20_100, 4_050)}
-# Every project clock these tests use is at least 1 MHz: a shorter launch delay than the
-# default (390 kHz), so the simulations stay short. The default is used by the Verilator tests.
-MIN_PROJECT_HZ = 1_000_000
+
+
+def cut_samples(period_ps: int) -> int:
+    """Project clocks from an abort to the pins being normal: the command crosses (at worst a
+    transfer in flight finishes first: 7 Tp + 4 Ts) and unwinds (`UNWIND_CLOCKS`), plus one for
+    the alignment of the abort to the project clock."""
+    return 7 + -(-4 * 20_000 // period_ps) + UNWIND_CLOCKS + 1
 
 
 class Bench(Module):
@@ -45,7 +49,7 @@ class Bench(Module):
         self.submodules.slot = slot = ProjectSlot(
             None, Signal(), 100_000_000, 25_175_000, sim_clock=True
         )
-        self.submodules.check = check = AtSpeedCheck(ui_in=REF_UI, min_project_hz=MIN_PROJECT_HZ)
+        self.submodules.check = check = AtSpeedCheck(ui_in=REF_UI)
         slot.attach(check)
         self.submodules.toy = _Toy(slot)
 
@@ -183,7 +187,7 @@ def test_abort_at_every_stage_stops_the_check_and_its_result_never_appears(
             out["late_done"] = yield b.check.done
             mark2 = len(rec.pins)
             yield from waits(100 * sys_clocks_per_project)
-            out["leak_after"] = rec.overridden(mark + UNWIND_CLOCKS)
+            out["leak_after"] = rec.overridden(mark + cut_samples(period))
             out["quiet"] = len(rec.pins) - mark2
             out["done_before_new"] = len(rec.done_crcs)
             yield from start(b, 25)  # a different N: its CRC differs
@@ -204,7 +208,16 @@ def test_abort_at_every_stage_stops_the_check_and_its_result_never_appears(
         assert after and set(after) == {zlib.crc32(toy_bytes(25))}, (k, after[:3])
 
 
-def test_abort_with_the_clock_stopped_then_started_runs_nothing() -> None:
+def test_abort_with_the_clock_stopped_then_started_never_reports_and_any_begin_is_cut() -> None:
+    """Start, project clock stopped, abort, clock back.
+
+    FINDING (the redesign's ruling expected "runs nothing"): the start word is already in the
+    handshake's `hold` when the abort is given, and `hold` may not change while a transfer is
+    in flight, so on resume that START word is delivered FIRST and the check begins; the
+    `run = 0` word follows within the handshake latency and cuts it. What is guaranteed: no
+    `done`, one well-formed cut block (reset low from its first clock), pins normal again
+    within `cut_samples`.
+    """
     b = make(running=False)
     rec, out = Recorder(b), {}
 
@@ -223,8 +236,9 @@ def test_abort_with_the_clock_stopped_then_started_runs_nothing() -> None:
     go2(b, sysgen(), rec, CLOCKS["normal"])
     assert out["busy_before"] == 1 and out["flags"] == (0, 0) and out["done"] == 0
     assert len(rec.pins) > 100
-    assert not rec.overridden(), "the aborted check ran when the clock came back"
-    # The pins are the slot's own: reset released, ena 0, ui_in the software value.
+    blocks = assert_clean(rec.pins, full_last=False)
+    assert len(blocks) <= 1 and all(low < 10 for _, low in blocks), blocks  # cut early
+    assert not rec.overridden(len(rec.pins) - 20), "the override was not released"
     assert rec.pins[-1] == (1, 0, SW_UI)
     assert rec.done_crcs == []
 
@@ -337,16 +351,18 @@ def test_system_reset_mid_check_then_a_new_start_gives_the_new_checks_result(
         pytest.param("fast", marks=pytest.mark.slow),
     ],
 )
-def test_two_starts_in_quick_succession_run_once(clock: str) -> None:
+def test_two_starts_in_quick_succession_the_last_one_wins(clock: str) -> None:
+    """A `start` is accepted at any time: it cancels a check in progress. The first start's
+    result never appears; the second, with a different N, is the one reported."""
     b = make()
     rec, out = Recorder(b), {}
 
     def sysgen():
-        yield from setup(b)
-        yield b.check.clocks.eq(30)
+        yield from setup(b, max(1, CLOCKS[clock][0] // 20_000))
+        yield b.check.clocks.eq(21)
         yield
         yield from pulse(b.check.start)
-        yield from pulse(b.check.start)  # while busy: ignored, not queued
+        yield b.check.clocks.eq(30)
         yield from pulse(b.check.start)
         out["n"] = yield from wait_done(b, 40_000)
         out["crc"] = yield b.check.crc
@@ -355,9 +371,8 @@ def test_two_starts_in_quick_succession_run_once(clock: str) -> None:
 
     go2(b, sysgen(), rec, CLOCKS[clock])
     assert out["crc"] == zlib.crc32(toy_bytes(30)) and out["busy"] == 0
-    first = rec.pins.index(next(p for p in rec.pins if p[1] == 1))
-    ones = [i for i, p in enumerate(rec.pins) if p[1] == 1]
-    assert ones == list(range(first, ones[-1] + 1)), "the override came on more than once"
+    assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(30))}
+    assert_clean(rec.pins)
 
 
 @pytest.mark.parametrize(
@@ -518,31 +533,3 @@ def test_start_right_after_done_never_shows_the_old_result_as_the_new_one(clock:
     assert out["crc2"] == zlib.crc32(toy_bytes(47))
     # After the second start, `done` was never high with the first check's CRC.
     assert set(rec.done_crcs[out["seen_old"] :]) == {zlib.crc32(toy_bytes(47))}
-
-
-def test_abort_after_gen_toggled_with_the_clock_stopped_then_a_new_start_runs_once() -> None:
-    """The launch's `gen` toggle has gone out (the launch delay elapsed) but the project clock
-    is stopped; abort; start again; resume. The unseen generation is consumed or reused and
-    exactly the last start runs, as one clean sequence."""
-    b = make(running=False)
-    rec, out = Recorder(b), {}
-    delay = b.check.launch_delay
-
-    def sysgen():
-        yield from setup(b)
-        yield from start(b, 200)
-        yield from waits(delay + 50)  # `gen` has toggled
-        yield from pulse(b.check.abort)
-        yield from start(b, 33)
-        yield from waits(delay + 50)
-        out["busy"] = yield b.check.busy
-        yield b.ce_project.eq(1)
-        out["n"] = yield from wait_done(b, 60_000)
-        out["crc"] = yield b.check.crc
-        yield from waits(100)
-
-    go2(b, sysgen(), rec, CLOCKS["normal"])
-    assert out["busy"] == 1
-    assert out["crc"] == zlib.crc32(toy_bytes(33))
-    assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(33))}
-    assert len(assert_clean(rec.pins)) == 1

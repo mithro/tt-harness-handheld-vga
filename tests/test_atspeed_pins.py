@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: B023  (generators defined in loops run within the iteration that made them)
 """Scenarios for the pin-sequence checker (`tests/pin_check.py`): one clean sequence per start."""
 
 from __future__ import annotations
@@ -140,49 +139,147 @@ def test_recipe_start_abort_start_on_the_next_clock_at_2_5_mhz() -> None:
     assert_clean(rec.pins)
 
 
-def test_the_checker_itself_rejects_runts() -> None:
+def test_the_checker_itself_rejects_malformed_sequences() -> None:
     n = NORMAL
-    ok = [n] * 6 + [(1, 1, REF_UI)] + [(0, 1, REF_UI)] * 10 + [(1, 1, REF_UI)] * 3 + [n] * 6
+    low, high = (0, 1, REF_UI), (1, 1, REF_UI)
+    ok = [n] * 6 + [low] * 10 + [high] * 4 + [n] * 6
     assert assert_clean(ok) == [(14, 10)]
-    runt_gap = (
-        [n] * 6 + [(1, 1, REF_UI), (0, 1, REF_UI)] + [(0, 0, SW_UI)] + [(1, 1, REF_UI)] + [n] * 5
-    )
-    with pytest.raises(AssertionError):
-        assert_clean(runt_gap)
-    pulse_in_block = (
-        [n] * 6 + [(0, 1, REF_UI)] * 4 + [(1, 1, REF_UI)] + [(0, 1, REF_UI)] * 6 + [n] * 6
-    )
-    with pytest.raises(AssertionError):
-        assert_clean(pulse_in_block)
-    close = [n] * 6 + [(0, 1, REF_UI)] * 10 + [n] * 2 + [(0, 1, REF_UI)] * 10 + [n] * 6
-    with pytest.raises(AssertionError):
-        assert_clean(close)
-    half = [n] * 6 + [(1, 1, SW_UI)] + [n] * 6
-    with pytest.raises(AssertionError):
-        assert_clean(half)
+    assert assert_clean([n] * 6 + [low] * 3 + [n] * 6, full_last=False) == [(3, 3)]
+    bad = {
+        "override on with reset high first": [n] * 6 + [high] + [low] * 10 + [high] * 3 + [n] * 6,
+        "rst_n pulse inside a block": [n] * 6
+        + [low] * 4
+        + [high]
+        + [low] * 6
+        + [high] * 2
+        + [n] * 6,
+        "reset low for 11 clocks": [n] * 6 + [low] * 11 + [high] * 2 + [n] * 6,
+        "reset low for 9 then high": [n] * 6 + [low] * 9 + [high] * 3 + [n] * 6,
+        "gap of 3": [n] * 6 + [low] * 10 + [high] + [n] * 3 + [low] * 10 + [high] + [n] * 6,
+        "lag sample (rst low after override off)": [n] * 6
+        + [low] * 10
+        + [high]
+        + [(0, 0, SW_UI)]
+        + [n] * 6,
+        "on/off/on": [n] * 6 + [low] * 3 + [n] * 2 + [low] * 10 + [high] + [n] * 6,
+        "partial override": [n] * 6 + [(0, 1, SW_UI)] * 10 + [high] + [n] * 6,
+        "runt reset pulse": [n] * 6 + [(0, 0, SW_UI)] + [n] * 6,
+    }
+    for what, pins in bad.items():
+        with pytest.raises(AssertionError):
+            assert_clean(pins)
+            pytest.fail(f"accepted: {what}")
+    # a gap of exactly MIN_GAP_CLOCKS is fine
+    from tt_harness.core.atspeed import MIN_GAP_CLOCKS
+
+    two = [n] * 6 + [low] * 10 + [high] + [n] * MIN_GAP_CLOCKS + [low] * 10 + [high] + [n] * 6
+    assert len(assert_clean(two)) == 2
 
 
-@pytest.mark.parametrize("late", ["run", "gen"])
-def test_skew_between_run_and_gen_does_not_start_a_check_twice(late: str) -> None:
-    """`run` and `gen` change on the same system edge and cross through separate
-    synchronisers; the simulator has no skew, so one crossing is made a project clock slower
-    (either one): the project must still begin once, with one clean sequence."""
-    for period, offset in ((39_700, 5_050), (400_000, 5_050)):
-        b = make()
-        rec, out = Recorder(b), {}
-        per = per_clock((period, offset))
-        sig = [b.check.run_level] if late == "run" else [b.check.gen]
+# Skew on each crossing wire ------------------------------------------------------------------
+#
+# The simulator has no skew; `late=` makes the crossing of one signal a project clock slower
+# (the worst a first flop can do). A proper handshake must not care about any single wire.
 
-        def sysgen():
-            yield from setup(b)
-            yield from waits(8 * per)
-            yield from start(b, 20)
-            out["n"] = yield from wait_done(b, 20_000)
-            out["crc"] = yield b.check.crc
-            yield from waits(30 * per)
+WIRES = ["cmd.req", "cmd.ack_o", "rep.req", "rep.ack_o"]
 
-        go2(b, sysgen(), rec, (period, offset), late=tuple(sig))
-        assert out["n"] is not None, ("done never rose", late, period)
-        assert out["crc"] == zlib.crc32(toy_bytes(20))
-        blocks = assert_clean(rec.pins)
-        assert len(blocks) == 1, (late, period, blocks)
+
+def wire(b, name: str):
+    crossing, signal = name.split(".")
+    return getattr(getattr(b.check, f"{crossing}_x"), signal)
+
+
+def late_scenario(kind: str, late_name: str, clock: str):
+    b = make()
+    rec, out = Recorder(b), {}
+    per = per_clock(CLOCKS[clock])
+
+    def sysgen():
+        yield from setup(b, per)
+        yield from start(b, 30)
+        if kind == "abort_restart":
+            yield from waits(9 * per)
+            yield from pulse(b.check.abort)
+            yield b.check.clocks.eq(25)
+            yield from pulse(b.check.start)
+        elif kind == "restart":
+            yield from waits(9 * per)
+            yield b.check.clocks.eq(25)
+            yield from pulse(b.check.start)
+        elif kind == "clock_stop":
+            yield b.ce_project.eq(0)  # stopped before the command was captured
+            yield from waits(120)
+            yield b.ce_project.eq(1)
+        out["n"] = yield from wait_done(b, 40_000)
+        out["crc"] = yield b.check.crc
+        yield from waits(12 * per)
+
+    go2(b, sysgen(), rec, CLOCKS[clock], late=(wire(b, late_name),))
+    return rec, out, 30 if kind == "clock_stop" else 25
+
+
+@pytest.mark.parametrize("late_name", WIRES)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "abort_restart",
+        "restart",
+        "clock_stop",
+    ],
+)
+def test_one_clock_of_skew_on_any_crossing_wire_breaks_nothing(kind: str, late_name: str) -> None:
+    rec, out, n = late_scenario(kind, late_name, "normal")
+    assert out["n"] is not None, "done never rose"
+    assert out["crc"] == zlib.crc32(toy_bytes(n))
+    assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(n))}
+    assert_clean(rec.pins)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("late_name", WIRES)
+@pytest.mark.parametrize("kind", ["abort_restart", "restart", "clock_stop"])
+@pytest.mark.parametrize("clock", ["mid", "fast"])
+def test_skew_on_any_crossing_wire_at_other_clock_ratios(
+    kind: str, late_name: str, clock: str
+) -> None:
+    rec, out, n = late_scenario(kind, late_name, clock)
+    assert out["n"] is not None, "done never rose"
+    assert out["crc"] == zlib.crc32(toy_bytes(n))
+    assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(n))}
+    assert_clean(rec.pins)
+
+
+# The two scenarios the review asked for ------------------------------------------------------
+
+
+@pytest.mark.parametrize("clock", ["normal", "mid"])
+def test_start_on_the_very_next_clock_after_done_gives_the_new_crc(clock: str) -> None:
+    """Done, then `start` on the very next system clock at a project period of at least 3 system
+    clocks: the previous design missed the short low of `run` and hung."""
+    b = make()
+    rec, out = Recorder(b), {}
+    per = per_clock(CLOCKS[clock])
+
+    def sysgen():
+        yield from setup(b, per)
+        yield from start(b, 20)
+        out["n1"] = yield from wait_done(b, 40_000)
+        out["crc1"] = yield b.check.crc
+        yield b.check.clocks.eq(33)
+        yield from pulse(b.check.start)  # the very next system clock
+        out["n2"] = yield from wait_done(b, 40_000)
+        out["crc2"] = yield b.check.crc
+        yield from waits(12 * per)
+
+    go2(b, sysgen(), rec, CLOCKS[clock])
+    assert out["crc1"] == zlib.crc32(toy_bytes(20))
+    assert out["n2"] is not None and out["crc2"] == zlib.crc32(toy_bytes(33))
+    assert len(assert_clean(rec.pins)) == 2
+
+
+@pytest.mark.parametrize("clock", ["normal", "mid"])
+def test_abort_mid_count_then_start_gives_a_clean_sequence_and_the_right_crc(clock: str) -> None:
+    rec, out = run_scenario(clock, 12)
+    assert out["n"] is not None and out["crc"] == zlib.crc32(toy_bytes(25))
+    blocks = assert_clean(rec.pins)
+    assert len(blocks) == 2 and blocks[0][1] <= 10

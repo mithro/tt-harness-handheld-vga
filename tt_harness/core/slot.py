@@ -61,7 +61,7 @@ The project's `rst_n` is the output of the second of two `AsyncClearFlop`s (FDCE
 
     rst_req (sys flop) --+------------------------------+  async clear (CLR) of both
                          v                              v
-    ~(override & override_rst) --> [ FF1 D ]  Q --> [ FF2 D ]  Q --> project.rst_n (pin)
+    ~override_rst -----------> [ FF1 D ]  Q --> [ FF2 D ]  Q --> project.rst_n (pin)
                                     ^ project clock       ^ project clock
 
 Assertion works with the project clock stopped: the pin goes low as soon as the request
@@ -239,7 +239,7 @@ class ProjectSlot(Module):
 
         # Reset chain.
         rst_d = Signal()
-        self.comb += rst_d.eq(~(self.override & self.override_rst))
+        self.comb += rst_d.eq(~self.override_rst)
         ff1 = AsyncClearFlop("project", rst_req, rst_d, behavioural=sim_clock)
         ff2 = AsyncClearFlop("project", rst_req, ff1.q, q=self.pin_rst_n, behavioural=sim_clock)
         self.specials += [ff1, ff2]
