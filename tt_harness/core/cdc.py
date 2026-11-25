@@ -104,7 +104,10 @@ class MultiBitCrossing(Module):
     """A `width`-bit value from `idomain` to `odomain` through a toggle handshake.
 
     Ports: `src` (input, `idomain`: any signal of that domain), `dst` (output, a register of
-    `odomain`), `busy` (output, `idomain`: a transfer is in flight).
+    `odomain`), `valid` (output, `odomain`: high for one `odomain` clock in the cycle after
+    `dst` took a new value), `busy` (output, `idomain`: a transfer is in flight, i.e. the
+    last value taken from `src` has not yet been delivered and acknowledged). Either direction
+    works (`idomain="project", odomain="sys"` carries a value into `sys`); the tests run both.
 
     Protocol (`req` and `ack` are single toggle flip-flops, one in each domain)::
 
@@ -160,4 +163,9 @@ class MultiBitCrossing(Module):
         si = getattr(self.sync, idomain)
         so = getattr(self.sync, odomain)
         si += If(~self.busy & (self.src != hold), hold.eq(self.src), req.eq(~req))
-        so += [ack_o.eq(req_s), If(req_s != ack_o, self.dst.eq(hold))]
+        self.valid = Signal()
+        so += [
+            ack_o.eq(req_s),
+            If(req_s != ack_o, self.dst.eq(hold)),
+            self.valid.eq(req_s != ack_o),
+        ]
