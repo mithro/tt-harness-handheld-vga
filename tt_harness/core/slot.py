@@ -40,8 +40,14 @@ project -> sys:
   `CLOCK_RUNNING_TIMEOUT` (512) system clocks that counts down; `clock_running` is "the
   timer is not zero". The toggle (not a level, not every clock) cannot alias against
   the system clock: at 50 MHz a flip every 4 clocks (80 ns) is 4 system clocks long.
-  Reads 1 for any project clock from about 0.4 MHz to 50 MHz and 0 within about 10 us of
-  the clock stopping; it is 0 with no clock at all.
+  Threshold: the toggle flips every `ALIVE_DIVIDE` = 4 project clocks and the timer reloads
+  to `CLOCK_RUNNING_TIMEOUT` = 512 system clocks at each flip seen, so `clock_running`
+  stays 1 iff 4 / f_project < 512 / f_sys (less about 2 system clocks of synchroniser
+  latency): with `sys` 50 MHz, f_project > 4 / (512 x 20 ns) = 0.39 MHz. A running clock
+  slower than that reads 0 between flips (flickers), and 0 with no clock at all; 1 MHz to
+  50 MHz read 1. A design whose `clock_hz` is below the threshold would read "not running":
+  a later task will check the demo files against it. It reads 0 within 512 system
+  clocks (about 10 us) of the clock stopping.
 - the `MultiBitCrossing` acknowledge toggles (inside `cdc.py`).
 
 Nothing brings `uo_out`, `uio_out` or `uio_oe` into `sys`: they are exposed raw in
@@ -86,7 +92,10 @@ Overrides (used by `AtSpeedCheck`)
 `override`, `override_rst`, `override_ui_in` (project domain) take over `ena` (forced 1),
 `ui_in` (forced to `override_ui_in`, gamepad mux off) and, through FF1's `d`, `rst_n`. They
 act in FRONT of the final registers, so the pins stay direct flip-flop outputs. `attach`
-wires an `AtSpeedCheck` to them; unattached they are 0.
+wires an `AtSpeedCheck` to them; unattached they are 0. When the check ends (finished,
+aborted or unwound) the override is released and the pins revert, one project clock later
+for `ena` and `ui_in` and two more for `rst_n`, to the values the normal controls give: the
+design's INTERNAL state stays where the stimulus left it.
 
 `uio_in` is the constant 0.
 

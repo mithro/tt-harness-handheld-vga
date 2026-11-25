@@ -570,3 +570,23 @@ def test_reset_request_and_every_crossing_source_is_a_direct_sys_register() -> N
         used = list_signals(stmts) - list_targets([stmts])
         direct = (used & sys_signals) - allowed
         assert not direct, f"a project register reads sys signals {direct} directly"
+
+
+def test_clock_running_threshold_just_above_and_just_below() -> None:
+    """Threshold f = ALIVE_DIVIDE / (CLOCK_RUNNING_TIMEOUT x Ts) = 4 / (512 x 20 ns) = 0.39 MHz:
+    a clock of 0.42 MHz (gap between flips 480 system clocks) reads 1 throughout; one of
+    0.36 MHz (560 system clocks) reads 0 between flips."""
+    runs = {}
+    for name, period in (("above", 2_400_000), ("below", 2_800_000)):
+        slot = make()
+        log: list[int] = []
+
+        def sysgen():
+            for _ in range(CLOCK_RUNNING_TIMEOUT * 4):
+                yield
+                log.append((yield slot.clock_running))
+
+        run(slot, [sysgen()], project=(period, 5_050))
+        runs[name] = log[CLOCK_RUNNING_TIMEOUT * 2 :]  # after the clock has been seen
+    assert set(runs["above"]) == {1}
+    assert 0 in runs["below"] and 1 in runs["below"]

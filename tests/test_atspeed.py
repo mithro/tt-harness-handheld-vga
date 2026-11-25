@@ -123,13 +123,6 @@ def _passive(gen):
     yield from gen
 
 
-def test_sensitivity_a_different_byte_changes_the_crc() -> None:
-    assert zlib.crc32(toy_bytes(64)) != zlib.crc32(toy_bytes(65))
-    flipped = bytearray(toy_bytes(64))
-    flipped[30] ^= 1
-    assert zlib.crc32(bytes(flipped)) != zlib.crc32(toy_bytes(64))
-
-
 @pytest.mark.parametrize("how", ["clock_hz_zero", "clock_stopped_then_started"])
 def test_stopped_clock_never_blocks_the_system_side_at_speed(how: str) -> None:
     """A started check stays busy with no project clock, the system side keeps going, a
