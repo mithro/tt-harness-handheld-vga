@@ -12,9 +12,13 @@ Verilator, against `tt_harness.core.gamepad.GamepadEmulator`.
   `adf8c61d34e542d037c53f95a5313515ece7aa32`. Fetched with `gh api` from the head, so the
   file is the head's.
 - SHA-256: `1b02f969841da6f07f96e726000d64ccf2621e453db4c237247c231a16506a80`
-- Licence: the file's header says `SPDX-License-Identifier: Apache-2.0`, Copyright (c) 2025
-  Pat Deegan (https://psychogenic.com). (The repository as a whole carries a GPL-3.0
-  `LICENSE`, which covers the firmware; the Verilog file states its own licence.)
+- Licence: the file's own header says `SPDX-License-Identifier: Apache-2.0`, Copyright (c) 2025
+  Pat Deegan (https://psychogenic.com).
+
+The file's own header is Apache-2.0, the same licence as this repository, so it is used here
+as a test fixture under that licence, unmodified. The upstream repository's top-level
+`LICENSE` is GPL-3.0, which covers the firmware. This difference between the file header and
+the repository licence is flagged for the repository owner to confirm.
 
 A second copy exists in `vga-playground/src/examples/common/gamepad_pmod.v` (header
 `Version: 1.0.1`). It differs from this file in comments only (the header and the comment on

@@ -39,6 +39,19 @@ detects edges, so a level must last at least one receiver clock, and the latch's
 must come at least one receiver clock after the last clock's rising edge (here: two slots). A
 slot is 100 clocks at 25 MHz and at least 4 at 1 MHz, a wide margin.
 
+Do not "fix" the edges to match upstream's comments. The comment on `gamepad_pmod_driver` in
+`gamepad_pmod.v` says it captures data on the falling edge of `pmod_clk` and transfers on
+`pmod_latch` going low; its code shifts data in on the RISING edge of the clock and takes the
+shift register on the RISING edge of the latch, and that code is what this block is tested
+against.
+
+A receiver that is reset while the emulator keeps running (the harness resets the design and
+not this block) does not see the frame in progress whole: its shift register starts at all
+ones, so the frame that was being sent when it left reset decodes as the ones that were not
+shifted out followed by only the later bits, which gives wrong buttons for that one frame (a
+real Pmod does the same to a design reset between frames). The next frame is whole, so the
+buttons are right again within two frames (about 3.4 ms at the default rate).
+
 Clocking. The block runs in the clock domain it is instantiated in. In the harness that is the
 project's own clock, and `latch`, `clock` and `data` are each the direct output of a register,
 so the project sees three glitch-free inputs changing just after its own clock edge. All
