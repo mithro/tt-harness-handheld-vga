@@ -238,7 +238,13 @@ def test_abort_with_the_clock_stopped_then_started_never_reports_and_any_begin_i
     assert out["busy_before"] == 1 and out["flags"] == (0, 0) and out["done"] == 0
     assert len(rec.pins) > 100
     blocks = assert_clean(rec.pins, full_last=False)
-    assert len(blocks) <= 1 and all(low < 10 for _, low in blocks), blocks  # cut early
+    # One cut block: the word in flight begins the check, the `run = 0` word cuts it. Its
+    # length is about 3 + ceil(3 Ts / Tp) override samples (measured 3 to 6 at 2.5 to 66 MHz),
+    # and the design is held in reset for ALL of them (low samples == block length).
+    bound = 3 + -(-3 * 20_000 // CLOCKS["normal"][0])
+    assert len(blocks) == 1, blocks
+    length, low = blocks[0]
+    assert length <= bound and low == length, (blocks, bound)
     assert not rec.overridden(len(rec.pins) - 20), "the override was not released"
     assert rec.pins[-1] == (1, 0, SW_UI)
     assert rec.done_crcs == []
@@ -534,3 +540,56 @@ def test_start_right_after_done_never_shows_the_old_result_as_the_new_one(clock:
     assert out["crc2"] == zlib.crc32(toy_bytes(47))
     # After the second start, `done` was never high with the first check's CRC.
     assert set(rec.done_crcs[out["seen_old"] :]) == {zlib.crc32(toy_bytes(47))}
+
+
+def test_abort_cuts_a_long_check_and_the_override_leaves_the_pins_within_the_bound() -> None:
+    """N is too large for the check to end by itself: only the abort can release the pins."""
+    b = make()
+    rec, out = Recorder(b), {}
+    period = CLOCKS["normal"][0]
+
+    def sysgen():
+        yield from setup(b)
+        yield from start(b, 5000)
+        yield from waits(40)  # well into the count
+        out["active"] = rec.overridden(len(rec.pins) - 4)
+        out["mark"] = len(rec.pins)
+        yield from pulse(b.check.abort)
+        yield from waits(30)
+        out["end"] = len(rec.pins)
+
+    go2(b, sysgen(), rec, CLOCKS["normal"])
+    assert out["active"], "the check was not running when it was aborted"
+    bound = cut_samples(period)
+    assert out["end"] - out["mark"] > bound
+    assert not rec.overridden(out["mark"] + bound), "the abort did not cut the running check"
+    assert rec.pins[-1] == (1, 0, SW_UI)
+    blocks = assert_clean(rec.pins, full_last=False)
+    assert len(blocks) == 1 and blocks[0][1] == 10  # cut after the reset phase, in the count
+
+
+def test_a_run_0_word_with_a_new_seq_never_begins_a_check() -> None:
+    """The project's first sight of a `seq` can be its abort word: with the clock stopped a
+    start word is in flight, a second start and an abort follow, and on resume the word in
+    flight is delivered first and then the newest one, `run = 0` with the second `seq`. Only
+    the first start may begin (and is cut); the `run = 0` word must not begin a second one."""
+    b = make(running=False)
+    rec, out = Recorder(b), {}
+
+    def sysgen():
+        yield from setup(b)
+        yield from start(b, 40)
+        yield from waits(30)
+        yield from start(b, 41)  # a second `seq` never delivered with `run = 1`
+        yield from waits(30)
+        yield from pulse(b.check.abort)
+        yield from waits(30)
+        yield b.ce_project.eq(1)
+        yield from waits(500)
+        out["done"] = yield b.check.done
+
+    go2(b, sysgen(), rec, CLOCKS["normal"])
+    assert out["done"] == 0 and rec.done_crcs == []
+    blocks = assert_clean(rec.pins, full_last=False)
+    assert len(blocks) == 1, blocks  # one block for the start word in flight, none for run = 0
+    assert rec.pins[-1] == (1, 0, SW_UI)

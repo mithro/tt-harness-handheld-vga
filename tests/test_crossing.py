@@ -56,6 +56,8 @@ def _subsequence(small, big):
         (39_700, 5_050),
         (39_700, 14_050),
         (100_000, 5_050),
+        (15_152, 3_050),  # 66 MHz: the project clock clearly faster than `sys`
+        (10_000, 4_050),  # 100 MHz
         pytest.param(27_300, 3_050, marks=pytest.mark.slow),
         pytest.param(27_300, 9_050, marks=pytest.mark.slow),
         pytest.param(1_000_000, 5_050, marks=pytest.mark.slow),

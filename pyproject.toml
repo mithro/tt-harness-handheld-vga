@@ -16,7 +16,11 @@ dependencies = [
 tt-harness = "tt_harness.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff"]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3.8.0",
+    "ruff",
+]
 
 [build-system]
 requires = ["hatchling"]

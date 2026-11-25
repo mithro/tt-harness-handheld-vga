@@ -100,9 +100,30 @@ CRC is of a design held in reset. After a design that was already running, the r
 the reference only for designs whose reset initialises ALL their state; run straight after
 configuration it parallels the reference simulation (which is how the tests run it).
 
-Not proven here, for the build task: the two handshakes' held buses (`hold` in `cdc.py`) are read
-by the other domain without synchronisers, on the argument that they are stable, and need a
-maximum-delay constraint of less than one destination-clock period (20 ns at 50 MHz).
+Using the at-speed check (firmware-facing; `docs/registers.md` will need this in the SoC task):
+
+- Start a check only while `clock_running` reads 1 (with the project clock stopped a start waits
+  for it, and `clock_hz: 0` never runs it); recover a stuck one with `abort`.
+- A `start` cancels any earlier start: the last one wins, and only its result is reported.
+- An `abort` (any time, clock running or stopped) clears `busy` and `done` within one system clock
+  but can leave ONE cut block at the pins: the override on with the design held in reset (reset
+  low for the whole block), then released. With the clock running the block ends within about
+  `cut_samples` below; with the clock stopped when the abort is given, the start word already in
+  flight begins the check on resume and the `run = 0` word cuts it: the block is about
+  3 + ceil(3 Ts / Tp) project clocks long (measured 3 to 6 at 2.5 to 66 MHz against a 50 MHz
+  `sys`). No `done` is reported for it. The design is left in an unknown state, so firmware must
+  reset the design after any abort (and after a finished check: the stimulus is not the
+  software's).
+- With the check cut at any point the pins are `0{1..10}` (reset low from the first override
+  clock) and never malformed; a check not cut is `0{10}1+`.
+- `seq` is 16 bits and incremented by every start: 65,536 starts with none seen by the project
+  (clock stopped) would make a start look like the last one it began, and it would be ignored until
+  the next start or abort.
+
+Not proven here, for the build task: the held bus (`hold` in `cdc.py`) of each of the two
+handshakes, in both directions, is read by the other domain without synchronisers on the argument
+that it is stable, and needs a maximum-delay constraint of less than one destination-clock period
+(20 ns at 50 MHz). Nothing else in this module needs a constraint.
 
 Firmware and `clock_hz: 0`. With no project clock an at-speed check is meaningless: firmware must
 not start one. If it does, `busy` stays high and `abort` recovers it, one system clock later;
@@ -159,6 +180,9 @@ class AtSpeedCheck(Module):
             rep_x.dst[SEQ_BITS + 2 :],
         )
         self.sync += [
+            # `crc` needs no latch of its own: it is taken from the same delivered word as the
+            # `fin` that sets `done`, and a new `start` clears `done` before any later report
+            # (whose `my_seq` differs, so it is ignored) can arrive: `crc` is only valid while `done`.
             If(
                 rep_x.valid & run & (rep_seq == seq) & (rep_phase == PHASE_FIN),
                 self.done.eq(1),
