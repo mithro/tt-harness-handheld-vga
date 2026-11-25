@@ -10,13 +10,16 @@ own numbers. Two tests run a real 640 x 480 frame size. The Verilator test (mark
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
-from migen import Module, Signal
+from migen import ClockDomain, Module, Signal
+from migen.fhdl import verilog
 from migen.sim import run_simulation
 from vga_model import VgaModel, encode
 
+from tt_harness import tools, verilate
 from tt_harness.compare import inputs
 from tt_harness.core import vga
 
@@ -871,3 +874,145 @@ def test_no_sync_reports_no_signal_and_blanks() -> None:
         memory[a] = d
     assert len(memory) == 128
     assert all(v == 0 for v in memory.values())
+
+
+# Framebuffer ---------------------------------------------------------------------------------
+
+
+class FramebufferBench(Module):
+    """A framebuffer with its two clock domains defined, as a top level would."""
+
+    def __init__(self, width, height) -> None:
+        self.clock_domains.cd_project = ClockDomain("project")
+        self.clock_domains.cd_video = ClockDomain("video")
+        self.submodules.fb = vga.Framebuffer(width, height, "video")
+
+
+def test_framebuffer_sizes() -> None:
+    for width, height, bits in ((640, 480, 1_843_200), (320, 240, 460_800)):
+        fb = vga.Framebuffer(width, height, "video")
+        assert fb.mem.depth == width * height
+        assert fb.mem.width == 6
+        assert fb.mem.depth * fb.mem.width == bits
+        assert len(fb.data) == 6
+        assert len(fb.rd_data) == 6
+        assert 2 ** len(fb.addr) >= width * height > 2 ** (len(fb.addr) - 1)
+        assert len(fb.rd_addr) == len(fb.addr)
+
+
+def test_framebuffer_written_in_one_clock_read_in_another() -> None:
+    bench = FramebufferBench(8, 4)
+    fb = bench.fb
+    value = {a: (a * 5 + 3) & 0x3F for a in range(32)}
+    written = []
+    got = {}
+
+    def write():
+        for a in range(32):
+            yield fb.addr.eq(a)
+            yield fb.data.eq(value[a])
+            yield fb.we.eq(1)
+            yield
+        yield fb.we.eq(0)
+        yield
+        written.append(True)
+
+    def read():
+        while not written:
+            yield
+        # Synchronous read: the address presented in one video clock gives its data after
+        # the next edge, i.e. in the following iteration; one address per clock, pipelined.
+        previous = None
+        for a in [*range(32), 0]:
+            yield fb.rd_addr.eq(a)
+            yield
+            if previous is not None:
+                got[previous] = yield fb.rd_data
+            previous = a
+
+    run_simulation(bench, {"project": write(), "video": read()}, clocks={"project": 10, "video": 7})
+    assert got == value
+
+
+def test_framebuffer_read_returns_old_or_new_while_it_is_being_written() -> None:
+    # No handshake: a reader may see a frame being overwritten (tearing). It sees the old
+    # or the new pixel, whole.
+    bench = FramebufferBench(8, 4)
+    fb = bench.fb
+    seen = set()
+    stop = []
+
+    def write():
+        for i in range(60):
+            yield fb.addr.eq(5)
+            yield fb.data.eq(0x15 if i % 2 else 0x2A)
+            yield fb.we.eq(1)
+            yield
+        stop.append(True)
+
+    def read():
+        yield fb.rd_addr.eq(5)
+        while not stop:
+            yield
+            seen.add((yield fb.rd_data))
+
+    run_simulation(bench, {"project": write(), "video": read()}, clocks={"project": 10, "video": 7})
+    assert seen <= {0, 0x15, 0x2A}
+    assert {0x15, 0x2A} <= seen
+
+
+def _verilog(width, height) -> str:
+    bench = FramebufferBench(width, height)
+    ios = {
+        bench.cd_project.clk,
+        bench.cd_video.clk,
+        bench.fb.we,
+        bench.fb.addr,
+        bench.fb.data,
+        bench.fb.rd_addr,
+        bench.fb.rd_data,
+    }
+    return str(verilog.convert(bench, ios=ios, name="fb"))
+
+
+def test_framebuffer_read_data_is_a_register_in_the_read_domain() -> None:
+    text = _verilog(8, 4)
+    # Writes in the project clock; in the video clock the data register is loaded from the
+    # array at the address input, and that register is the read data. No asynchronous read.
+    assert re.search(
+        r"always @\(posedge project_clk\) begin : \w+\s+if \(we\)\s+mem\[adr\] <= dat_w;", text
+    )
+    video = re.search(
+        r"always @\(posedge video_clk\) begin : \w+\s+(\w+) <= mem\[(\w+)\];\s+end", text
+    )
+    assert video is not None, text
+    assert re.search(rf"assign dat_r = {video.group(1)};", text)
+    assert not re.search(r"assign dat_r = mem\[", text)
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(tools.find("yosys") is None, reason="yosys not installed")
+@pytest.mark.parametrize(("width", "height", "ramb36_at_most"), [(320, 240, 16), (640, 480, 60)])
+def test_framebuffer_infers_block_ram(tmp_path, width, height, ramb36_at_most) -> None:
+    top = tmp_path / "fb.v"
+    top.write_text(_verilog(width, height))
+    log = tmp_path / "yosys.log"
+    script = "synth_xilinx -family xc7 -top fb; stat"
+    rc = verilate.run(
+        [str(tools.find("yosys")), "-q", "-l", str(log), "-p", f"read_verilog {top}; {script}"],
+        tmp_path / "run.log",
+        tmp_path,
+        600,
+    )
+    assert rc == 0, (tmp_path / "run.log").read_text()
+    text = log.read_text()
+    cells = {}
+    for line in text.splitlines():
+        m = re.match(r"\s+(\d+)\s+(\S+)\s*$", line)
+        if m:
+            cells[m.group(2)] = int(m.group(1))
+    ramb = cells.get("RAMB36E1", 0) + cells.get("RAMB18E1", 0)
+    assert ramb > 0, f"no block RAM in the netlist:\n{text}"
+    assert cells.get("RAMB36E1", 0) <= ramb36_at_most + cells.get("RAMB18E1", 0)
+    assert not any(k.startswith(("RAM64", "RAM32", "RAM128", "RAM256")) for k in cells), cells
+    assert cells.get("FDRE", 0) + cells.get("FDCE", 0) + cells.get("FDPE", 0) < 100, cells

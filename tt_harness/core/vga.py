@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from migen import Cat, If, Module, Mux, Signal
+from migen import READ_FIRST, Cat, If, Memory, Module, Mux, Signal
 
 PIXEL_BITS = 6
 
@@ -568,6 +568,49 @@ class VgaCapture(Module):
                 ),
             ),
         ]
+
+
+# Framebuffer -------------------------------------------------------------------------------
+
+
+class Framebuffer(Module):
+    """A `width` x `height` framebuffer of 6-bit pixels: write in `project`, read in another clock.
+
+    A true dual-clock memory. The write port (`we`, `addr`, `data`) is in the `project` clock
+    domain and is `VgaCapture`'s write port (wire them together). The read port (`rd_addr`,
+    `rd_data`) is in the domain named by `read_domain`, one pixel per read clock: the pixel at
+    the address presented before a read-clock edge is on `rd_data` after it (`rd_data` is a
+    register: no asynchronous read), the form the tools map to block RAM. Yosys
+    `synth_xilinx` on the generated Verilog gives 15 RAMB36E1 for 320 x 240 (460,800 bits)
+    and 57 for 640 x 480 (1,843,200 bits; the Arty A7-100T has 135), no distributed RAM and
+    no other memory logic than a few multiplexers for the block outputs.
+
+    There is no handshake and no double buffering: a reader may see a frame while it is being
+    overwritten (tearing), and a read of an address in the clock it is written returns the
+    old or the new pixel, never a mix. `VgaCapture.frame_done` marks the end of a frame for
+    readers that want to start a scan there.
+    """
+
+    def __init__(self, width: int, height: int, read_domain: str) -> None:
+        for name, value in (("width", width), ("height", height)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer: {value!r}")
+        if type(read_domain) is not str or not read_domain:
+            raise ValueError(f"read_domain must be a clock domain name: {read_domain!r}")
+        self.width = width
+        self.height = height
+        self.read_domain = read_domain
+        self.mem = Memory(PIXEL_BITS, width * height)
+        self.specials += self.mem
+        # (The write port's own read data is unused; the simulator needs the port to have one.)
+        write = self.mem.get_port(write_capable=True, clock_domain="project")
+        # READ_FIRST gives `data <= mem[addr]` registered in the read clock, the form the
+        # tools map to block RAM with two clocks; the default (a registered address and an
+        # array read after it) ends up as distributed RAM when the two clocks differ.
+        read = self.mem.get_port(mode=READ_FIRST, clock_domain=read_domain)
+        self.specials += write, read
+        self.we, self.addr, self.data = write.we, write.adr, write.dat_w
+        self.rd_addr, self.rd_data = read.adr, read.dat_r
 
 
 if __name__ == "__main__":
