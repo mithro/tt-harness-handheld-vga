@@ -26,12 +26,15 @@ BOARD_ARGS = ["--host", "ps1.fpgas.online", "--port", "10722", "--uart", UART]
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """A reference, and fetch, pre-screen, build and the board replaced by fakes."""
-    d = tmp_path / "reference" / "tt07" / "tt_um_tinytapeout_dvd_screensaver"
+    d = tmp_path / "reference" / "tt07" / "tt_um_tinytapeout_dvd_screensaver" / "ideal"
     d.mkdir(parents=True)
     (d / "uo_out.bin.gz").write_bytes(gzip.compress(REF))
     doc = {
-        "schema": 1,
+        "schema": 3,
         "id": ID,
+        "profile": "ideal",
+        "ui_in_unmet": 0,
+        "uio_in_unmet": 0,
         "clock_hz": 25_175_000,
         "reset_clocks": 10,
         "ui_in": 0,

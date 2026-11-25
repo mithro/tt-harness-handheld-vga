@@ -150,7 +150,7 @@ def _sibling_dirs() -> tuple[Path, Path]:
 )
 def test_agrees_with_sibling_reference(tmp_path):
     ref_dir, videos_repo = _sibling_dirs()
-    sibling = ref_dir / AGREEMENT_ID / "uo_out.bin.gz"
+    sibling = ref_dir / AGREEMENT_ID / "ideal" / "uo_out.bin.gz"
     if not sibling.is_file():
         pytest.skip(f"no sibling reference at {sibling}")
     project = manifest.get(manifest.load(videos_repo), AGREEMENT_ID)
