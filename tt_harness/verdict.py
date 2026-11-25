@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Read a shared reference dump and compare a recording against it, clock by clock.
 
-The reference is `tt-harness-fpga-vga`'s `<ref_dir>/<shuttle>/<macro>/reference.json`
-(schema 1 or 2; the fields read here are the same in both) with its dump beside it: one
-byte per clock, byte i being `uo_out` after the rising edge of clock i, clock 0 being the
-first reset clock. `dump_sha256` is of the uncompressed bytes.
+The reference is `tt-harness-fpga-vga`'s
+`<ref_dir>/<shuttle>/<macro>/<profile>/reference.json` (schema 3 only, commit 112ff4b,
+2026-11-25) with its dump beside it: one byte per clock, byte i being `uo_out` after the
+rising edge of clock i, clock 0 being the first reset clock. `dump_sha256` is of the
+uncompressed bytes. This harness drives every project input itself, so it reads the
+`ideal` profile only (`PROFILE`); a reference whose `ui_in_unmet` or `uio_in_unmet` is
+non-zero (requested input bits the profile could not apply) is refused. A design whose
+simulation failed has a `reference-fail.json` and no `reference.json`; that is reported
+with its status and reason. Nothing older than schema 3 is read.
 """
 
 from __future__ import annotations
@@ -20,7 +25,8 @@ from typing import Literal
 
 from tt_harness.host.frame import Recording
 
-SCHEMAS = (1, 2)
+SCHEMA = 3
+PROFILE = "ideal"
 DEFAULT_REFERENCE_DIR = "~/github/TinyTapeout/tt-harness-fpga-vga/work/reference"
 _COMPARE_BLOCK = 1 << 16
 
@@ -32,6 +38,31 @@ def default_reference_dir() -> Path:
 
 class ReferenceInvalid(ValueError):
     """A reference file is missing, malformed, or does not match its dump."""
+
+
+def reference_path(ref_dir: Path, project_id: str) -> Path:
+    """Where the reference for `project_id` ("<shuttle>/<macro>") lives: the one place that
+    knows the layout `<ref_dir>/<shuttle>/<macro>/<profile>/reference.json`."""
+    parts = project_id.split("/")
+    if len(parts) != 2 or not all(parts) or any(p in (".", "..") for p in parts):
+        raise ReferenceInvalid(f"project id {project_id!r} is not <shuttle>/<macro>")
+    return Path(ref_dir) / parts[0] / parts[1] / PROFILE / "reference.json"
+
+
+def _fail_reason(fail_path: Path, project_id: str) -> str:
+    """The message for a `reference-fail.json` that stands where `reference.json` should be."""
+    try:
+        doc = json.loads(fail_path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise ReferenceInvalid(f"{fail_path}: unreadable reference-fail.json: {e}") from e
+    if not isinstance(doc, dict):
+        raise ReferenceInvalid(f"{fail_path}: reference-fail.json is not a JSON object")
+    status, reason = doc.get("status"), doc.get("reason")
+    if not isinstance(status, str) or not status:
+        raise ReferenceInvalid(f"{fail_path}: reference-fail.json status is {status!r}")
+    if reason is not None and not isinstance(reason, str):
+        raise ReferenceInvalid(f"{fail_path}: reference-fail.json reason is {reason!r}")
+    return f"{project_id}: the reference simulation failed: {status}: {reason or ''} ({fail_path})"
 
 
 @dataclass(frozen=True)
@@ -63,22 +94,32 @@ def _int_field(doc: dict, name: str, path: Path, lo: int, hi: int | None = None)
 
 def load_reference(ref_dir: Path, project_id: str) -> Reference:
     """Load and verify the reference for `project_id` ("<shuttle>/<macro>")."""
-    parts = project_id.split("/")
-    if len(parts) != 2 or not all(parts) or any(p in (".", "..") for p in parts):
-        raise ReferenceInvalid(f"project id {project_id!r} is not <shuttle>/<macro>")
-    path = Path(ref_dir) / parts[0] / parts[1] / "reference.json"
+    path = reference_path(ref_dir, project_id)
     try:
         doc = json.loads(path.read_text())
     except FileNotFoundError:
-        raise ReferenceInvalid(f"{project_id}: no reference.json at {path}") from None
+        fail = path.with_name("reference-fail.json")
+        if fail.exists():
+            raise ReferenceInvalid(_fail_reason(fail, project_id)) from None
+        raise ReferenceInvalid(
+            f"{project_id}: no reference was made: looked for schema {SCHEMA} {path}"
+        ) from None
     except (OSError, UnicodeDecodeError, ValueError) as e:
         raise ReferenceInvalid(f"{path}: unreadable: {e}") from e
     if not isinstance(doc, dict):
         raise ReferenceInvalid(f"{path}: not a JSON object")
-    if type(doc.get("schema")) is not int or doc["schema"] not in SCHEMAS:
-        raise ReferenceInvalid(f"{path}: unknown schema {doc.get('schema')!r}, expected {SCHEMAS}")
+    if type(doc.get("schema")) is not int or doc["schema"] != SCHEMA:
+        raise ReferenceInvalid(f"{path}: schema is {doc.get('schema')!r}, expected {SCHEMA}")
     if doc.get("id") != project_id:
         raise ReferenceInvalid(f"{path}: id is {doc.get('id')!r}, expected {project_id!r}")
+
+    if doc.get("profile") != PROFILE:
+        raise ReferenceInvalid(f"{path}: profile is {doc.get('profile')!r}, expected {PROFILE!r}")
+    for unmet in ("ui_in_unmet", "uio_in_unmet"):
+        if _int_field(doc, unmet, path, 0, 255):
+            raise ReferenceInvalid(
+                f"{path}: {unmet} is {doc[unmet]}: requested input bits were not applied"
+            )
 
     clocks = _int_field(doc, "clocks", path, 1)  # an empty span would match anything
     reset_clocks = _int_field(doc, "reset_clocks", path, 0)

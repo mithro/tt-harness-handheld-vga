@@ -96,9 +96,9 @@ def _write(path: Path, doc: dict) -> None:
 def _shared_reference(sources: Sources, clocks: int) -> tuple[bytes, Path] | None:
     """The first `clocks` samples of the shared reference and its path; None if there is none."""
     project = sources.project
-    path = verdict.default_reference_dir() / project.shuttle / project.macro / "reference.json"
-    if not path.is_file():
-        return None
+    path = verdict.reference_path(verdict.default_reference_dir(), project.id)
+    if not path.is_file() and not path.with_name("reference-fail.json").exists():
+        return None  # a failed reference is not "none": load_reference says why
     ref = verdict.load_reference(verdict.default_reference_dir(), project.id)
     for name, theirs, ours in (
         ("ui_in", ref.ui_in, project.ui_in),

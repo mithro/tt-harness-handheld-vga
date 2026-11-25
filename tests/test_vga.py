@@ -1337,7 +1337,7 @@ def pool_dump(clocks: int) -> tuple[bytes, str]:
     """The pool design's `uo_out` per clock: the shared reference dump, or one made here."""
 
     ref_dir = verdict.default_reference_dir()
-    if (ref_dir / POOL_ID / "reference.json").is_file():
+    if verdict.reference_path(ref_dir, POOL_ID).is_file():
         ref = verdict.load_reference(ref_dir, POOL_ID)
         assert ref.clocks >= clocks
         return ref.samples[:clocks], f"shared reference {ref.path}"

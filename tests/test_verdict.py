@@ -24,19 +24,26 @@ def ok(samples: bytes) -> Recording:
 
 
 def write_reference(ref_dir: Path, data: bytes, **overrides) -> Path:
-    """A small reference in the layout of tt-harness-fpga-vga's schema 1 `reference.json`."""
+    """A small reference in the layout of tt-harness-fpga-vga's schema 3 `reference.json`."""
     shuttle, macro = PROJECT.split("/")
-    d = ref_dir / shuttle / macro
+    d = ref_dir / shuttle / macro / "ideal"
     d.mkdir(parents=True)
     (d / "uo_out.bin.gz").write_bytes(gzip.compress(data))
     doc = {
-        "schema": 1,
+        "schema": 3,
         "id": PROJECT,
+        "profile": "ideal",
         "clock_hz": 25_175_000,
         "clock_declared": True,
         "reset_clocks": 10,
         "ui_in": 0x30,
         "uio_in": 0x01,
+        "ui_in_requested": 0x30,
+        "ui_in_applied": 0x30,
+        "ui_in_unmet": 0,
+        "uio_in_requested": 0x01,
+        "uio_in_applied": 0x01,
+        "uio_in_unmet": 0,
         "clocks": len(data),
         "dump": "uo_out.bin.gz",
         "dump_sha256": hashlib.sha256(data).hexdigest(),
@@ -150,13 +157,72 @@ def test_load_reference_reads_fields(tmp_path):
     assert ref.uio_in == 0x01
     assert ref.clock_hz == 25_175_000
     assert ref.samples == REF
-    assert ref.path == tmp_path / "tt08" / "tt_um_example" / "reference.json"
+    assert ref.path == tmp_path / "tt08" / "tt_um_example" / "ideal" / "reference.json"
     assert ref.sha256 == hashlib.sha256(REF).hexdigest()
 
 
-def test_load_reference_schema_2(tmp_path):
-    write_reference(tmp_path, REF, schema=2, key={"repo": "x"}, key_sha256="0" * 64)
-    assert verdict.load_reference(tmp_path, PROJECT).clocks == len(REF)
+@pytest.mark.parametrize("schema", [1, 2])
+def test_old_schemas_are_refused(tmp_path, schema):
+    write_reference(tmp_path, REF, schema=schema)
+    with pytest.raises(ReferenceInvalid, match="schema"):
+        verdict.load_reference(tmp_path, PROJECT)
+
+
+def test_wrong_profile_is_refused(tmp_path):
+    write_reference(tmp_path, REF, profile="fpga-4")
+    with pytest.raises(ReferenceInvalid, match="profile.*fpga-4"):
+        verdict.load_reference(tmp_path, PROJECT)
+
+
+@pytest.mark.parametrize("name", ["ui_in_unmet", "uio_in_unmet"])
+def test_unmet_inputs_are_refused(tmp_path, name):
+    write_reference(tmp_path, REF, **{name: 0xC0})
+    with pytest.raises(ReferenceInvalid, match=f"{name}.*192"):
+        verdict.load_reference(tmp_path, PROJECT)
+
+
+@pytest.mark.parametrize("name", ["ui_in_unmet", "uio_in_unmet"])
+@pytest.mark.parametrize("bad", [None, "0", -1, 256, True, 0.0])
+def test_unmet_inputs_must_be_bytes(tmp_path, name, bad):
+    write_reference(tmp_path, REF, **{name: bad})
+    with pytest.raises(ReferenceInvalid, match=name):
+        verdict.load_reference(tmp_path, PROJECT)
+
+
+def test_old_layout_tree_is_refused_naming_what_was_looked_for(tmp_path):
+    d = tmp_path / "tt08" / "tt_um_example"
+    d.mkdir(parents=True)
+    (d / "reference.json").write_text(json.dumps({"schema": 2, "id": PROJECT}))
+    with pytest.raises(ReferenceInvalid, match="no reference") as e:
+        verdict.load_reference(tmp_path, PROJECT)
+    assert str(d / "ideal" / "reference.json") in str(e.value)
+
+
+def _write_fail(tmp_path, content: str | bytes):
+    d = tmp_path / "tt08" / "tt_um_example" / "ideal"
+    d.mkdir(parents=True)
+    data = content.encode() if isinstance(content, str) else content
+    (d / "reference-fail.json").write_bytes(data)
+
+
+def test_reference_fail_gives_a_distinct_message(tmp_path):
+    _write_fail(
+        tmp_path,
+        json.dumps({"id": PROJECT, "status": "sim-unsettled", "reason": "pad at clock -1: uio[3]"}),
+    )
+    with pytest.raises(ReferenceInvalid, match="reference simulation failed") as e:
+        verdict.load_reference(tmp_path, PROJECT)
+    assert "sim-unsettled" in str(e.value) and "uio[3]" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["{not json", "[]", '"x"', "{}", '{"status": 3, "reason": null}', b"\xff\xfe"],
+)
+def test_malformed_reference_fail_is_reference_invalid(tmp_path, text):
+    _write_fail(tmp_path, text)
+    with pytest.raises(ReferenceInvalid, match="reference-fail.json"):
+        verdict.load_reference(tmp_path, PROJECT)
 
 
 def test_clocks_shorter_than_dump_is_accepted(tmp_path):
@@ -191,7 +257,8 @@ def test_clocks_larger_than_dump_raises(tmp_path):
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"schema": 3},
+        {"schema": 4},
+        {"profile": None},
         {"schema": None},
         {"id": "tt08/tt_um_other"},
         {"clocks": None},
@@ -214,7 +281,7 @@ def test_malformed_reference_raises(tmp_path, overrides):
 
 
 def test_missing_reference_raises(tmp_path):
-    with pytest.raises(ReferenceInvalid, match="reference.json"):
+    with pytest.raises(ReferenceInvalid, match="no reference"):
         verdict.load_reference(tmp_path, PROJECT)
 
 
@@ -241,10 +308,11 @@ def test_bad_project_id_raises(tmp_path, bad_id):
 REAL_REFERENCE_DIR = Path(
     os.environ.get("TT_REFERENCE_DIR", "~/github/TinyTapeout/tt-harness-fpga-vga/work/reference")
 ).expanduser()
+REAL_PROJECT = "tt08/tt_um_tinytapeout_logo_screensaver"
 
 
 @pytest.mark.skipif(
-    not (REAL_REFERENCE_DIR / "tt08/tt_um_tinytapeout_logo_screensaver").is_dir(),
+    not (REAL_REFERENCE_DIR / REAL_PROJECT / "ideal" / "reference.json").is_file(),
     reason=f"shared reference files absent ({REAL_REFERENCE_DIR})",
 )
 def test_real_tt08_logo_reference():

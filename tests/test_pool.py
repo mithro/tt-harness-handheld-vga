@@ -60,12 +60,15 @@ def one_pool(tmp_path, monkeypatch):
 
 
 def _write_shared(env, samples: bytes, **fields) -> Path:
-    d = env["shared"] / ID
+    d = env["shared"] / ID / "ideal"
     d.mkdir(parents=True)
     (d / "uo_out.bin.gz").write_bytes(gzip.compress(samples))
     doc = {
-        "schema": 1,
+        "schema": 3,
         "id": ID,
+        "profile": "ideal",
+        "ui_in_unmet": 0,
+        "uio_in_unmet": 0,
         "clock_hz": 25_175_000,
         "reset_clocks": 10,
         "ui_in": 0xA5,
@@ -139,6 +142,15 @@ class TestRunSim:
     def test_unusable_shared_reference_is_an_error_not_a_fallback(self, one_pool, tmp_path) -> None:
         _write_shared(one_pool, _true_samples(one_pool, tmp_path, CLOCKS), dump_sha256="0" * 64)
         with pytest.raises(verdict.ReferenceInvalid):
+            pool.run_sim(ID, CLOCKS, one_pool["work"])
+
+    def test_failed_shared_reference_is_an_error_not_a_fallback(self, one_pool) -> None:
+        d = one_pool["shared"] / ID / "ideal"
+        d.mkdir(parents=True)
+        (d / "reference-fail.json").write_text(
+            json.dumps({"id": ID, "status": "sim-unsettled", "reason": "pad"})
+        )
+        with pytest.raises(verdict.ReferenceInvalid, match="sim-unsettled"):
             pool.run_sim(ID, CLOCKS, one_pool["work"])
 
     def test_shared_reference_shorter_than_the_run_is_an_error(self, one_pool, tmp_path) -> None:
