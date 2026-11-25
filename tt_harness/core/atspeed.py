@@ -107,8 +107,8 @@ Using the at-speed check (firmware-facing; `docs/registers.md` will need this in
 - A `start` cancels any earlier start: the last one wins, and only its result is reported.
 - An `abort` (any time, clock running or stopped) clears `busy` and `done` within one system clock
   but can leave ONE cut block at the pins: the override on with the design held in reset (reset
-  low for the whole block), then released. With the clock running the block ends within about
-  `cut_samples` below; with the clock stopped when the abort is given, the start word already in
+  low for the whole block), then released. With the clock running it is cut within about
+  7 Tp + 4 Ts + `UNWIND_CLOCKS` of the abort (`cut_samples` in the tests); with the clock stopped when the abort is given, the start word already in
   flight begins the check on resume and the `run = 0` word cuts it: the block is about
   3 + ceil(3 Ts / Tp) project clocks long (measured 3 to 6 at 2.5 to 66 MHz against a 50 MHz
   `sys`). No `done` is reported for it. The design is left in an unknown state, so firmware must

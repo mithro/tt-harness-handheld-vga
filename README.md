@@ -60,3 +60,12 @@ Tests marked `slow` (exhaustive simulation sweeps) are skipped unless `--run-slo
 uv run pytest -m "not toolchain and not vivado"   # fast
 uv run pytest tests/test_slot.py tests/test_atspeed.py tests/test_atspeed_abort.py --run-slow -m "not vivado" -q -W error   # everything for the slot / at-speed check
 ```
+
+Parallel (pytest-xdist; `-n` is not a default because FPGA-build tests must run one at a time,
+so use it only with the markers that leave those out):
+
+```sh
+uv run pytest -m "not toolchain and not vivado" -n 16 --dist loadgroup -q -W error   # fast, parallel
+uv run pytest tests/test_slot.py tests/test_atspeed.py tests/test_atspeed_abort.py tests/test_atspeed_pins.py \
+    tests/test_atspeed_random.py tests/test_crossing.py --run-slow -m "not vivado" -n 16 --dist loadgroup -q -W error
+```
