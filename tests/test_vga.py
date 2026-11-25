@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from migen import Module, Signal
 from migen.sim import run_simulation
-from vga_model import VgaModel, encode  # noqa: F401
+from vga_model import VgaModel, encode
 
 from tt_harness.core import vga
 
@@ -230,3 +230,287 @@ def test_the_c_header_lists_every_entry() -> None:
     assert f"#define VGA_MODE_COUNT {entries}" in text
     assert "malloc" not in text
     assert "640x480" in text
+
+
+# Helpers for the simulator tests -------------------------------------------------------------
+
+# A small synthetic mode: 40 x 20 clocks in total (800 clocks a frame), picture 16 x 8.
+SMALL = {
+    "h_active": 16,
+    "h_front": 4,
+    "h_sync": 6,
+    "h_back": 14,
+    "v_active": 8,
+    "v_front": 2,
+    "v_sync": 2,
+    "v_back": 8,
+}
+
+
+def small(**changes) -> VgaModel:
+    return VgaModel(**{**SMALL, **changes})
+
+
+def trace(dut, values, observe: dict, events: dict | None = None) -> dict[str, list[int]]:
+    """Drive `dut.uo_out` with `values`, one per clock; return `observe` values per clock.
+
+    Entry c of each list is the signal in the clock in which `values[c]` is on `uo_out`:
+    registers show what the clocks before c produced, combinational outputs show c itself.
+    `values[0]` is on the pins from reset, so the first clock after reset is clock -1.
+    `events[c]` is a list of statements (signal.eq(...)) applied in clock c.
+    """
+    seen: dict[str, list[int]] = {name: [] for name in observe}
+    values = list(values)
+
+    dut.uo_out.reset = values[0]  # in place from the start: clock -1 is the first after reset
+
+    def gen():
+        for c, value in enumerate(values):
+            yield from (events or {}).get(c, ())
+            yield dut.uo_out.eq(value)
+            yield
+            for name, signal in observe.items():
+                seen[name].append((yield signal))
+
+    run_simulation(dut, gen())
+    return seen
+
+
+def pin_rises(values: list[int], bit: int) -> list[int]:
+    """Clocks in which the pin goes from 0 to 1 (the pin, whatever its polarity)."""
+    return [
+        c for c in range(1, len(values)) if values[c] >> bit & 1 and not values[c - 1] >> bit & 1
+    ]
+
+
+def pin_active_edges(values: list[int], bit: int, positive: bool) -> list[int]:
+    """Clocks in which a sync pin goes to its active level (the sync pulse's leading edge)."""
+    level = int(positive)
+    return [
+        c
+        for c in range(1, len(values))
+        if (values[c] >> bit & 1) == level and (values[c - 1] >> bit & 1) != level
+    ]
+
+
+HSYNC_BIT, VSYNC_BIT = 7, 3
+
+MEASUREMENTS = (
+    "clocks_per_line",
+    "lines_per_frame",
+    "hsync_width",
+    "vsync_lines",
+    "hsync_positive",
+    "vsync_positive",
+)
+TIMING_OUTPUTS = (*MEASUREMENTS, "frames", "locked", "no_signal")
+
+
+def observe_timing(t) -> dict:
+    return {name: getattr(t, name) for name in TIMING_OUTPUTS}
+
+
+def measured(seen: dict, c: int) -> tuple:
+    return tuple(seen[k][c] for k in MEASUREMENTS)
+
+
+# VgaTiming -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hsync_positive", [False, True])
+@pytest.mark.parametrize("vsync_positive", [False, True])
+@pytest.mark.parametrize("vsync_phase", ["line_start", "hsync"])
+def test_positive_sync_polarities(hsync_positive, vsync_positive, vsync_phase) -> None:
+    model = small(
+        hsync_positive=hsync_positive, vsync_positive=vsync_positive, vsync_phase=vsync_phase
+    )
+    t = vga.VgaTiming()
+    clocks = 4 * model.clocks_per_frame
+    seen = trace(t, model.stream(clocks), observe_timing(t))
+    assert measured(seen, clocks - 1) == (
+        40,
+        20,
+        6,
+        2,
+        int(hsync_positive),
+        int(vsync_positive),
+    )
+    assert seen["locked"][clocks - 1] == 1
+
+
+@pytest.mark.parametrize("hsync_positive", [False, True])
+@pytest.mark.parametrize("vsync_positive", [False, True])
+@pytest.mark.parametrize("skip", [0, 333, 400 + 61])
+def test_locks_within_three_frames_from_reset(hsync_positive, vsync_positive, skip) -> None:
+    """Reset in any phase of the frame: published at the second vsync, locked at the third."""
+    model = small(hsync_positive=hsync_positive, vsync_positive=vsync_positive)
+    t = vga.VgaTiming()
+    clocks = 4 * model.clocks_per_frame
+    values = list(model.stream(clocks, skip=skip))
+    seen = trace(t, values, observe_timing(t))
+    rises = pin_rises(values, VSYNC_BIT)  # polarity-independent: the pin's 0 -> 1 edges
+    # `frames` counts the publications; registers show the clock after the edge.
+    assert [seen["frames"][c] for c in (rises[1], rises[1] + 1, rises[2], rises[2] + 1)] == [
+        0,
+        1,
+        1,
+        2,
+    ]
+    expected = (40, 20, 6, 2, int(hsync_positive), int(vsync_positive))
+    assert measured(seen, rises[1] + 1) == expected
+    assert seen["locked"][rises[1] + 1] == 0  # one measurement is not yet two the same
+    assert seen["locked"][rises[2]] == 0
+    assert seen["locked"][rises[2] + 1] == 1
+    assert rises[2] + 1 <= 3 * model.clocks_per_frame  # within three frames of reset
+    assert all(seen["locked"][c] for c in range(rises[2] + 1, clocks))
+    assert all(measured(seen, c) == expected for c in range(rises[1] + 1, clocks))
+
+
+def test_double_rate_design_is_divided() -> None:
+    model = small(divider=2)
+    t = vga.VgaTiming()
+    clocks = 4 * model.clocks_per_frame
+    seen = trace(t, model.stream(clocks), observe_timing(t))
+    assert measured(seen, clocks - 1) == (80, 20, 12, 2, 0, 0)
+    assert seen["locked"][clocks - 1] == 1
+
+
+def test_measurements_publish_together() -> None:
+    first = small()
+    second = small(
+        h_active=12,
+        h_front=2,
+        h_sync=4,
+        h_back=8,
+        v_active=9,
+        v_front=3,
+        v_sync=3,
+        v_back=5,
+        hsync_positive=True,
+        vsync_positive=True,
+    )
+    assert (second.h_total, second.v_total) == (26, 20)
+    values = list(first.stream(3 * first.clocks_per_frame))
+    values += list(second.stream(5 * second.clocks_per_frame, skip=17))
+    t = vga.VgaTiming()
+    seen = trace(t, values, observe_timing(t))
+    publications = [c for c in range(1, len(values)) if seen["frames"][c] != seen["frames"][c - 1]]
+    assert all(seen["frames"][c] == seen["frames"][c - 1] + 1 for c in publications)
+    moved = []
+    for c in range(1, len(values)):
+        if measured(seen, c) != measured(seen, c - 1):
+            moved.append(c)
+            assert c in publications, f"clock {c}: a measurement changed between publications"
+    assert len(moved) >= 2  # the first measurement and the change of mode
+    # The frame that spans the change of mode is measured as it is (a partial mix); the
+    # frames after it give the second mode's numbers, all at once.
+    assert measured(seen, len(values) - 1) == (26, 20, 4, 3, 1, 1)
+    final = next(c for c in moved if measured(seen, c) == (26, 20, 4, 3, 1, 1))
+    assert measured(seen, final - 1) != measured(seen, final)
+    assert seen["frames"][final] == seen["frames"][final - 1] + 1
+
+
+def test_frames_wrap() -> None:
+    t = vga.VgaTiming()
+    t.frames.reset = 0xFFFF  # one publication from wrapping
+    model = small()
+    values = list(model.stream(4 * model.clocks_per_frame))
+    seen = trace(t, values, {"frames": t.frames})
+    assert seen["frames"][0] == 0xFFFF
+    assert seen["frames"][-1] == 2  # 0xFFFF -> 0 -> 1 -> 2
+
+
+def test_no_signal_from_reset_until_the_first_measurement() -> None:
+    t = vga.VgaTiming(no_signal_clocks=1000)
+    seen = trace(t, [0x00] * 1200, observe_timing(t))  # a dead bus: no sync pulses at all
+    assert all(seen["no_signal"])
+    assert not any(seen["locked"])
+    assert seen["frames"][-1] == 0
+    t = vga.VgaTiming(no_signal_clocks=1000)
+    model = small()
+    values = list(model.stream(3 * model.clocks_per_frame))
+    seen = trace(t, values, observe_timing(t))
+    rises = pin_rises(values, VSYNC_BIT)
+    assert seen["no_signal"][rises[1]] == 1
+    assert seen["no_signal"][rises[1] + 1] == 0  # cleared with the first measurement
+
+
+def test_no_signal_returns_when_the_signal_stops() -> None:
+    n = 1000
+    t = vga.VgaTiming(no_signal_clocks=n)
+    model = small()
+    live = list(model.stream(4 * model.clocks_per_frame))
+    values = live + [live[-1] & ~(1 << HSYNC_BIT)] * 2500
+    # then the signal comes back, in another phase of the frame
+    values += list(model.stream(5 * model.clocks_per_frame, skip=123))
+    seen = trace(t, values, observe_timing(t))
+    last_rise = pin_rises(live, VSYNC_BIT)[-1]
+    assert not any(seen["no_signal"][c] for c in range(last_rise + 1, last_rise + n + 1))
+    assert seen["no_signal"][last_rise + n + 1] == 1
+    assert all(seen["no_signal"][c] for c in range(last_rise + n + 1, len(live) + 2500))
+    assert seen["locked"][last_rise + n] == 1
+    assert seen["locked"][last_rise + n + 1] == 0  # not locked on nothing
+    # and back again: the first rise only starts a frame, the next gives a measurement
+    rises = [c for c in pin_rises(values, VSYNC_BIT) if c >= len(live) + 2500]
+    assert seen["no_signal"][rises[0] + 1] == 1
+    assert seen["no_signal"][rises[1]] == 1
+    assert seen["no_signal"][rises[1] + 1] == 0
+    assert seen["frames"][-1] > seen["frames"][last_rise + n + 1]
+
+
+def test_an_edge_exactly_one_period_apart_is_in_time() -> None:
+    model = small()
+    n = model.clocks_per_frame  # the frame period is exactly the limit
+    t = vga.VgaTiming(no_signal_clocks=n)
+    values = list(model.stream(5 * n))
+    seen = trace(t, values, observe_timing(t))
+    rises = pin_rises(values, VSYNC_BIT)
+    assert not any(seen["no_signal"][c] for c in range(rises[1] + 1, len(values)))
+
+
+def test_no_signal_limit_is_above_the_largest_frame() -> None:
+    # 800 x 600 at divider 2, 2112 x 628 clocks, is the largest frame in the mode table.
+    largest = max(m.h_total * max(m.dividers) * m.v_total for m in vga.MODES)
+    assert largest == 2112 * 628
+    assert vga.NO_SIGNAL_CLOCKS == 1 << 23
+    assert vga.NO_SIGNAL_CLOCKS >= 6 * largest
+
+
+def test_stuck_hsync_does_not_look_like_a_mode() -> None:
+    model = small()
+    values = [v | (1 << HSYNC_BIT) for v in model.stream(8 * model.clocks_per_frame)]
+    t = vga.VgaTiming()
+    seen = trace(t, values, observe_timing(t))
+    # vsync still pulses; hsync is stuck high: no lines, a line length that is saturated.
+    last = measured(seen, len(values) - 1)
+    assert last[:4] == (vga.CLOCKS_MAX, 0, 0, 0)
+    assert vga.classify(*last[:4], 25_175_000) is None
+
+
+def test_slow_hsync_saturates_instead_of_wrapping() -> None:
+    # A line of 5000 clocks does not fit in the 12-bit counter: it reads 4095, not 904.
+    model = VgaModel(2000, 1000, 1000, 1000, 1, 0, 1, 0)  # 5000 x 2
+    assert (model.h_total, model.v_total) == (5000, 2)
+    t = vga.VgaTiming()
+    clocks = 2 * model.clocks_per_frame + 100  # two vsync rises: the first publication
+    seen = trace(t, model.stream(clocks), observe_timing(t))
+    assert seen["frames"][-1] == 1
+    clocks_per_line, lines_per_frame, hsync_width, vsync_lines, hp, vp = measured(seen, clocks - 1)
+    assert clocks_per_line == vga.CLOCKS_MAX == 4095
+    # The pulse (the shorter phase) is still measured, whole.
+    assert (lines_per_frame, hsync_width, vsync_lines, hp, vp) == (2, 1000, 1, 0, 0)
+
+
+def test_many_lines_saturate_instead_of_wrapping() -> None:
+    # 2100 lines does not fit in the 11-bit counter: it reads 2047, not 52.
+    model = VgaModel(1, 1, 1, 1, 2000, 50, 3, 47)
+    assert model.v_total == 2100
+    t = vga.VgaTiming()
+    start = 2040 * model.h_total  # just before the vsync pulse: the second rise is soon
+    clocks = model.clocks_per_frame + 400
+    seen = trace(t, model.stream(clocks, skip=start), observe_timing(t))
+    assert seen["frames"][-1] == 1
+    last = measured(seen, clocks - 1)
+    assert last[1] == vga.LINES_MAX == 2047
+    assert last[3] == 3  # the short pulse is still measured
+    assert last[5] == 0  # and found to be the short level: negative sync

@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from migen import Cat
+from migen import Cat, If, Module, Mux, Signal
 
 PIXEL_BITS = 6
 
@@ -211,6 +211,181 @@ def modes_header() -> str:
         "\n"
         "#endif /* TT_HARNESS_VGA_MODES_H */\n"
     )
+
+
+# VgaTiming ---------------------------------------------------------------------------------
+
+CLOCKS_MAX = (1 << 12) - 1  # saturation value of every clock count
+LINES_MAX = (1 << 11) - 1  # saturation value of every line count
+NO_SIGNAL_CLOCKS = 1 << 23  # 8,388,608 project clocks
+
+
+def _count_up(counter, limit: int):
+    """Statement: `counter` plus one, stopping at `limit` instead of wrapping."""
+    return If(counter != limit, counter.eq(counter + 1))
+
+
+def _smaller_of(a, b):
+    return Mux(a < b, a, b)
+
+
+class VgaTiming(Module):
+    """Measure the timing a design's own sync signals have, in project clocks and lines.
+
+    Input `uo_out` (8 bits, Tiny VGA pinout). Outputs, all registers, valid together:
+
+    - `clocks_per_line` (12 bits): clocks from one hsync leading edge to the next;
+    - `hsync_width` (12): clocks hsync is active;
+    - `lines_per_frame` (11): hsync leading edges from one vsync leading edge to the next;
+    - `vsync_lines` (11): lines vsync is active;
+    - `hsync_positive`, `vsync_positive`: 1 if the sync pulse is the high level;
+    - `frames` (16): publications so far, wrapping;
+    - `locked`: the last two publications were identical in all six values above (and
+      none of the four counts was zero);
+    - `no_signal`: no vsync pulse within `no_signal_clocks`, and from reset until the first
+      publication. While it is high the measurements are stale and must not be used.
+
+    No mode is assumed. The measurement does not depend on knowing the polarity first, so
+    it needs no trial and error: hsync is measured as two phases, the clocks it is high and
+    the clocks it is low, per line, and vsync likewise as the lines it is high and low per
+    frame. The sync pulse is the SHORTER phase (a tie reads as negative sync). A "line" is
+    the period between hsync rising edges and a "frame" the period between vsync rising
+    edges, whatever the polarity; the period is the same between any two like edges, so
+    this equals the leading-edge-to-leading-edge definition. A hsync rising edge is counted
+    towards the vsync phase the vsync pin has at that clock, so a vsync edge on the same
+    clock as an hsync edge puts that line in the new phase.
+
+    Convergence: the first vsync rising edge after reset only starts a frame (the frame
+    before it is partial). The second publishes the first complete frame: all six values
+    right, `frames` = 1, `no_signal` low, `locked` still low. The third publishes the next
+    and `locked` rises if it is the same. That is, locked at the third vsync rising edge,
+    at most three frame times after reset, for either polarity. Publication is the clock
+    after the vsync rising edge; every output changes on that clock and no other.
+
+    Per line the measurement used is that of the last complete line before the vsync edge.
+
+    Saturation: the four counters of the phases (hsync high/low clocks, vsync high/low
+    lines) stop at 4095 / 2047, so `clocks_per_line` and `lines_per_frame` read their
+    maximum for anything longer, never a wrapped small number. A hsync that never changes
+    keeps counting one phase to the maximum and then its line length reads 4095, with
+    `hsync_width` 0 and, as no line ends, `lines_per_frame` 0; `classify` finds no mode
+    there. A vsync that never changes gives no publication, and `no_signal`.
+
+    The first clock after reset is never an edge (the inputs are not yet compared with
+    anything). Registers: about 164 flip-flops.
+    """
+
+    def __init__(self, no_signal_clocks: int = NO_SIGNAL_CLOCKS) -> None:
+        if type(no_signal_clocks) is not int or no_signal_clocks < 2:
+            raise ValueError(
+                f"no_signal_clocks must be an integer of at least 2: {no_signal_clocks!r}"
+            )
+        self.no_signal_clocks = no_signal_clocks
+        self.uo_out = Signal(8)
+        self.clocks_per_line = Signal(12)
+        self.lines_per_frame = Signal(11)
+        self.hsync_width = Signal(12)
+        self.vsync_lines = Signal(11)
+        self.hsync_positive = Signal()
+        self.vsync_positive = Signal()
+        self.frames = Signal(16)
+        self.locked = Signal()
+        self.no_signal = Signal(reset=1)
+
+        _, _, _, hsync, vsync = decode(self.uo_out)
+        primed = Signal()  # low only in the first clock after reset
+        hsync_q, vsync_q = Signal(), Signal()
+        h_rise, v_rise = Signal(), Signal()
+        self.sync += [primed.eq(1), hsync_q.eq(hsync), vsync_q.eq(vsync)]
+        self.comb += [
+            h_rise.eq(primed & hsync & ~hsync_q),
+            v_rise.eq(primed & vsync & ~vsync_q),
+        ]
+
+        # Per line: clocks high and low since the last hsync rising edge, and the last
+        # complete line's.
+        h_high, h_low = Signal(12), Signal(12)
+        line_high, line_low = Signal(12), Signal(12)
+        self.sync += [
+            If(hsync, _count_up(h_high, CLOCKS_MAX)).Else(_count_up(h_low, CLOCKS_MAX)),
+            # A phase that has reached the maximum: report it at once, no edge will come.
+            If(
+                h_rise | (h_high == CLOCKS_MAX) | (h_low == CLOCKS_MAX),
+                line_high.eq(h_high),
+                line_low.eq(h_low),
+            ),
+            If(h_rise, h_high.eq(1), h_low.eq(0)),
+        ]
+
+        # Per frame: hsync rising edges while vsync is high and low.
+        v_high, v_low = Signal(11), Signal(11)
+        self.sync += If(
+            h_rise,
+            If(vsync, _count_up(v_high, LINES_MAX)).Else(_count_up(v_low, LINES_MAX)),
+        )
+
+        # The numbers a publication would carry.
+        line_total = Signal(13)
+        frame_total = Signal(12)
+        new_clocks, new_lines = Signal(12), Signal(11)
+        new_hwidth, new_vlines = Signal(12), Signal(11)
+        new_hpos, new_vpos = Signal(), Signal()
+        self.comb += [
+            line_total.eq(line_high + line_low),
+            new_clocks.eq(Mux(line_total > CLOCKS_MAX, CLOCKS_MAX, line_total)),
+            frame_total.eq(v_high + v_low),
+            new_lines.eq(Mux(frame_total > LINES_MAX, LINES_MAX, frame_total)),
+            new_hwidth.eq(_smaller_of(line_high, line_low)),
+            new_vlines.eq(_smaller_of(v_high, v_low)),
+            new_hpos.eq(line_high < line_low),
+            new_vpos.eq(v_high < v_low),
+        ]
+        same = Signal()
+        usable = Signal()
+        self.comb += [
+            same.eq(
+                (new_clocks == self.clocks_per_line)
+                & (new_lines == self.lines_per_frame)
+                & (new_hwidth == self.hsync_width)
+                & (new_vlines == self.vsync_lines)
+                & (new_hpos == self.hsync_positive)
+                & (new_vpos == self.vsync_positive)
+            ),
+            usable.eq((new_clocks != 0) & (new_lines != 0) & (new_hwidth != 0) & (new_vlines != 0)),
+        ]
+
+        armed = Signal()  # a vsync rising edge has started the frame being measured
+        fresh = Signal()  # the values now published come from the previous frame
+        idle = Signal(max=no_signal_clocks)
+        self.sync += [
+            If(
+                idle == no_signal_clocks - 1,
+                self.no_signal.eq(1),
+                self.locked.eq(0),
+                armed.eq(0),
+                fresh.eq(0),
+            ).Else(idle.eq(idle + 1)),
+            If(
+                v_rise,
+                idle.eq(0),
+                armed.eq(1),
+                v_high.eq(h_rise),  # the line starting now is in the new frame's high phase
+                v_low.eq(0),
+                If(
+                    armed,
+                    self.clocks_per_line.eq(new_clocks),
+                    self.lines_per_frame.eq(new_lines),
+                    self.hsync_width.eq(new_hwidth),
+                    self.vsync_lines.eq(new_vlines),
+                    self.hsync_positive.eq(new_hpos),
+                    self.vsync_positive.eq(new_vpos),
+                    self.frames.eq(self.frames + 1),
+                    self.no_signal.eq(0),
+                    self.locked.eq(fresh & same & usable),
+                    fresh.eq(1),
+                ),
+            ),
+        ]
 
 
 if __name__ == "__main__":
