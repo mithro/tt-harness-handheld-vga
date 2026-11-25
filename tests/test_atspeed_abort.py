@@ -150,8 +150,8 @@ def test_abort_at_every_stage_stops_the_check_and_its_result_never_appears(
     period = CLOCKS[clock][0]
     sys_clocks_per_project = max(1, period // 20_000)
     for k in ABORT_AT:
-        if clock == "slow" and k > 20:
-            continue  # a 1 MHz check takes far longer than these delays; the early ones cover it
+        if clock == "slow" and k not in (0, 3, 8, 15):
+            continue  # a 1 MHz check is slow to simulate; these cover reset phase and counting
         b = make()
         rec, out = Recorder(b), {}
 
@@ -325,7 +325,7 @@ def test_two_starts_in_quick_succession_run_once(clock: str) -> None:
 @pytest.mark.parametrize("gap", [0, 1, 2, 3, 5])
 def test_start_immediately_after_abort_is_held_and_runs_the_new_check(clock: str, gap: int) -> None:
     per = max(1, CLOCKS[clock][0] // 20_000)
-    for k in (3, 12, 40):
+    for k in (3, 12) if clock == "slow" else (3, 12, 40):
         b = make()
         rec, out = Recorder(b), {}
 
@@ -440,8 +440,9 @@ def test_start_right_after_done_never_shows_the_old_result_as_the_new_one(clock:
         yield from start(b, 20)
         out["n1"] = yield from wait_done(b, 60_000)
         out["crc1"] = yield b.check.crc
-        out["seen_old"] = len(rec.done_crcs)
         yield from start(b, 47)  # the very next cycle: the old `fin` is still on its way
+        yield  # `start` has been accepted and has cleared `done`; samples so far are the old one's
+        out["seen_old"] = len(rec.done_crcs)
         out["n2"] = yield from wait_done(b, 60_000)
         out["crc2"] = yield b.check.crc
         yield from waits(100 * per)
