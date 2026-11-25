@@ -85,6 +85,15 @@ def sim() -> None:
     )
 
 
+def _inputs(d: dict) -> str:
+    """What the build's gate found driving the project's inputs: rst_n, then the rest."""
+    drivers = dict(map(tuple, d.get("input_drivers") or []))
+    if not drivers:
+        return "not recorded"
+    rest = sorted({v for k, v in drivers.items() if k != "rst_n"})
+    return f"`rst_n`: {drivers.get('rst_n')}; others: {', '.join(rest)}"
+
+
 def builds() -> None:
     for tc in build.TOOLCHAINS:
         print(f"### {TOOL[tc]}\n")
@@ -116,6 +125,7 @@ def builds() -> None:
                 row += [
                     d["language"],
                     ", ".join(f"`{c}`" for c in d["project_clocks"]) or "none",
+                    _inputs(d),
                     rewrites,
                     f"`{d['bitstream_sha256'][:12]}`",
                 ]
@@ -133,6 +143,7 @@ def builds() -> None:
                 "Time",
                 "Sources read as",
                 "Project clocks",
+                "Project inputs driven by",
                 "`default_nettype` rewrites",
                 "Bitstream sha256",
             ],

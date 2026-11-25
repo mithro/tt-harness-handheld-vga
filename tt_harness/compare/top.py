@@ -61,6 +61,14 @@ class CompareTop(Module):
         self.submodules.stimulus = stim = ReferenceStimulus(
             project.ui_in, project.uio_in, reset_clocks
         )
+        # Every signal into the project is a constant or a register output
+        # (`tt_harness.compare.inputs`). `keep` on the register output makes the tools
+        # preserve that net by name, so that the build can check what drives it in the
+        # implemented netlist (`tt_harness.input_gate`). The constant inputs are not marked:
+        # the gate recognises them from the generated top, and `keep` on a constant net
+        # stops Vivado propagating the constant into the project (2048: 986 LUTs instead
+        # of 207).
+        stim.rst_n.attr.add("keep")
         self.pclk = rec.pclk
         self.project_clk = Signal(name_override="project_clk")
         if clock_buffer is None:
@@ -85,6 +93,7 @@ class CompareTop(Module):
         )
         self.comb += [
             stim.clock_index.eq(rec.clock_index),
+            stim.advance.eq(rec.advance),
             rec.uo.eq(uo_out),
             self.tx.eq(rec.tx),
             self.done.eq(rec.done),

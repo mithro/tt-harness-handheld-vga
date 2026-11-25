@@ -36,7 +36,7 @@ def _job(tmp_path: Path, toolchain: str) -> build._Job:
         toolchain=toolchain,
         part=arty.PARTS[toolchain],
         out_dir=tmp_path,
-        top_v=tmp_path / "arty_compare.v",
+        top_v=arty.to_verilog(arty.Top(s.project, 1_000_000, 100), tmp_path / "arty_compare.v"),
         pins_xdc=tmp_path / "pins.xdc",
         plan=PLAN,
         jobs=1,

@@ -144,6 +144,24 @@ class TestSimulation:
     def test_counter_matches_reference(self, tmp_path: Path) -> None:
         _check_against_reference(_local("counter", "tt_um_test_counter", 0xA5), 5000, tmp_path)
 
+    def test_first_clocks_and_the_reset_boundary_match_the_reference(self, tmp_path: Path) -> None:
+        # `rst_n` is a register in the stimulus: its reset value and its one change must give
+        # the reference's bytes at clock 0 and across clocks 9 -> 10. The counter holds ui_in
+        # while rst_n is low and counts from the first clock after it.
+        sources = _local("counter", "tt_um_test_counter", 0xA5)
+        clocks = 16
+        data = sim.simulate(sources, clocks, tmp_path / "compare", SYS_CLK_FREQ, BAUD)
+        got = frame.decode(data).samples
+        expected = reference.simulate(sources, clocks, tmp_path / "ref").read_bytes()
+        assert got == expected
+        assert RESET_CLOCKS == 10
+        assert list(got) == [0xA5] * 10 + [0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB]
+
+    def test_asynchronously_reset_design_matches_reference(self, tmp_path: Path) -> None:
+        # (A zero-delay simulation cannot glitch; this pins the release clock for a design
+        # that uses rst_n asynchronously.)
+        _check_against_reference(_local("asyncclk", "tt_um_test_asyncclk"), 400, tmp_path)
+
     def test_both_edge_design_matches_reference(self, tmp_path: Path) -> None:
         _check_against_reference(_local("edges", "tt_um_test_edges"), 300, tmp_path)
 

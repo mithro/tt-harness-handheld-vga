@@ -14,8 +14,9 @@ that ran this; each section names its files, and the figures that matter are cop
 this document.
 
 The sections up to "Conclusion" are the record of that first run and are left as they were
-written. The build was then changed to act on what it found, and the whole pool was built
-and run again: see "After Task 9b" at the end, which is the current state.
+written. The build was then changed twice to act on what was found, and the whole pool was
+built and run again each time: see "After Task 9b" and then "After Task 9c" at the end.
+The last is the current state: all sixteen bitstreams build and are `exact` on the board.
 
 ## How it was run
 
@@ -632,7 +633,8 @@ again. **All eight designs now build with both toolchains. Fifteen of the sixtee
 bitstreams are `exact` on the board; the sixteenth, `tt_um_urish_rings` with openXC7, is a
 `mismatch`, traced to a glitch on the reset the harness gives the design** (a defect of the
 compare top that this run uncovered, not fixed here). The sections above are the record
-of the first run; where this section and they disagree, this is the current state.
+of the first run; where this section and they disagree, this one is the later. (The defect
+was then repaired: "After Task 9c" below is the current state.)
 
 **What the fifteen `exact` verdicts do and do not show.** The defect can only affect a
 design that uses `rst_n` as an asynchronous reset. Two pool designs do
@@ -896,6 +898,7 @@ design is `exact`, and so was the simulation of the compare top.
 
 - **The `rst_n` glitch**, above: one of sixteen runs is a `mismatch` because of it, and
   the fifteen `exact` ones are not proof against it for designs with asynchronous resets.
+  (Note, 2026-11-25: addressed in Task 9c; see "After Task 9c".)
 - The settle of 3 is a ruling that may be reversed; the alternative was an allowance based
   on measured skew.
 - DSP cells stay unused in the open flow. A DSP48E1 with a packed register does place and
@@ -914,3 +917,249 @@ design is `exact`, and so was the simulation of the compare top.
   hash that changes on rebuild, and the verdict paths `nondeterministic` and
   `inconclusive`, half-cycle domains and not-signed-off clocks, which no pool design
   exercises. `mismatch` has now been exercised by a real design.
+
+## After Task 9c
+
+Written 2026-11-24, from branch `task-9c-glitch-free-inputs`. Task 9b ended with one
+`mismatch` (`tt_um_urish_rings`, openXC7), traced to a glitch on the combinational `rst_n`
+the harness gave the project. This task removes that kind of signal from the harness,
+makes both build flows refuse a build that has one, and builds and runs the whole pool
+again. The sections above stay as the record; this is the current state.
+
+### What changed
+
+1. **`rst_n` is the output of a register.** The stimulus holds it in a system-clock
+   register that is updated on the same clock edge as the recorder's clock index, with
+   `clock_index + 1 >= 10`, and whose power-up value is 0
+   (`tt_harness/core/stimulus.py`; the recorder gained an `advance` output, high in the
+   cycle at whose end the index increments). Nothing combinational follows the register.
+   No cycle was added: `rst_n` still changes at rise + S + 2 (t0+5 at settle 3), the
+   constraints between `sys` and `pclk` are untouched, and no timing exception was added
+   or changed. The other inputs (`ena`, `ui_in`, `uio_in`) were and are constants.
+2. **The source is checked.** `tt_harness/compare/inputs.py` walks the compare top's Migen
+   description and classifies what drives each project input; a test requires every input
+   but the clock to be a constant or a signal assigned only in a clocked block, reached
+   through plain wires. Anything it does not recognise counts as combinational, so a new
+   input fails until it is shown to be glitch-free. It cannot see logic that synthesis
+   inserts or duplicates.
+3. **The implemented netlist is checked, in both flows** (`tt_harness/input_gate.py`). The
+   build fails (`InputDriverError`) unless each project input but the clock is a constant
+   or is driven directly by the Q pin of a flip-flop (FDRE, FDSE, FDCE, FDPE): a LUT used as
+   a buffer, an inverter, a carry chain, a missing net (other than a constant's, see
+   "Constants" below) or a missing report all fail. Only `rst_n` is verified in the
+   netlist; the three constant inputs are accepted from the source (see "Constants"). What
+   was found is in `BuildResult.input_drivers` and in the build log.
+   - *Finding the net.* Yosys flattens the project into the top and Vivado rebuilds its
+     hierarchy, and neither keeps "the project's `rst_n` port" as a name that can be relied
+     on (in the open-flow netlists of the earlier runs it was simply gone). The nets are
+     found from the harness side: the generated top connects each project port to one
+     named signal (`.rst_n(stimulus_rst_n)`), and the compare top marks the register's
+     output `keep`, so both tools preserve that net under that name.
+   - *openXC7*: read from the netlist Yosys writes, which is what nextpnr-xilinx reads
+     before packing.
+   - *Vivado*: a report written by Tcl from the routed design (the leaf driver of each
+     net and its cell type), parsed by the build.
+   - *Constants.* Both tools propagate a constant into the project and drop its net, so
+     the three constant inputs are absent from the netlists. A net may be absent only if
+     the generated top itself assigns it a literal (`assign stimulus_ena = 1'd1;`); it is
+     then recorded as "constant (net removed)". Any other absent net fails. This is
+     inferred from the source: the gate never sees `ena`, `ui_in` or `uio_in` in the
+     netlist, and the Vivado report for them says `driver missing`.
+   - *What `keep` costs.* On the register's output: nothing measurable. Vivado's build of
+     `tt_um_2048_vga_game` has 207 LUTs and 215 flip-flops with it and without it
+     (`tmp/9c/keep-none.log`, `tmp/9c/keep-rst.log`). On the constant nets it was tried
+     first and withdrawn: it gains nothing, and it stops Vivado propagating the constants
+     into the project, which changed what was built (the same design: 986 LUTs and 452
+     flip-flops, `tmp/9c/pool-build.log` and `work/pool` of that pass). The sixteen builds
+     below are from the second pass, with `keep` on `rst_n` only.
+
+### Evidence that the gates do something
+
+- Source: on the compare top as it was, the fragment test fails with "project input rst_n:
+  combinational" (`tmp/9c/pytest-step1-RED.log`, 5 failed); on the new one it passes.
+- Netlist: a build of the test counter with the old comparator in place fails in both
+  flows, "rst_n is driven by CARRY4" (openXC7) and "rst_n is driven by LUT6.O" (Vivado);
+  the same build with the register passes with "rst_n driven by FDRE"
+  (`tmp/9c/gate-openxc7-*.log`, `tmp/9c/gate-vivado-*.log`). Excerpts of those four
+  netlists and reports are the saved cases of `tests/test_input_gate.py`.
+
+### Recovery and removal on the asynchronous clear
+
+No timing exception was added or changed. From the routed Vivado designs of the two pool
+designs with an asynchronous clear (`report_timing` to the clear pins of the checkpoints,
+`tmp/9c/recovery/`, `tmp/9c/recovery-parsed.log`):
+
+| Design | Clear pins | Check | Requirement, as Vivado prints it | Slack |
+|---|---|---|---|---|
+| `tt_um_urish_rings` | 7, clocked by `pclk` | recovery | 30 ns (`pclk rise@80 - sys rise@50`) | 28.795 ns |
+| | | removal | -10 ns (`pclk rise@0 - sys rise@10`) | 9.404 ns |
+| `tt_um_algofoogle_dottee` | 12, clocked by its vsync clock | recovery | 30 ns (`project_clk0 rise@160 - sys rise@130`) | 29.270 ns |
+| | | removal | -10 ns (`project_clk0 rise@0 - sys rise@10`) | 8.757 ns |
+
+- Every such path starts at `stimulus_rst_n_reg` and is in Vivado's `**async_default**`
+  group: the existing multicycle paths between `sys` and the project clocks give the
+  asynchronous pins the same 30 ns and -10 ns as data pins. Both are met.
+- Between the register and the clear pins there is one LUT1 in each design: the design's
+  own inverter (`if (!rst_n)`), inside the project. A one-input function of a register
+  output cannot glitch.
+- The open flow: nextpnr-xilinx treats the clear pin as a setup endpoint. It reports the
+  path from the register through that inverter to the pin among the paths from `sys` to
+  the project's clocks (2.3 to 2.4 ns to `pclk`, 2.0 ns to dottee's vsync clock), and the
+  build checks it against the 20 ns budget like any other. There is no removal check, as
+  there is no hold analysis at all (`tmp/9c/open-clr.log`).
+
+### Builds
+
+`uv run python scripts/pool_run.py build`, 2026-11-24 12:30 to 12:52 UTC, log
+`tmp/9c/pool-build-2.log`: **sixteen of sixteen built; every build passed the input gate and
+every domain met timing.** In all sixteen `rst_n` is found in the netlist and is driven by
+an FDRE; the other three inputs are not found in it (the tool removed their nets) and are
+accepted as constants from the generated top's source.
+
+#### openXC7
+
+| Design | Build | LUTs | FFs | CARRY4 | DSP48E1 | Placed LUT / FF sites | Time | Sources read as | Project clocks | Project inputs driven by | `default_nettype` rewrites | Bitstream sha256 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `tinytapeout_dvd_screensaver` | ok | 539 | 165 | 34 | 0 | 790 / 165 | 24 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `965da7b42aaa` |
+| `tinytapeout_logo_screensaver` | ok | 576 | 175 | 35 | 0 | 829 / 175 | 25 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `3ba1c2b6cacb` |
+| `urish_rings` | ok | 226 | 143 | 35 | 0 | 510 / 143 | 15 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `ea996cc91937` |
+| `algofoogle_fun_vga_clock` | ok | 432 | 185 | 76 | 0 | 979 / 185 | 22 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `ae36814bf5a6` |
+| `algofoogle_vga` | ok | 373 | 180 | 60 | 0 | 795 / 180 | 19 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `c51d05c99296` |
+| `algofoogle_dottee` | ok | 482 | 181 | 66 | 0 | 951 / 181 | 22 s | systemverilog | `project.uo_out[3]` | `rst_n`: FDRE; others: constant (net removed) | none | `73ebeb812be6` |
+| `gamepad_pmod_demo` | ok | 300 | 133 | 33 | 0 | 572 / 133 | 18 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `fcec58f27a59` |
+| `2048_vga_game` | ok | 1636 | 487 | 58 | 0 | 2115 / 487 | 72 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `0d44407bedd6` |
+
+#### Vivado
+
+| Design | Build | LUTs | FFs | CARRY4 | DSP48E1 | Occupied slices | Time | Sources read as | Project clocks | Project inputs driven by | `default_nettype` rewrites | Bitstream sha256 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `tinytapeout_dvd_screensaver` | ok | 401 | 165 | 21 | 0 | 134 slices | 140 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | `palette.v` (1), `tt_um_tinytapeout_dvd_screensaver.v` (1), `vga_sync_generator.v` (1) | `3812f839dbb0` |
+| `tinytapeout_logo_screensaver` | ok | 423 | 175 | 21 | 0 | 141 slices | 141 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | `palette.v` (1), `tt_um_tinytapeout_logo_screensaver.v` (1), `vga_sync_generator.v` (1) | `54463e0fa8dd` |
+| `urish_rings` | ok | 188 | 142 | 16 | 0 | 72 slices | 129 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | `project.v` (1) | `4c2ece8eb4b4` |
+| `algofoogle_fun_vga_clock` | ok | 357 | 185 | 38 | 0 | 123 slices | 136 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | `mv_vga_clock.v` (1), `project.v` (1), `vga_sync.v` (1) | `cbe3786a2435` |
+| `algofoogle_vga` | ok | 303 | 180 | 32 | 0 | 106 slices | 139 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | `mv_vga_clock.v` (1), `project.v` (1), `vga_sync.v` (1) | `858cfd3f09a8` |
+| `algofoogle_dottee` | ok | 416 | 181 | 32 | 0 | 140 slices | 152 s | systemverilog | `project/hvsync_gen/vsync_reg/Q` | `rst_n`: FDRE; others: constant (net removed) | `audio.v` (1), `hvsync_generator.v` (1), `project.v` (1) | `89628a357222` |
+| `gamepad_pmod_demo` | ok | 181 | 133 | 8 | 0 | 67 slices | 112 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | none | `ecaab28c04c5` |
+| `2048_vga_game` | ok | 207 | 215 | 8 | 0 | 88 slices | 145 s | verilog-2005 | none | `rst_n`: FDRE; others: constant (net removed) | `button_debounce.v` (1), `debug_controller.v` (1), `draw_game.v` (1), `galois_lfsr.v` (1), `game_logic.v` (1), `game_row_push_merge.v` (1), `project.v` (1), `vga_sync_generator.v` (1), `welcome_screen.v` (1) | `ad80657f7b37` |
+
+- The open flow's smallest margin on a clock pair is between 8.57 and 17.64 ns of the 20 ns
+  budget (`tt_um_algofoogle_vga`, `pclk->sys`, is the smallest); Vivado's between 16.41 and
+  25.76 ns of 30. Vivado's smallest hold margin is 0.014 ns
+  (`tt_um_tinytapeout_dvd_screensaver`), met. No half-cycle domain, no clock that is not
+  signed off, no DSP cell; dottee's project clock is found and classed as before.
+- Area is as after Task 9b to within a few cells (the register and its enable logic in
+  place of the comparator): for example Vivado's `tt_um_2048_vga_game` 207 LUTs and 215
+  flip-flops against 206 and 214.
+- Per-domain figures are in
+  [`2026-11-spike-a-compare-build-9c-timing.md`](2026-11-spike-a-compare-build-9c-timing.md).
+- The result files of the run after Task 9b were kept aside as `work/pool-task9b/` (local).
+
+### Hardware
+
+Same board (pi7, Arty `210319A764F5`), 2026-11-24 12:53 to 13:22 UTC, one session, logs
+`tmp/9c/pool-hw.log` and `tmp/9c/hw-repeats.log`: the sixteen bitstreams once each, then
+second runs of `tt_um_urish_rings`/openXC7 and of both `tt_um_algofoogle_dottee`
+bitstreams. **All nineteen runs are `exact`**, 6,000,013 bytes each, frame CRC good, and no
+byte before the frame header in any of them.
+
+| Design | Toolchain | Verdict | First differing clock | Bytes received | Bytes before the header | Frame CRC | UART error counters | Payload sha256 against reference | Load s | Load to last byte s | Whole command s | Started (local) | Bitstream sha256 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `tinytapeout_dvd_screensaver` | openXC7 | **exact** | none | 6000013 | 0 | good | overrun 1, others 0 | equal | 2.49 | 62.77 | 90.3 | 23:23:10 | `965da7b42aaa` |
+| `tinytapeout_dvd_screensaver` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.48 | 62.75 | 90.7 | 23:24:40 | `3812f839dbb0` |
+| `tinytapeout_logo_screensaver` | openXC7 | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.49 | 62.78 | 90.6 | 23:26:11 | `3ba1c2b6cacb` |
+| `tinytapeout_logo_screensaver` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.48 | 62.76 | 90.5 | 23:27:42 | `54463e0fa8dd` |
+| `urish_rings` | openXC7 | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.50 | 62.77 | 89.7 | 23:29:12 | `ea996cc91937` |
+| `urish_rings` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.50 | 62.76 | 89.6 | 23:30:42 | `4c2ece8eb4b4` |
+| `algofoogle_fun_vga_clock` | openXC7 | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.49 | 62.75 | 89.3 | 23:32:12 | `ae36814bf5a6` |
+| `algofoogle_fun_vga_clock` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.49 | 62.75 | 89.4 | 23:33:41 | `cbe3786a2435` |
+| `algofoogle_vga` | openXC7 | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.48 | 62.75 | 89.2 | 23:35:10 | `c51d05c99296` |
+| `algofoogle_vga` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.50 | 62.76 | 89.4 | 23:36:40 | `858cfd3f09a8` |
+| `algofoogle_dottee` | openXC7 | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.48 | 62.77 | 90.9 | 23:38:09 | `73ebeb812be6` |
+| `algofoogle_dottee` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.48 | 62.74 | 90.8 | 23:39:40 | `89628a357222` |
+| `gamepad_pmod_demo` | openXC7 | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.49 | 62.77 | 89.6 | 23:41:11 | `fcec58f27a59` |
+| `gamepad_pmod_demo` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.49 | 62.76 | 89.6 | 23:42:41 | `ecaab28c04c5` |
+| `2048_vga_game` | openXC7 | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.47 | 62.73 | 91.5 | 23:44:10 | `0d44407bedd6` |
+| `2048_vga_game` | Vivado | **exact** | none | 6000013 | 0 | good | all 0 | equal | 2.48 | 62.73 | 91.5 | 23:45:42 | `ad80657f7b37` |
+
+Second runs, same bitstreams (reused, not rebuilt):
+
+| Design | Toolchain | Verdict | Bytes received | Bytes before the header |
+|---|---|---|---|---|
+| `urish_rings` | openXC7 | **exact** | 6000013 | 0 |
+| `algofoogle_dottee` | openXC7 | **exact** | 6000013 | 0 |
+| `algofoogle_dottee` | Vivado | **exact** | 6000013 | 0 |
+
+- `tt_um_urish_rings` with openXC7, the `mismatch` of the run after Task 9b, is `exact`
+  twice.
+- In the first run of the session the kernel counted one receive overrun on the port
+  (no break, no framing error); the frame was complete, its CRC good and the payload
+  equal to the reference, so no byte of the frame was lost. Nothing else was counted in
+  any run.
+- Other users. An outside user had a terminal on the board host earlier in the day. Before
+  the session it was looked at by hand: `/dev/pts/2` last read and written at 11:40:04
+  UTC, 73 minutes before the first run; no editor, loader or serial tool running; nothing
+  holding the UART (`tmp/9c/check-before-hw.log`). The runner's own check passed before
+  each of the nineteen runs. After the session the terminal's times were unchanged
+  (`tmp/9c/check-after-hw.log`): nobody was active while it ran.
+- Left on the board host: nothing (no `tt-harness-run-*` directory, no process, disk use
+  as before, no `sudo`). The last bitstream loaded is `tt_um_algofoogle_dottee`, Vivado,
+  idle after its frame.
+
+### What is established, and what is not
+
+- **The mechanism.** The Task 9b mismatch was a pulse on the project's asynchronous clear
+  made by the harness's combinational `rst_n`. The evidence: with the comparator, the
+  openXC7 rings bitstream lost one count of an asynchronously reset counter in the first
+  clocks after reset, twice identically; a scratch build with `rst_n` from a register was
+  `exact` once (Task 9b); and with the register as built here the openXC7 rings bitstream
+  is `exact` in two runs of two, as are all the others. Which change of the counter
+  produced the pulse was never determined and no longer matters.
+- **By construction.** `rst_n` now reaches the project from the Q pin of a flip-flop with
+  nothing in between, and the build verifies that for every bitstream from the implemented
+  netlist (FDRE in all sixteen). A flip-flop output changes once per clock edge at most;
+  it cannot produce the kind of pulse a comparator can. The other three inputs are
+  constants in the generated source; see the next item for what was checked of them.
+- **Only `rst_n` is verified in the netlist.** In all sixteen builds `rst_n` is the only
+  project input the gate finds and classifies there (driver: an FDRE flip-flop's Q pin).
+  `ena`, `ui_in` and `uio_in` are recorded as "constant (net removed)": synthesis
+  propagated the constants and removed the nets, and the gate accepts them because the
+  generated top assigns those nets only a literal. That is inferred from the source; the
+  gate never sees these nets in the netlist. A tool fault that left a constant input driven
+  by logic would appear as a missing net and still pass. The constants cannot simply be
+  kept in the netlist: keeping them stopped Vivado propagating constants into the project
+  (the 2048 design grew from 207 to 986 LUTs). Recorded for the Task 9c builds of
+  `tt_um_urish_rings`: `build/compare/arty-vivado/.../project-inputs.rpt` has `ena ...
+  driver missing` and `rst_n ... driver FDRE`; `work/pool/ttihp26a/tt_um_urish_rings/
+  build-{openxc7,vivado}.json` has `input_drivers` `ena: constant (net removed)`, `rst_n:
+  FDRE`.
+- **The clock domain of the `rst_n` register is not checked.** Neither the fragment test
+  (`tests/test_project_inputs.py`) nor the build gate looks at which clock drives the
+  register that drives `rst_n`; a register in another clock domain would be accepted.
+- **Timing of the release.** Vivado checks recovery (30 ns) and removal (-10 ns) from the
+  register to every clear pin, and they are met; the open flow checks the path's delay
+  against its 20 ns budget and has no removal check.
+- **What this is not.** It is not a statement about asynchronous paths inside a design:
+  a design that gates or generates its own reset, clocks or latches from logic can still
+  behave differently on an FPGA than in a zero-delay simulation, and the pre-screen and
+  the timing limitations listed earlier still apply to those. Nineteen `exact` runs on one
+  board show that these sixteen bitstreams reproduce the reference; the guarantee about
+  the inputs comes from the gate, not from the runs.
+
+### What is still open after Task 9c
+
+- From "What is still open after Task 9b", unchanged: the settle of 3 as a ruling, DSP
+  cells unused in the open flow, inputs held fixed, `uio` not recorded, nothing at the
+  real clock rate, one board, bitstream identity by file hash, the verdict paths
+  `nondeterministic` and `inconclusive`, half-cycle domains and not-signed-off clocks, the
+  two tests that still build into default trees.
+- Possible follow-up, not done: check the three constant inputs in the netlist some other
+  way, for example by confirming that no cell drives a net of that name and that the
+  project's input pins are tied to GND or VCC. Today they are accepted from the source
+  literal with the net absent (see "What is established, and what is not").
+- The input gate covers `rst_n`, `ena`, `ui_in` and `uio_in` (`rst_n` in the netlist, the
+  others from the source literal, as above). An input that the harness
+  will one day drive from logic (gamepad pins, say) has to be registered and added to it;
+  both the source test and the gate refuse an input they do not know.
+- The saved timing reports under `tests/data/timing/` are still those of Task 9b's
+  netlists (the comparator form); they are parser inputs and nothing in them depends on
+  the reset, so they were not regenerated.

@@ -1,0 +1,47 @@
+{
+ "comment": "excerpt of a Yosys netlist of arty_compare (scripts/input_gate_fixtures.py)",
+ "modules": {
+  "arty_compare": {
+   "cells": {
+    "driver0": {
+     "connections": {
+      "CO": [
+       21,
+       22,
+       23,
+       24
+      ],
+      "O": [
+       27,
+       28,
+       29,
+       30
+      ]
+     },
+     "port_directions": {
+      "CI": "input",
+      "CO": "output",
+      "CYINIT": "input",
+      "DI": "input",
+      "O": "output",
+      "S": "input"
+     },
+     "type": "CARRY4"
+    }
+   },
+   "netnames": {
+    "stimulus_rst_n": {
+     "bits": [
+      29
+     ]
+    }
+   }
+  }
+ },
+ "nets": {
+  "ena": "stimulus_ena",
+  "rst_n": "stimulus_rst_n",
+  "ui_in": "stimulus_ui_in",
+  "uio_in": "stimulus_uio_in"
+ }
+}

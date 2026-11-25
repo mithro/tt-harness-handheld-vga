@@ -185,6 +185,7 @@ def build_one(project_id: str, toolchain: str, clocks: int, jobs: int) -> dict:
             prescreen_derived_clocks=result.prescreen_derived_clocks,
             source_rewrites=[[Path(p).name, n] for p, n in result.source_rewrites],
             limitations=list(result.limitations),
+            input_drivers=[list(item) for item in result.input_drivers],
             timing={key: asdict(d) for key, d in sorted(result.timing.items())},
             timing_lines=[
                 f"{key}: {build.describe(d)}, met" for key, d in sorted(result.timing.items())
