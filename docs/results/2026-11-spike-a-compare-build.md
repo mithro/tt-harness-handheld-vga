@@ -898,6 +898,7 @@ design is `exact`, and so was the simulation of the compare top.
 
 - **The `rst_n` glitch**, above: one of sixteen runs is a `mismatch` because of it, and
   the fifteen `exact` ones are not proof against it for designs with asynchronous resets.
+  (Note, 2026-11-25: addressed in Task 9c; see "After Task 9c".)
 - The settle of 3 is a ruling that may be reversed; the alternative was an allowance based
   on measured skew.
 - DSP cells stay unused in the open flow. A DSP48E1 with a packed register does place and
@@ -942,10 +943,12 @@ again. The sections above stay as the record; this is the current state.
    input fails until it is shown to be glitch-free. It cannot see logic that synthesis
    inserts or duplicates.
 3. **The implemented netlist is checked, in both flows** (`tt_harness/input_gate.py`). The
-   build fails (`InputDriverError`) unless the net on every project input but the clock is
-   a constant or is driven directly by the Q pin of a flip-flop (FDRE, FDSE, FDCE, FDPE): a
-   LUT used as a buffer, an inverter, a carry chain, a missing net or a missing report all
-   fail. What was found is in `BuildResult.input_drivers` and in the build log.
+   build fails (`InputDriverError`) unless each project input but the clock is a constant
+   or is driven directly by the Q pin of a flip-flop (FDRE, FDSE, FDCE, FDPE): a LUT used as
+   a buffer, an inverter, a carry chain, a missing net (other than a constant's, see
+   "Constants" below) or a missing report all fail. Only `rst_n` is verified in the
+   netlist; the three constant inputs are accepted from the source (see "Constants"). What
+   was found is in `BuildResult.input_drivers` and in the build log.
    - *Finding the net.* Yosys flattens the project into the top and Vivado rebuilds its
      hierarchy, and neither keeps "the project's `rst_n` port" as a name that can be relied
      on (in the open-flow netlists of the earlier runs it was simply gone). The nets are
@@ -959,7 +962,9 @@ again. The sections above stay as the record; this is the current state.
    - *Constants.* Both tools propagate a constant into the project and drop its net, so
      the three constant inputs are absent from the netlists. A net may be absent only if
      the generated top itself assigns it a literal (`assign stimulus_ena = 1'd1;`); it is
-     then recorded as "constant (net removed)". Any other absent net fails.
+     then recorded as "constant (net removed)". Any other absent net fails. This is
+     inferred from the source: the gate never sees `ena`, `ui_in` or `uio_in` in the
+     netlist, and the Vivado report for them says `driver missing`.
    - *What `keep` costs.* On the register's output: nothing measurable. Vivado's build of
      `tt_um_2048_vga_game` has 207 LUTs and 215 flip-flops with it and without it
      (`tmp/9c/keep-none.log`, `tmp/9c/keep-rst.log`). On the constant nets it was tried
@@ -1007,8 +1012,9 @@ designs with an asynchronous clear (`report_timing` to the clear pins of the che
 
 `uv run python scripts/pool_run.py build`, 2026-11-24 12:30 to 12:52 UTC, log
 `tmp/9c/pool-build-2.log`: **sixteen of sixteen built; every build passed the input gate and
-every domain met timing.** In all sixteen `rst_n` is driven by an FDRE and the other three
-inputs are constants whose nets the tool removed.
+every domain met timing.** In all sixteen `rst_n` is found in the netlist and is driven by
+an FDRE; the other three inputs are not found in it (the tool removed their nets) and are
+accepted as constants from the generated top's source.
 
 #### openXC7
 
@@ -1109,11 +1115,26 @@ Second runs, same bitstreams (reused, not rebuilt):
   is `exact` in two runs of two, as are all the others. Which change of the counter
   produced the pulse was never determined and no longer matters.
 - **By construction.** `rst_n` now reaches the project from the Q pin of a flip-flop with
-  nothing in between, and the build proves that for every bitstream from the implemented
+  nothing in between, and the build verifies that for every bitstream from the implemented
   netlist (FDRE in all sixteen). A flip-flop output changes once per clock edge at most;
   it cannot produce the kind of pulse a comparator can. The other three inputs are
-  constants. So the harness can no longer glitch any input of the project, in either
-  flow, whatever the placement.
+  constants in the generated source; see the next item for what was checked of them.
+- **Only `rst_n` is verified in the netlist.** In all sixteen builds `rst_n` is the only
+  project input the gate finds and classifies there (driver: an FDRE flip-flop's Q pin).
+  `ena`, `ui_in` and `uio_in` are recorded as "constant (net removed)": synthesis
+  propagated the constants and removed the nets, and the gate accepts them because the
+  generated top assigns those nets only a literal. That is inferred from the source; the
+  gate never sees these nets in the netlist. A tool fault that left a constant input driven
+  by logic would appear as a missing net and still pass. The constants cannot simply be
+  kept in the netlist: keeping them stopped Vivado propagating constants into the project
+  (the 2048 design grew from 207 to 986 LUTs). Recorded for the Task 9c builds of
+  `tt_um_urish_rings`: `build/compare/arty-vivado/.../project-inputs.rpt` has `ena ...
+  driver missing` and `rst_n ... driver FDRE`; `work/pool/ttihp26a/tt_um_urish_rings/
+  build-{openxc7,vivado}.json` has `input_drivers` `ena: constant (net removed)`, `rst_n:
+  FDRE`.
+- **The clock domain of the `rst_n` register is not checked.** Neither the fragment test
+  (`tests/test_project_inputs.py`) nor the build gate looks at which clock drives the
+  register that drives `rst_n`; a register in another clock domain would be accepted.
 - **Timing of the release.** Vivado checks recovery (30 ns) and removal (-10 ns) from the
   register to every clear pin, and they are met; the open flow checks the path's delay
   against its 20 ns budget and has no removal check.
@@ -1131,7 +1152,12 @@ Second runs, same bitstreams (reused, not rebuilt):
   real clock rate, one board, bitstream identity by file hash, the verdict paths
   `nondeterministic` and `inconclusive`, half-cycle domains and not-signed-off clocks, the
   two tests that still build into default trees.
-- The input gate covers `rst_n`, `ena`, `ui_in` and `uio_in`. An input that the harness
+- Possible follow-up, not done: check the three constant inputs in the netlist some other
+  way, for example by confirming that no cell drives a net of that name and that the
+  project's input pins are tied to GND or VCC. Today they are accepted from the source
+  literal with the net absent (see "What is established, and what is not").
+- The input gate covers `rst_n`, `ena`, `ui_in` and `uio_in` (`rst_n` in the netlist, the
+  others from the source literal, as above). An input that the harness
   will one day drive from logic (gamepad pins, say) has to be registered and added to it;
   both the source test and the gate refuse an input they do not know.
 - The saved timing reports under `tests/data/timing/` are still those of Task 9b's

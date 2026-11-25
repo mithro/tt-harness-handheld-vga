@@ -1063,7 +1063,12 @@ def _input_nets(job: _Job) -> dict[str, str]:
 
 
 def _gate_inputs(job: _Job, drivers: dict[str, tuple[str, ...]]) -> None:
-    """Record what drives each project input; fail unless each is a constant or a flip-flop."""
+    """Record what drives each project input; fail unless each is a constant or a flip-flop.
+
+    Only a net that is found in the netlist is classified there (`rst_n`, in practice). A net
+    that is absent is accepted as a constant only if the generated top assigns it a literal;
+    that is read from the source, not verified in the netlist.
+    """
     constants = input_gate.source_constants(job.top_v.read_text(), _input_nets(job))
     drivers = input_gate.fold_constants(drivers, constants)
     job.input_drivers[:] = input_gate.summary(drivers)

@@ -8,6 +8,14 @@ by `tt_harness.compare.inputs`; this checks what the tools made of it, because s
 insert or duplicate logic (a LUT used as a buffer, an inverter folded into a LUT, a register
 whose polarity was changed and an inverter added behind it).
 
+What is verified in the netlist. In the builds so far only `rst_n` is found there and
+classified (its driver is the Q pin of a flip-flop). The three constant inputs (`ena`,
+`ui_in`, `uio_in`) are not found in the netlist: synthesis propagated the constants and
+removed the nets. They are accepted (`FOLDED`) because the generated top assigns each net
+only a literal, which is read from that Verilog source and not from the netlist. A tool fault
+that left a constant input driven by logic would show up as a missing net and pass. The gate
+also does not check which clock domain the flip-flop driving `rst_n` is in.
+
 Finding the nets. The project is flattened into the top by Yosys and its hierarchy is rebuilt
 by Vivado, so "the project's `rst_n` port" is not a reliable name in either netlist. The nets
 are found from the harness side instead: the generated top connects every project port to
@@ -17,8 +25,8 @@ tools preserve it as a net with that name and cannot fold it into other logic. A
 cannot be found fails the gate, with one exception: both tools propagate a constant into
 the project and drop its net. A net that the generated top itself assigns a literal
 (`assign stimulus_ena = 1'd1;`, found by `source_constants`) may therefore be absent, and is
-then recorded as `FOLDED`; it may not have any other driver. The constant nets are not
-marked `keep`: that gains nothing (Vivado removes them anyway) and it stops Vivado
+then recorded as `FOLDED` on the strength of that source literal alone. The constant nets are
+not marked `keep`: that gains nothing (Vivado removes them anyway) and it stops Vivado
 propagating the constants, which changes what is built (2048: 986 LUTs instead of 207).
 `keep` on the register's output costs nothing (the same 207 LUTs and 215 flip-flops with
 and without it) and puts no logic on a path.

@@ -3,6 +3,12 @@
 
 The compare top's fragment is walked (`tt_harness.compare.inputs`); the cases below it are
 small modules that show what the walk accepts and what it refuses.
+
+Limits. This reads the source description only: it cannot see logic that synthesis inserts
+or duplicates (the build gate looks at the netlist for that, and in the netlist it finds only
+`rst_n`; the constant inputs are accepted from the literal in the generated top). Neither
+this test nor the build gate checks which clock domain the register driving `rst_n` is in: a
+register clocked by another domain would be accepted.
 """
 
 from __future__ import annotations
