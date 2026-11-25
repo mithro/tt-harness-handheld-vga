@@ -26,8 +26,8 @@ next clock all eight `duty` registers load the new values and `window` is high f
 clock, so a reader that acts on `window` sees all eight values from the same window, and the
 values hold unchanged until the following `window`. Before the first window ends `duty` is
 all zero. Registers: 8 counters of `window_clocks_log2 + 1` bits, a position counter of
-`window_clocks_log2` bits, 8 x 8 duty bits and `window`; about 10 * log2 + 73 flip-flops
-(e.g. 98 for a 2**19 window with the bits counted separately).
+`window_clocks_log2` bits, 8 x 8 duty bits and `window`; 9 * log2 + 73 flip-flops
+(244 for a 2**19 window), no multiplier.
 """
 
 from __future__ import annotations
