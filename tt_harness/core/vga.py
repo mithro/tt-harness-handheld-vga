@@ -1,7 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 """Measure, capture and buffer the VGA picture a Tiny Tapeout design drives on `uo_out`.
 
-(The module documentation is completed once all blocks are in.)
+A Tiny Tapeout VGA design generates its own video timing from its own clock and drives the
+"Tiny VGA" Pmod from its 8-bit output `uo_out`. The harness shows that picture on a screen it
+controls, in three blocks (all in the design's clock domain, `project`, except the read side
+of the framebuffer):
+
+- `VgaTiming` measures the timing the design produces, from the sync pins alone;
+- `VgaCapture` writes the visible picture into a write port, using offsets and a divider that
+  software sets after `classify` has recognised the measured timing;
+- `Framebuffer` holds it in block RAM and offers it to a reader in another clock domain.
+
+Pinout of `uo_out` (the Tiny VGA Pmod): uo[0]=R1 uo[1]=G1 uo[2]=B1 uo[3]=vsync uo[4]=R0
+uo[5]=G0 uo[6]=B0 uo[7]=hsync, R1/G1/B1 being the high bit of each 2-bit channel. Sources: the
+vgacap signal map `TINYVGA_SIGNAL_MAP` in `tt_harness.host.frame` (signals hsync, vsync, R1, R0,
+G1, G0, B1, B0 at bits 7, 3, 0, 4, 1, 5, 2, 6; vgacap `include/vgacap/stream.h`), and the
+design `tt07/tt_um_tinytapeout_dvd_screensaver`, whose top level has `assign uo_out =
+{hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};`. Pins are levels, uncorrected for
+polarity.
+
+Pixel format of the framebuffer: 6 bits per pixel, `{r[1:0], g[1:0], b[1:0]}`, red in the top
+two bits (`pack`, `unpack`).
+
+The mode table (`MODES`) is data: VESA 640x480@60 and @72, 800x600@60 and @72, 1024x768@60,
+the 60 Hz modes of 640x480 and 800x600 also at divider 2 (a design clocked at twice its pixel
+rate). `classify` matches measurements to it and gives the capture settings; `modes_header()`
+emits the same table as the C header `vga_modes.h` for firmware.
 """
 
 from __future__ import annotations
@@ -417,14 +441,18 @@ class VgaCapture(Module):
       second, 4 the third). A pixel is held for `divider` clocks by the design, so the
       other clocks are not used; a design that changes colour within a pixel is sampled
       mid-pixel. `we`, `addr` and `data` are high one clock after the sampled clock.
-    - Lines are counted from the vsync leading edge: the first hsync leading edge at or after
-      the clock of that edge (one on the same clock counts as after) is edge number 1, and row
-      y is stored from the line after edge number `v_offset + y * v_step`. With `v_offset` =
-      vsync lines + back porch that puts the picture right for every design whose vsync
-      changes no later than its hsync leading edge within the line: most counter-based
-      designs change vsync at the start of the line, before the hsync pulse, and some change
-      it on the hsync edge. A design whose vsync changes after the hsync edge, still within
-      the same line, needs one less.
+    - Lines are counted from the vsync leading edge as the vgacap frame reconstruction
+      (and so the reference frames) does: the first hsync leading edge at or after the clock of
+      that edge (one on the same clock counts) starts line 0, each later hsync leading edge
+      the next line. Row y is stored from line `v_offset + y * v_step`, with the pixels
+      counted from that line's own hsync leading edge. So the picture is that of the line
+      structure VGA modes are tabulated in (a line starts at its hsync pulse), which is not
+      how a counter-based design's lines run: there a line starts in the picture, before its
+      hsync pulse, so the hsync edge that starts "line k" is followed by the design's line
+      k + 1, and with `v_offset` = vsync lines + back porch the capture is one design line
+      low (the design's first line is not stored, the last stored row is the blank line after
+      the picture). vgacap and the reference frames are the same; `v_offset` one less moves
+      the picture up to the design's own rows.
     - Pixels with x >= width and rows with y >= height are not written, so a larger mode
       is cropped to its top left.
     - `frame_done` is high for one clock, the one after the write of address
@@ -494,7 +522,7 @@ class VgaCapture(Module):
             first_wait.eq(h_off + (divider >> 1) - 1),
         ]
 
-        vwait = Signal(11)  # hsync edges until the line to store; 0: no more rows this frame
+        vwait = Signal(12)  # hsync edges until the line to store, plus one; 0: no more rows
         row_next = Signal(max=n + 1)  # address of the first pixel of the next row to store
         col_on = Signal()  # this line is being stored
         x = Signal(max=width)
@@ -502,12 +530,12 @@ class VgaCapture(Module):
         blank_frame = Signal()
         sweeping, swept = Signal(), Signal()
         # What the line-start logic sees: a vsync edge on this clock restarts the frame, and
-        # an hsync edge on the same clock is already edge number 1.
-        vwait_now = Signal(11)
+        # an hsync edge on the same clock is already line 0.
+        vwait_now = Signal(12)
         row_now = Signal(max=n + 1)
         last_row = Signal()
         self.comb += [
-            vwait_now.eq(Mux(v_edge, v_off, vwait)),
+            vwait_now.eq(Mux(v_edge, v_off + 1, vwait)),
             row_now.eq(Mux(v_edge, 0, row_next)),
             last_row.eq(row_now == n - width),
         ]
@@ -529,7 +557,7 @@ class VgaCapture(Module):
             ),
             If(
                 v_edge,
-                vwait.eq(v_off),
+                vwait.eq(v_off + 1),
                 row_next.eq(0),
                 blank_frame.eq(self.blank),
             ),
