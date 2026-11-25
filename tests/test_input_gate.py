@@ -556,7 +556,8 @@ def test_vivado_tcl_reports_the_clock_net_of_a_flip_flop_driver() -> None:
     assert 'driver $kind$clock"' in tcl
 
 
-def test_a_clock_chain_longer_than_the_hop_limit_is_an_offender() -> None:
+def _chain(hops: int) -> tuple[dict, dict, dict]:
+    """The clock fixture with the `ena` flip-flop's clock behind `hops` plain buffers."""
     case = _clock_case()
     module = case["modules"][CLOCK_TOP]
     cells = module["cells"]
@@ -564,9 +565,8 @@ def test_a_clock_chain_longer_than_the_hop_limit_is_an_offender() -> None:
     flop = next(
         c for c in cells.values() if c["type"] == "FDRE" and ena_bit in c["connections"]["Q"]
     )
-    source = flop["connections"]["C"][0]
-    previous = source
-    for hop in range(input_gate.MAX_CLOCK_HOPS + 4):  # a chain of plain buffers
+    previous = flop["connections"]["C"][0]
+    for hop in range(hops):
         out_bit = 90000 + hop
         cells[f"hop{hop}"] = {
             "type": "BUFG",
@@ -577,5 +577,22 @@ def test_a_clock_chain_longer_than_the_hop_limit_is_an_offender() -> None:
     flop["connections"]["C"] = [previous]
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
     clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    return case, drivers, clocks
+
+
+def test_the_clock_hop_limit_boundary() -> None:
+    limit = input_gate.MAX_CLOCK_HOPS
+    base = len(_chain(0)[2]["ena"][0].cells)  # the fixture's own buffers (IBUF, BUFG)
+    # exactly `limit` buffers in all is a plain buffer chain; one more is not
+    _, drivers, clocks = _chain(limit - base)
+    assert len(clocks["ena"][0].cells) == limit and clocks["ena"][0].stopped_at is None
+    assert [
+        x for x in input_gate.clock_offenders(drivers, clocks, "sys_clk") if x.startswith("ena")
+    ] == []
+    _, drivers, clocks = _chain(limit - base + 1)
     out = input_gate.clock_offenders(drivers, clocks, "sys_clk")
     assert any(line.startswith("ena[0]") and "more than" in line for line in out), out
+    _, drivers, clocks = _chain(limit - base + 4)
+    assert any(
+        "more than" in line for line in input_gate.clock_offenders(drivers, clocks, "sys_clk")
+    )

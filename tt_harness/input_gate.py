@@ -305,7 +305,7 @@ def yosys_driver_clocks(
             cells: list[str] = []
             stopped: str | None = None
             current = clock_bits[0]
-            for _ in range(MAX_CLOCK_HOPS):
+            for _ in range(MAX_CLOCK_HOPS + 1):  # up to MAX_CLOCK_HOPS buffers, then the source
                 seen += names.get(current, [])
                 buf = driver.get(current)
                 if buf is None:

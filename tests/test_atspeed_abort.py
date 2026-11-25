@@ -90,7 +90,8 @@ class Recorder:
         yield "passive"
         while True:
             s = self.b.slot
-            self.pins.append(((yield s.pin_rst_n), (yield s.pin_ena), (yield s.pin_ui_in)))
+            if (yield self.b.ce_project):  # a stopped project clock gives no samples
+                self.pins.append(((yield s.pin_rst_n), (yield s.pin_ena), (yield s.pin_ui_in)))
             yield
 
     def sys(self):
