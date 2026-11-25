@@ -116,7 +116,7 @@ def wait_done(b: Bench, limit: int = 8_000):
     return None
 
 
-@pytest.mark.parametrize("clock", CLOCKS)
+@pytest.mark.parametrize("clock", ["normal", "fast", pytest.param("slow", marks=pytest.mark.slow)])
 def test_abort_while_idle_does_nothing_and_the_next_check_is_right(clock: str) -> None:
     b = make()
     rec, out = Recorder(b), {}
@@ -141,15 +141,28 @@ def test_abort_while_idle_does_nothing_and_the_next_check_is_right(clock: str) -
 # (first ~13 project clocks), counting, and the completion of an N = 40 check.
 ABORT_AT = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 30, 45, 60, 80, 100, 110, 120, 125, 130, 140]
 
+# The representative subset for the fast run: reset phase, counting, completion.
+ABORT_AT_FEW = [0, 3, 8, 20, 60, 125]
 
-@pytest.mark.parametrize("clock", ["normal", "slow", "fast"])
-@pytest.mark.parametrize("n_first", [40, 1])
+
+@pytest.mark.parametrize(
+    ("clock", "n_first", "sweep"),
+    [
+        ("normal", 40, "few"),
+        pytest.param("normal", 40, "all", marks=pytest.mark.slow),
+        pytest.param("normal", 1, "all", marks=pytest.mark.slow),
+        pytest.param("fast", 40, "all", marks=pytest.mark.slow),
+        pytest.param("fast", 1, "all", marks=pytest.mark.slow),
+        pytest.param("slow", 40, "all", marks=pytest.mark.slow),
+        pytest.param("slow", 1, "all", marks=pytest.mark.slow),
+    ],
+)
 def test_abort_at_every_stage_stops_the_check_and_its_result_never_appears(
-    clock: str, n_first: int
+    clock: str, n_first: int, sweep: str
 ) -> None:
     period = CLOCKS[clock][0]
     sys_clocks_per_project = max(1, period // 20_000)
-    for k in ABORT_AT:
+    for k in ABORT_AT_FEW if sweep == "few" else ABORT_AT:
         if clock == "slow" and k not in (0, 3, 8, 15):
             continue  # a 1 MHz check is slow to simulate; these cover reset phase and counting
         b = make()
@@ -232,7 +245,14 @@ def test_a_start_requested_and_not_aborted_runs_when_the_stopped_clock_resumes()
     assert out["crc"] == zlib.crc32(toy_bytes(40))
 
 
-@pytest.mark.parametrize("clock", ["normal", "slow", "fast"])
+@pytest.mark.parametrize(
+    "clock",
+    [
+        "normal",
+        pytest.param("slow", marks=pytest.mark.slow),
+        pytest.param("fast", marks=pytest.mark.slow),
+    ],
+)
 def test_stop_the_clock_mid_check_abort_restart_the_clock_start_again(clock: str) -> None:
     b = make()
     rec, out = Recorder(b), {}
@@ -259,8 +279,15 @@ def test_stop_the_clock_mid_check_abort_restart_the_clock_start_again(clock: str
     assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(33))}
 
 
-@pytest.mark.parametrize("clock", ["normal", "fast"])
-@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize(
+    ("clock", "stopped"),
+    [
+        ("normal", False),
+        pytest.param("normal", True, marks=pytest.mark.slow),
+        pytest.param("fast", False, marks=pytest.mark.slow),
+        pytest.param("fast", True, marks=pytest.mark.slow),
+    ],
+)
 def test_system_reset_mid_check_then_a_new_start_gives_the_new_checks_result(
     clock: str, stopped: bool
 ) -> None:
@@ -297,7 +324,14 @@ def test_system_reset_mid_check_then_a_new_start_gives_the_new_checks_result(
     assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(40))}
 
 
-@pytest.mark.parametrize("clock", ["normal", "slow", "fast"])
+@pytest.mark.parametrize(
+    "clock",
+    [
+        "normal",
+        pytest.param("slow", marks=pytest.mark.slow),
+        pytest.param("fast", marks=pytest.mark.slow),
+    ],
+)
 def test_two_starts_in_quick_succession_run_once(clock: str) -> None:
     b = make()
     rec, out = Recorder(b), {}
@@ -321,8 +355,26 @@ def test_two_starts_in_quick_succession_run_once(clock: str) -> None:
     assert ones == list(range(first, ones[-1] + 1)), "the override came on more than once"
 
 
-@pytest.mark.parametrize("clock", ["normal", "slow", "fast"])
-@pytest.mark.parametrize("gap", [0, 1, 2, 3, 5])
+@pytest.mark.parametrize(
+    ("clock", "gap"),
+    [
+        ("normal", 0),
+        pytest.param("normal", 1, marks=pytest.mark.slow),
+        pytest.param("normal", 2, marks=pytest.mark.slow),
+        pytest.param("normal", 3, marks=pytest.mark.slow),
+        pytest.param("normal", 5, marks=pytest.mark.slow),
+        pytest.param("slow", 0, marks=pytest.mark.slow),
+        pytest.param("slow", 1, marks=pytest.mark.slow),
+        pytest.param("slow", 2, marks=pytest.mark.slow),
+        pytest.param("slow", 3, marks=pytest.mark.slow),
+        pytest.param("slow", 5, marks=pytest.mark.slow),
+        pytest.param("fast", 0, marks=pytest.mark.slow),
+        pytest.param("fast", 1, marks=pytest.mark.slow),
+        pytest.param("fast", 2, marks=pytest.mark.slow),
+        pytest.param("fast", 3, marks=pytest.mark.slow),
+        pytest.param("fast", 5, marks=pytest.mark.slow),
+    ],
+)
 def test_start_immediately_after_abort_is_held_and_runs_the_new_check(clock: str, gap: int) -> None:
     per = max(1, CLOCKS[clock][0] // 20_000)
     for k in (3, 12) if clock == "slow" else (3, 12, 40):
@@ -395,7 +447,7 @@ def test_power_up_state_pins_are_safe_until_software_releases_reset() -> None:
     assert pins[-1][0] == 1  # released only after the software did
 
 
-@pytest.mark.parametrize("clock", ["normal", "slow"])
+@pytest.mark.parametrize("clock", ["normal", pytest.param("slow", marks=pytest.mark.slow)])
 def test_aborted_and_restarted_with_the_clock_stopped_runs_only_the_last_start(
     clock: str,
 ) -> None:
@@ -429,7 +481,14 @@ def test_aborted_and_restarted_with_the_clock_stopped_runs_only_the_last_start(
     assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(33))}
 
 
-@pytest.mark.parametrize("clock", ["normal", "slow", "fast"])
+@pytest.mark.parametrize(
+    "clock",
+    [
+        "normal",
+        pytest.param("slow", marks=pytest.mark.slow),
+        pytest.param("fast", marks=pytest.mark.slow),
+    ],
+)
 def test_start_right_after_done_never_shows_the_old_result_as_the_new_one(clock: str) -> None:
     b = make()
     rec, out = Recorder(b), {}

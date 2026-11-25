@@ -112,8 +112,15 @@ def _is_subsequence(small: list[int], big: list[int]) -> bool:
     return all(any(v == w for w in it) for v in small)
 
 
-@pytest.mark.parametrize("period", PERIODS)
-@pytest.mark.parametrize("which", ["ui_in", "gamepad_buttons"])
+@pytest.mark.parametrize(
+    ("period", "which"),
+    [
+        (39_700, "ui_in"),
+        (27_300, "gamepad_buttons"),
+        pytest.param(27_300, "ui_in", marks=pytest.mark.slow),
+        pytest.param(39_700, "gamepad_buttons", marks=pytest.mark.slow),
+    ],
+)
 def test_multibit_control_is_never_mixed(period: int, which: str) -> None:
     """The project only ever holds written values, in order, and ends on the last one."""
     zero, one = (0x00, 0xFF) if which == "ui_in" else (0x000000, 0xFFFFFF)
@@ -177,7 +184,7 @@ def _passive(gen):
     yield from gen
 
 
-@pytest.mark.parametrize("period", [39_700, 100_000])
+@pytest.mark.parametrize("period", [39_700, pytest.param(100_000, marks=pytest.mark.slow)])
 def test_multibit_latency_is_within_the_stated_bound(period: int) -> None:
     """Idle write to project: at most Ts + 3 Tp (plus the final register: + Tp); a write that
     lands just after a transfer started: at most 6 Tp + 3 Ts (+ Tp). Measured at 2 ns."""
@@ -238,7 +245,7 @@ def test_multibit_latency_is_within_the_stated_bound(period: int) -> None:
 # Reset ----------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("period", PERIODS)
+@pytest.mark.parametrize("period", [39_700, pytest.param(27_300, marks=pytest.mark.slow)])
 def test_reset_release_is_synchronous_at_every_phase(period: int) -> None:
     """`rst_n` at the pin rises just after a project clock edge, the second after the
     request is released, and falls at once on assertion."""
@@ -465,7 +472,9 @@ def test_values_written_while_stopped_arrive_after_the_clock_starts() -> None:
     assert out["status2"][1] == 1
 
 
-@pytest.mark.parametrize("period", [1_000_000, 100_000, 20_000])
+@pytest.mark.parametrize(
+    "period", [pytest.param(1_000_000, marks=pytest.mark.slow), 100_000, 20_000]
+)
 def test_clock_running_reads_1_for_any_clock_and_0_when_stopped(period: int) -> None:
     slot = make()
     log: list[int] = []

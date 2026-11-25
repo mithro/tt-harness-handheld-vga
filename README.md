@@ -53,3 +53,10 @@ uv run pytest -m "not toolchain and not vivado"
 ```
 
 Tests marked `toolchain` need `.toolchains/`; tests marked `vivado` need Vivado.
+Tests marked `slow` (exhaustive simulation sweeps) are skipped unless `--run-slow` is given or
+`-m` names `slow`; run them before merging changes to the code they cover:
+
+```sh
+uv run pytest -m "not toolchain and not vivado"   # fast
+uv run pytest tests/test_slot.py tests/test_atspeed.py tests/test_atspeed_abort.py --run-slow -m "not vivado" -q -W error   # everything for the slot / at-speed check
+```

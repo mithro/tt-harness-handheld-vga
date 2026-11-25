@@ -87,6 +87,7 @@ def test_crc_of_a_toy_design_matches_the_definition(n: int) -> None:
     assert out["crc"] == zlib.crc32(toy_bytes(n))
 
 
+@pytest.mark.slow
 def test_restart_start_phases_and_busy_flags() -> None:
     expected = zlib.crc32(toy_bytes(64))
     seen = set()
