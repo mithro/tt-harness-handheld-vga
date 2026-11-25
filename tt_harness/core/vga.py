@@ -388,5 +388,187 @@ class VgaTiming(Module):
         ]
 
 
+# VgaCapture --------------------------------------------------------------------------------
+
+
+class VgaCapture(Module):
+    """Write the visible picture of a design into a `width` x `height` framebuffer.
+
+    Inputs: `uo_out`; `hsync_positive`, `vsync_positive` (from `VgaTiming`); and the settings
+    software computes from the classified mode:
+
+    - `divider` (3 bits, 1..7; 0 is taken as 1): project clocks per pixel;
+    - `h_offset` (12 bits): project clocks from the hsync leading edge to the first clock of
+      the picture's first pixel (hsync width plus back porch; 0 is taken as 1);
+    - `v_offset` (11 bits): lines from the vsync leading edge to the picture's first line
+      (vsync lines plus back porch; 0 is taken as 1);
+    - `h_step`, `v_step` (2 bits, 1..3; 0 is taken as 1): 1 stores every pixel and line, 2
+      every second one (the quarter-size buffer), the first of each group.
+
+    `blank` (input): see below. Outputs, all registers: the write port `we`, `addr`
+    (`y * width + x`, row-major) and `data` (6 bits, `{r[1:0], g[1:0], b[1:0]}`, red in the
+    top bits, `unpack` gives r, g, b), and `frame_done`. `addr` is meaningful only while `we`.
+
+    Timing, in clocks, where clock e is the one in which `uo_out` first shows the hsync
+    leading edge (the pin goes to its active level; the clock before it did not):
+
+    - Pixel x of a stored row is sampled in clock `e + h_offset + x * h_step * divider +
+      divider // 2`: the middle clock of its `divider` clocks (for divider 2 the second, 3 the
+      second, 4 the third). A pixel is held for `divider` clocks by the design, so the
+      other clocks are not used; a design that changes colour within a pixel is sampled
+      mid-pixel. `we`, `addr` and `data` are high one clock after the sampled clock.
+    - Lines are counted from the vsync leading edge: the first hsync leading edge at or after
+      the clock of that edge (one on the same clock counts as after) is edge number 1, and row
+      y is stored from the line after edge number `v_offset + y * v_step`. With `v_offset` =
+      vsync lines + back porch that puts the picture right for every design whose vsync
+      changes no later than its hsync leading edge within the line: most counter-based
+      designs change vsync at the start of the line, before the hsync pulse, and some change
+      it on the hsync edge. A design whose vsync changes after the hsync edge, still within
+      the same line, needs one less.
+    - Pixels with x >= width and rows with y >= height are not written, so a larger mode
+      is cropped to its top left.
+    - `frame_done` is high for one clock, the one after the write of address
+      `width * height - 1`: the buffer's last pixel of its last row. It follows every frame
+      whose picture covers the buffer.
+
+    `blank`: sampled at each vsync leading edge; while it was high there, every pixel of
+    that frame is written as zero (software drives it with `no_signal`). Also, when `blank`
+    goes high with no clear done since it last was low, the whole buffer is cleared at once:
+    `we` high for `width * height` clocks from address 0, data 0 (this is what blanks the
+    screen when no sync pulse arrives, because then there is no frame boundary to wait for).
+    The picture rows that would be written during the clear are lost. Nothing is written
+    for a frame that has no vsync edge, nor for a line that has no hsync edge.
+
+    Settings are used as they are at the clock they matter: change them between frames or
+    accept one garbled frame. The first clock after reset is never an edge. About 87
+    flip-flops for 640 x 480.
+    """
+
+    def __init__(self, width: int, height: int) -> None:
+        for name, value in (("width", width), ("height", height)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer: {value!r}")
+        self.width = width
+        self.height = height
+        n = width * height
+        self.uo_out = Signal(8)
+        self.hsync_positive = Signal()
+        self.vsync_positive = Signal()
+        self.divider = Signal(3)
+        self.h_offset = Signal(12)
+        self.v_offset = Signal(11)
+        self.h_step = Signal(2)
+        self.v_step = Signal(2)
+        self.blank = Signal()
+        self.we = Signal()
+        self.addr = Signal(max=n)
+        self.data = Signal(PIXEL_BITS)
+        self.frame_done = Signal()
+
+        r, g, b, hsync, vsync = decode(self.uo_out)
+        sample = Cat(b, g, r)  # {r, g, b}: blue in the low bits
+
+        primed = Signal()  # low only in the first clock after reset
+        hsync_q, vsync_q = Signal(), Signal()
+        h_edge, v_edge = Signal(), Signal()
+        self.sync += [primed.eq(1), hsync_q.eq(hsync), vsync_q.eq(vsync)]
+        self.comb += [
+            h_edge.eq(primed & (hsync != hsync_q) & (hsync == self.hsync_positive)),
+            v_edge.eq(primed & (vsync != vsync_q) & (vsync == self.vsync_positive)),
+        ]
+
+        # Settings with zero read as one.
+        divider = Signal(3)
+        h_step, v_step = Signal(2), Signal(2)
+        h_off = Signal(12)
+        v_off = Signal(11)
+        pitch = Signal(5)  # clocks between stored pixels
+        first_wait = Signal(13)  # clocks from the hsync edge to the first sample, less one
+        self.comb += [
+            divider.eq(Mux(self.divider == 0, 1, self.divider)),
+            h_step.eq(Mux(self.h_step == 0, 1, self.h_step)),
+            v_step.eq(Mux(self.v_step == 0, 1, self.v_step)),
+            h_off.eq(Mux(self.h_offset == 0, 1, self.h_offset)),
+            v_off.eq(Mux(self.v_offset == 0, 1, self.v_offset)),
+            pitch.eq(divider * h_step),
+            first_wait.eq(h_off + (divider >> 1) - 1),
+        ]
+
+        vwait = Signal(11)  # hsync edges until the line to store; 0: no more rows this frame
+        row_next = Signal(max=n + 1)  # address of the first pixel of the next row to store
+        col_on = Signal()  # this line is being stored
+        x = Signal(max=width)
+        wait = Signal(13)  # clocks until the next sample
+        blank_frame = Signal()
+        sweeping, swept = Signal(), Signal()
+        # What the line-start logic sees: a vsync edge on this clock restarts the frame, and
+        # an hsync edge on the same clock is already edge number 1.
+        vwait_now = Signal(11)
+        row_now = Signal(max=n + 1)
+        last_row = Signal()
+        self.comb += [
+            vwait_now.eq(Mux(v_edge, v_off, vwait)),
+            row_now.eq(Mux(v_edge, 0, row_next)),
+            last_row.eq(row_now == n - width),
+        ]
+
+        self.sync += [
+            self.we.eq(0),
+            self.frame_done.eq(self.we & (self.addr == n - 1) & ~sweeping),
+            If(self.we, self.addr.eq(self.addr + 1)),
+            If(
+                col_on,
+                If(
+                    wait == 0,
+                    self.we.eq(1),
+                    self.data.eq(Mux(blank_frame, 0, sample)),
+                    x.eq(x + 1),
+                    wait.eq(pitch - 1),
+                    If(x == width - 1, col_on.eq(0)),
+                ).Else(wait.eq(wait - 1)),
+            ),
+            If(
+                v_edge,
+                vwait.eq(v_off),
+                row_next.eq(0),
+                blank_frame.eq(self.blank),
+            ),
+            If(
+                h_edge,
+                x.eq(0),
+                wait.eq(first_wait),
+                col_on.eq(0),
+                If(
+                    vwait_now == 1,
+                    col_on.eq(1),
+                    self.addr.eq(row_now),
+                    row_next.eq(row_now + width),
+                    vwait.eq(Mux(last_row, 0, v_step)),
+                ).Elif(vwait_now > 1, vwait.eq(vwait_now - 1)),
+            ),
+            # The clear sweep wins over the picture.
+            If(~self.blank, swept.eq(0)),
+            If(
+                self.blank & ~swept & ~sweeping,
+                sweeping.eq(1),
+                self.we.eq(1),
+                self.addr.eq(0),
+                self.data.eq(0),
+            ),
+            If(
+                sweeping,
+                self.we.eq(1),
+                self.data.eq(0),
+                self.addr.eq(self.addr + 1),
+                If(
+                    self.addr == n - 1,
+                    self.we.eq(0),
+                    sweeping.eq(0),
+                    swept.eq(1),
+                ),
+            ),
+        ]
+
+
 if __name__ == "__main__":
     sys.stdout.write(modes_header())

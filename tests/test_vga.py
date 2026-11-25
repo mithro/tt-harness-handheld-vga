@@ -17,6 +17,7 @@ from migen import Module, Signal
 from migen.sim import run_simulation
 from vga_model import VgaModel, encode
 
+from tt_harness.compare import inputs
 from tt_harness.core import vga
 
 REPO = Path(__file__).resolve().parent.parent
@@ -514,3 +515,359 @@ def test_many_lines_saturate_instead_of_wrapping() -> None:
     assert last[1] == vga.LINES_MAX == 2047
     assert last[3] == 3  # the short pulse is still measured
     assert last[5] == 0  # and found to be the short level: negative sync
+
+
+# VgaCapture ----------------------------------------------------------------------------------
+
+
+def colour_of(value: int) -> int:
+    """The 6-bit colour of a `uo_out` byte, decoded here from the Tiny VGA pinout."""
+    r1, r0 = value >> 0 & 1, value >> 4 & 1
+    g1, g0 = value >> 1 & 1, value >> 5 & 1
+    b1, b0 = value >> 2 & 1, value >> 6 & 1
+    return r1 << 5 | r0 << 4 | g1 << 3 | g0 << 2 | b1 << 1 | b0
+
+
+def make_capture(
+    width,
+    height,
+    model,
+    h_offset,
+    v_offset,
+    divider=1,
+    h_step=1,
+    v_step=1,
+    hsync_positive=None,
+    vsync_positive=None,
+):
+    cap = vga.VgaCapture(width, height)
+    cap.hsync_positive.reset = int(
+        model.hsync_positive if hsync_positive is None else hsync_positive
+    )
+    cap.vsync_positive.reset = int(
+        model.vsync_positive if vsync_positive is None else vsync_positive
+    )
+    cap.divider.reset = divider
+    cap.h_offset.reset = h_offset
+    cap.v_offset.reset = v_offset
+    cap.h_step.reset = h_step
+    cap.v_step.reset = v_step
+    return cap
+
+
+CAPTURE_OUTPUTS = ("we", "addr", "data", "frame_done")
+
+
+def capture_run(cap, values, events=None):
+    """Run `values`; return (writes, frame_done clocks); a write is (clock, addr, data)."""
+    seen = trace(cap, values, {name: getattr(cap, name) for name in CAPTURE_OUTPUTS}, events)
+    writes = [(c, seen["addr"][c], seen["data"][c]) for c in range(len(values)) if seen["we"][c]]
+    done = [c for c in range(len(values)) if seen["frame_done"][c]]
+    return writes, done
+
+
+def expected_writes(
+    model, values, width, height, h_offset, v_offset, divider=1, h_step=1, v_step=1
+):
+    """The writes a capture of `values` must make, worked out from the pins alone.
+
+    Frame k starts at the k-th vsync leading edge. The first hsync leading edge at or after
+    that clock is edge number 1; the picture's row y follows edge number `v_offset + y *
+    v_step`, and its pixel x is sampled `h_offset + x * h_step * divider + divider // 2` clocks
+    after that edge; the write comes one clock after that.
+    """
+    hedges = pin_active_edges(values, HSYNC_BIT, model.hsync_positive)
+    vedges = pin_active_edges(values, VSYNC_BIT, model.vsync_positive)
+    out = []
+    for tv in vedges:
+        after = [i for i, e in enumerate(hedges) if e >= tv]
+        if not after:
+            continue
+        number1 = after[0]
+        frame = []
+        for y in range(height):
+            index = number1 + v_offset - 1 + y * v_step
+            if index >= len(hedges):
+                break
+            for x in range(width):
+                sample = hedges[index] + h_offset + x * h_step * divider + divider // 2
+                if sample + 1 >= len(values):
+                    break
+                frame.append((sample + 1, y * width + x, colour_of(values[sample])))
+        if len(frame) == width * height:
+            out.append(frame)
+    return out
+
+
+@pytest.mark.parametrize("hsync_positive", [False, True])
+@pytest.mark.parametrize("vsync_positive", [False, True])
+@pytest.mark.parametrize("vsync_phase", ["line_start", "hsync"])
+def test_capture_writes_the_picture_at_the_offsets(
+    hsync_positive, vsync_positive, vsync_phase
+) -> None:
+    model = small(
+        hsync_positive=hsync_positive, vsync_positive=vsync_positive, vsync_phase=vsync_phase
+    )
+    values = list(model.stream(3 * model.clocks_per_frame))
+    cap = make_capture(16, 8, model, h_offset=6 + 14, v_offset=2 + 8)
+    writes, done = capture_run(cap, values)
+    frames = expected_writes(model, values, 16, 8, 20, 10)
+    assert len(frames) >= 2
+    assert writes == [w for frame in frames for w in frame]
+    # Row-major addressing, and the colour is the picture's at that point.
+    for frame in frames:
+        for _, addr, data in frame:
+            x, y = addr % 16, addr // 16
+            assert data == model.picture(x, y)
+    assert [w[1] for w in writes[:128]] == list(range(128))
+    # `frame_done`: the clock after the last write of each frame, one clock wide.
+    assert done == [frame[-1][0] + 1 for frame in frames]
+
+
+def test_frame_done_is_one_clock_and_follows_the_last_write() -> None:
+    model = small()
+    values = list(model.stream(4 * model.clocks_per_frame))
+    cap = make_capture(16, 8, model, 20, 10)
+    seen = trace(cap, values, {n: getattr(cap, n) for n in CAPTURE_OUTPUTS})
+    for c in range(1, len(values)):
+        if seen["frame_done"][c]:
+            assert not seen["frame_done"][c - 1]
+            assert seen["we"][c - 1] and seen["addr"][c - 1] == 127
+    assert sum(seen["frame_done"]) == 3
+
+
+@pytest.mark.parametrize("divider", [2, 3, 4])
+def test_a_divided_pixel_is_sampled_in_its_middle_clock(divider) -> None:
+    # The clocks of a pixel other than clock divider // 2 carry a wrong colour.
+    model = small(divider=divider, dirty=True)
+    values = list(model.stream(3 * model.clocks_per_frame))
+    cap = make_capture(16, 8, model, h_offset=20 * divider, v_offset=10, divider=divider)
+    writes, _ = capture_run(cap, values)
+    frames = expected_writes(model, values, 16, 8, 20 * divider, 10, divider)
+    assert len(frames) >= 2
+    assert writes == [w for frame in frames for w in frame]
+    for _, addr, data in writes:
+        assert data == model.picture(addr % 16, addr // 16)  # never the wrong colour
+
+
+def test_divider_two_samples_the_second_clock() -> None:
+    model = small(divider=2, dirty=True)
+    # Pixel (0, 0) is clocks 0 and 1 of its pixel; the colour is on the second only.
+    assert model.pixel(0, 0, 0) != model.pixel(0, 0, 1)
+    assert vga.unpack(colour_of(model.pixel(0, 0, 1))) == vga.unpack(model.picture(0, 0))
+    values = list(model.stream(2 * model.clocks_per_frame))
+    cap = make_capture(16, 8, model, h_offset=40, v_offset=10, divider=2)
+    writes, _ = capture_run(cap, values)
+    hedges = pin_active_edges(values, HSYNC_BIT, False)
+    vedge = pin_active_edges(values, VSYNC_BIT, False)[0]
+    number1 = next(i for i, e in enumerate(hedges) if e >= vedge)
+    # The first write: hsync edge number 10 after the vsync edge, 40 clocks on, the second
+    # clock of the pixel, and one clock for the registered write.
+    assert writes[0][0] == hedges[number1 + 9] + 40 + 1 + 1
+
+
+def test_quarter_size_capture_decimates() -> None:
+    model = small()
+    values = list(model.stream(3 * model.clocks_per_frame))
+    cap = make_capture(8, 4, model, 20, 10, h_step=2, v_step=2)
+    writes, done = capture_run(cap, values)
+    frames = expected_writes(model, values, 8, 4, 20, 10, h_step=2, v_step=2)
+    assert len(frames) >= 2
+    assert writes == [w for frame in frames for w in frame]
+    for _, addr, data in writes:
+        x, y = addr % 8, addr // 8
+        assert data == model.picture(2 * x, 2 * y)  # the first of each group of two
+    assert len(done) == len(frames)
+
+
+def test_quarter_size_capture_of_a_divided_design() -> None:
+    model = small(divider=2, dirty=True)
+    values = list(model.stream(3 * model.clocks_per_frame))
+    cap = make_capture(8, 4, model, 40, 10, divider=2, h_step=2, v_step=2)
+    writes, _ = capture_run(cap, values)
+    frames = expected_writes(model, values, 8, 4, 40, 10, divider=2, h_step=2, v_step=2)
+    assert len(frames) >= 2
+    assert writes == [w for frame in frames for w in frame]
+    assert all(d == model.picture(2 * (a % 8), 2 * (a // 8)) for _, a, d in writes)
+
+
+def test_larger_mode_is_cropped_top_left() -> None:
+    model = small()  # 16 x 8 picture into a 12 x 6 buffer
+    values = list(model.stream(3 * model.clocks_per_frame))
+    cap = make_capture(12, 6, model, 20, 10)
+    writes, done = capture_run(cap, values)
+    frames = expected_writes(model, values, 12, 6, 20, 10)
+    assert len(frames) >= 2
+    assert writes == [w for frame in frames for w in frame]
+    assert all(a < 72 for _, a, _ in writes)  # nothing written beyond the buffer
+    assert all(d == model.picture(a % 12, a // 12) for _, a, d in writes)
+    assert len(writes) == 72 * len(frames)
+    assert len(done) == len(frames)
+
+
+def test_settings_of_zero_mean_one() -> None:
+    model = small()
+    values = list(model.stream(2 * model.clocks_per_frame))
+    ones = capture_run(make_capture(16, 8, model, 1, 1, 1, 1, 1), values)
+    zeros = capture_run(make_capture(16, 8, model, 0, 0, 0, 0, 0), values)
+    assert ones == zeros
+    assert ones[0]  # and it wrote something
+
+
+def test_capture_ignores_a_polarity_that_is_wrong() -> None:
+    # With the polarity inputs wrong the capture still makes only legal writes (no crash, in
+    # range), though not the picture: software must set them from VgaTiming.
+    model = small()
+    values = list(model.stream(3 * model.clocks_per_frame))
+    cap = make_capture(16, 8, model, 20, 10, hsync_positive=True, vsync_positive=True)
+    writes, _ = capture_run(cap, values)
+    assert all(0 <= a < 128 for _, a, _ in writes)
+
+
+def _snapshots(writes, done):
+    """The memory (dict addr -> data) at each frame_done clock."""
+    memory: dict[int, int] = {}
+    out = []
+    pending = iter(writes)
+    nxt = next(pending, None)
+    for stop in done:
+        while nxt is not None and nxt[0] <= stop:
+            memory[nxt[1]] = nxt[2]
+            nxt = next(pending, None)
+        out.append(dict(memory))
+    return out
+
+
+def test_blank_writes_zeros_for_the_frames_that_start_while_it_is_asserted() -> None:
+    model = small()
+    n = model.clocks_per_frame
+    values = list(model.stream(7 * n))
+    vedges = pin_active_edges(values, VSYNC_BIT, False)
+    cap = make_capture(16, 8, model, 20, 10)
+    # Blank goes up after frame 1's picture is complete (during its blanking, so the
+    # clear sweep it starts is over before frame 2's picture) and comes down in the middle
+    # of frame 3, after that frame's vsync edge: frame 3 is still all zeros.
+    frames = expected_writes(model, values, 16, 8, 20, 10)
+    up = frames[1][-1][0] + 5  # just after frame 1's last write
+    down = vedges[3] + 12
+    events = {up: [cap.blank.eq(1)], down: [cap.blank.eq(0)]}
+    writes, done = capture_run(cap, values, events)
+    # (frames[k] is the frame that starts at vedges[k])
+    snaps = _snapshots(writes, done)
+    assert len(snaps) >= 5
+    picture = {a: d for _, a, d in frames[1]}
+    assert all(len(s) == 128 for s in snaps)
+    assert snaps[1] == picture  # frame 1, before blank
+    assert all(v == 0 for v in snaps[2].values())  # frame 2 starts after blank went up
+    assert all(v == 0 for v in snaps[3].values())  # frame 3: blank was up at its boundary
+    assert snaps[4] == {a: d for _, a, d in frames[4]}  # frame 4 is the picture again
+    # Frame 2 and 3 each wrote the whole buffer, in zeros, in the usual way.
+    for k in (2, 3):
+        expected = [(c, a, 0) for c, a, _ in frames[k]]
+        assert [w for w in writes if frames[k][0][0] <= w[0] <= frames[k][-1][0]] == expected
+
+
+def test_blank_clears_the_buffer_when_there_is_no_signal() -> None:
+    model = small()
+    cap = make_capture(16, 8, model, 20, 10)
+    values = [0x00] * 400  # nothing on the pins at all
+    writes, done = capture_run(cap, values, {100: [cap.blank.eq(1)]})
+    # The buffer is cleared at once, one address a clock from address 0, in zeros...
+    assert writes == [(101 + i, i, 0) for i in range(128)]
+    assert done == []  # ...which is not a frame
+    # and only once while blank stays up
+    assert len(writes) == 128
+
+
+def test_blank_released_and_raised_again_clears_again() -> None:
+    model = small()
+    cap = make_capture(16, 8, model, 20, 10)
+    values = [0x00] * 700
+    events = {50: [cap.blank.eq(1)], 300: [cap.blank.eq(0)], 400: [cap.blank.eq(1)]}
+    writes, _ = capture_run(cap, values, events)
+    assert [w[0] for w in writes if w[0] < 300] == list(range(51, 51 + 128))
+    assert [w[0] for w in writes if w[0] > 300] == list(range(401, 401 + 128))
+
+
+def test_write_port_is_registered() -> None:
+    from migen import Instance
+
+    class Walk(Module):
+        def __init__(self) -> None:
+            self.cap = vga.VgaCapture(16, 8)
+            self.submodules += self.cap
+            self.specials += Instance(
+                "thing",
+                name="project",
+                i_we=self.cap.we,
+                i_addr=self.cap.addr,
+                i_data=self.cap.data,
+                i_done=self.cap.frame_done,
+            )
+
+    found = inputs.project_inputs(Walk(), "project")
+    assert set(found) == {"we", "addr", "data", "done"}
+    for port, source in found.items():
+        assert source.kind == "register", f"{port}: {source.kind}: {source.detail}"
+
+
+# VgaTiming and VgaCapture together -----------------------------------------------------------
+
+
+class Bench(Module):
+    """Timing and capture on one `uo_out`; software's part is played by `blank = no_signal`."""
+
+    def __init__(self, width, height, no_signal_clocks, settings) -> None:
+        self.uo_out = Signal(8)
+        self.timing = vga.VgaTiming(no_signal_clocks)
+        self.capture = vga.VgaCapture(width, height)
+        self.submodules += self.timing, self.capture
+        self.comb += [
+            self.timing.uo_out.eq(self.uo_out),
+            self.capture.uo_out.eq(self.uo_out),
+            self.capture.hsync_positive.eq(self.timing.hsync_positive),
+            self.capture.vsync_positive.eq(self.timing.vsync_positive),
+            self.capture.blank.eq(self.timing.no_signal),
+        ]
+        h_offset, v_offset = settings
+        self.capture.h_offset.reset = h_offset
+        self.capture.v_offset.reset = v_offset
+        self.capture.divider.reset = 1
+
+
+def test_no_sync_reports_no_signal_and_blanks() -> None:
+    model = small(hsync_positive=True)  # polarity comes from the timing block here
+    live = list(model.stream(5 * model.clocks_per_frame))
+    values = live + [0x00] * 3000  # then the design stops driving anything
+    bench = Bench(16, 8, 1000, (20, 10))
+    seen = trace(
+        bench,
+        values,
+        {
+            "no_signal": bench.timing.no_signal,
+            "we": bench.capture.we,
+            "addr": bench.capture.addr,
+            "data": bench.capture.data,
+            "done": bench.capture.frame_done,
+        },
+    )
+    writes = [(c, seen["addr"][c], seen["data"][c]) for c in range(len(values)) if seen["we"][c]]
+    done = [c for c in range(len(values)) if seen["done"][c]]
+    snaps = _snapshots(writes, done)
+    # From reset there is no signal, so the screen is black until the picture is measured.
+    assert seen["no_signal"][0] == 1
+    assert all(len(s) == 128 for s in snaps)
+    assert all(v == 0 for v in snaps[0].values())
+    # Once measured, the picture appears (no_signal is low from the second vsync edge, so
+    # the capture's frame boundary is the third)...
+    picture = {y * 16 + x: model.picture(x, y) for y in range(8) for x in range(16)}
+    assert snaps[-1] == picture
+    # ... and when the sync stops no_signal comes up and the buffer is cleared, not frozen.
+    assert seen["no_signal"][len(live) + 2999] == 1
+    last_write = writes[-1][0]
+    assert last_write > len(live)  # the clear came after the picture
+    memory: dict[int, int] = {}
+    for c, a, d in writes:
+        memory[a] = d
+    assert len(memory) == 128
+    assert all(v == 0 for v in memory.values())
