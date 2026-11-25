@@ -189,6 +189,7 @@ def test_abort_at_every_stage_stops_the_check_and_its_result_never_appears(
             yield from start(b, 25)  # a different N: its CRC differs
             out["n"] = yield from wait_done(b, 40_000)
             out["crc"] = yield b.check.crc
+            yield from waits(10 * sys_clocks_per_project)  # let the check's pin block end
 
         go2(b, sysgen(), rec, CLOCKS[clock])
         assert out["flags"] == (0, 0), (k, out)  # within one system clock of the abort
@@ -274,6 +275,7 @@ def test_stop_the_clock_mid_check_abort_restart_the_clock_start_again(clock: str
         yield from start(b, 33)
         out["n"] = yield from wait_done(b, 60_000)
         out["crc"] = yield b.check.crc
+        yield from waits(10 * per)  # let the check's pin block end
 
     go2(b, sysgen(), rec, CLOCKS[clock])
     assert out["flags"] == (0, 0)
