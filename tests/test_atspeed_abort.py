@@ -60,10 +60,12 @@ def pulse(sig):
     yield sig.eq(0)
 
 
-def setup(b: Bench):
+def setup(b: Bench, per: int = 1):
+    """Release reset and set `ui_in`; wait until the pins have the normal values (`per` is the
+    number of system clocks in a project clock)."""
     yield b.slot.rst_n.eq(1)
     yield b.slot.ui_in.eq(SW_UI)
-    yield from waits(40)
+    yield from waits(40 + 8 * per)
 
 
 def start(b: Bench, n: int):
@@ -168,7 +170,7 @@ def test_abort_at_every_stage_stops_the_check_and_its_result_never_appears(
         rec, out = Recorder(b), {}
 
         def sysgen():
-            yield from setup(b)
+            yield from setup(b, sys_clocks_per_project)
             yield from start(b, n_first)
             yield from waits(k * (sys_clocks_per_project if clock == "slow" else 1))
             out["seen_before_abort"] = len(rec.done_crcs)  # a check may have finished first
@@ -259,7 +261,7 @@ def test_stop_the_clock_mid_check_abort_restart_the_clock_start_again(clock: str
     per = max(1, CLOCKS[clock][0] // 20_000)
 
     def sysgen():
-        yield from setup(b)
+        yield from setup(b, per)
         yield from start(b, 200)
         yield from waits(8 * per)  # in the reset phase / early counting
         yield b.ce_project.eq(0)  # the clock stops mid-check
@@ -383,7 +385,7 @@ def test_start_immediately_after_abort_is_held_and_runs_the_new_check(clock: str
         rec, out = Recorder(b), {}
 
         def sysgen():
-            yield from setup(b)
+            yield from setup(b, per)
             yield from start(b, 200)
             yield from waits(k * per)
             yield from pulse(b.check.abort)
@@ -460,7 +462,7 @@ def test_aborted_and_restarted_with_the_clock_stopped_runs_only_the_last_start(
     per = max(1, CLOCKS[clock][0] // 20_000)
 
     def sysgen():
-        yield from setup(b)
+        yield from setup(b, per)
         yield from start(b, 200)
         yield from waits(10 * per)  # the project has begun
         yield b.ce_project.eq(0)
@@ -514,3 +516,31 @@ def test_start_right_after_done_never_shows_the_old_result_as_the_new_one(clock:
     assert out["crc2"] == zlib.crc32(toy_bytes(47))
     # After the second start, `done` was never high with the first check's CRC.
     assert set(rec.done_crcs[out["seen_old"] :]) == {zlib.crc32(toy_bytes(47))}
+
+
+def test_abort_after_gen_toggled_with_the_clock_stopped_then_a_new_start_runs_once() -> None:
+    """The launch's `gen` toggle has gone out (the launch delay elapsed) but the project clock
+    is stopped; abort; start again; resume. The unseen generation is consumed or reused and
+    exactly the last start runs, as one clean sequence."""
+    b = make(running=False)
+    rec, out = Recorder(b), {}
+    delay = b.check.launch_delay
+
+    def sysgen():
+        yield from setup(b)
+        yield from start(b, 200)
+        yield from waits(delay + 50)  # `gen` has toggled
+        yield from pulse(b.check.abort)
+        yield from start(b, 33)
+        yield from waits(delay + 50)
+        out["busy"] = yield b.check.busy
+        yield b.ce_project.eq(1)
+        out["n"] = yield from wait_done(b, 60_000)
+        out["crc"] = yield b.check.crc
+        yield from waits(100)
+
+    go2(b, sysgen(), rec, CLOCKS["normal"])
+    assert out["busy"] == 1
+    assert out["crc"] == zlib.crc32(toy_bytes(33))
+    assert set(rec.done_crcs) == {zlib.crc32(toy_bytes(33))}
+    assert len(assert_clean(rec.pins)) == 1

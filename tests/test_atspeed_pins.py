@@ -29,7 +29,7 @@ def per_clock(cfg) -> int:
 
 
 def run_scenario(clock, k: int, n_first: int = 30, n_second: int = 25, tail: int = 200):
-    """start N1, abort after k system clocks, start N2 on the very next system clock."""
+    """start N1, abort after k project clocks, start N2 on the very next system clock."""
     b = make()
     rec, out = Recorder(b), {}
     per = per_clock(CLOCKS[clock])
@@ -38,7 +38,7 @@ def run_scenario(clock, k: int, n_first: int = 30, n_second: int = 25, tail: int
         yield from setup(b)
         yield from waits(8 * per)  # the pins reach their normal values first
         yield from start(b, n_first)
-        yield from waits(k)
+        yield from waits(k * per)  # k project clocks (system clocks at the normal clock)
         yield from pulse(b.check.abort)
         yield b.check.clocks.eq(n_second)
         yield from pulse(b.check.start)
@@ -86,7 +86,7 @@ def single_start(clock_cfg, n: int = 20):
         yield from setup(b)
         yield from waits(8 * per_clock(clock_cfg))
         yield from start(b, n)
-        out["n"] = yield from wait_done(b, 60_000)
+        out["n"] = yield from wait_done(b, 20_000)
         out["crc"] = yield b.check.crc
         yield from waits(30 * per_clock(clock_cfg))
 
@@ -110,6 +110,7 @@ def test_one_start_is_exactly_one_clean_sequence_at_slow_project_clocks(
 ) -> None:
     """A project clock slower than `sys` sees `run` and `gen` a clock apart in either order."""
     rec, out = single_start((period, offset))
+    assert out["n"] is not None, "done never rose"
     assert out["crc"] == zlib.crc32(toy_bytes(20))
     blocks = assert_clean(rec.pins)
     assert len(blocks) == 1, blocks
@@ -176,11 +177,12 @@ def test_skew_between_run_and_gen_does_not_start_a_check_twice(late: str) -> Non
             yield from setup(b)
             yield from waits(8 * per)
             yield from start(b, 20)
-            out["n"] = yield from wait_done(b, 60_000)
+            out["n"] = yield from wait_done(b, 20_000)
             out["crc"] = yield b.check.crc
             yield from waits(30 * per)
 
         go2(b, sysgen(), rec, (period, offset), late=tuple(sig))
+        assert out["n"] is not None, ("done never rose", late, period)
         assert out["crc"] == zlib.crc32(toy_bytes(20))
         blocks = assert_clean(rec.pins)
         assert len(blocks) == 1, (late, period, blocks)
