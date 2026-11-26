@@ -298,6 +298,22 @@ def test_the_run_names_the_commit_and_the_source_rewrites(env, capsys):
     assert code == 0 and doc["run"]["source_rewrites"] == [["src/reused.v", 1]]
 
 
+def test_videos_repo_reaches_fetch_and_warnings_are_printed(env, capsys, monkeypatch):
+    seen = []
+
+    def fake_fetch(project, cache, videos_repo=None):
+        seen.append(videos_repo)
+        return fetch.Sources(
+            project=project, root=env.tmp, files=(), needs_sv=False, warnings=("odd submodule",)
+        )
+
+    monkeypatch.setattr(cli.fetch, "fetch", fake_fetch)
+    code, _, err = _run(env, capsys, "--videos-repo", str(MANIFEST))
+    assert code == 0
+    assert seen == [MANIFEST]
+    assert "tt-harness run-compare: warning: odd submodule" in err
+
+
 def test_bytes_before_the_header_are_counted_printed_and_do_not_change_the_verdict(env, capsys):
     env.uart_bytes = b"\x00" + frame(REF)
     code, doc, err = _run(env, capsys)

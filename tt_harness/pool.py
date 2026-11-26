@@ -84,8 +84,9 @@ class PoolResult:
 
 def load_sources(project_id: str) -> Sources:
     """The fetched sources of a manifest project (`$TT_VIDEOS_REPO`, cache `work/sources`)."""
-    projects = manifest.load(manifest.default_videos_repo())
-    return fetch.fetch(manifest.get(projects, project_id), REPO / "work" / "sources")
+    videos = manifest.default_videos_repo()
+    projects = manifest.load(videos)
+    return fetch.fetch(manifest.get(projects, project_id), REPO / "work" / "sources", videos)
 
 
 def _write(path: Path, doc: dict) -> None:
@@ -117,6 +118,8 @@ def run_sim(project_id: str, clocks: int, work: Path) -> PoolResult:
     """
     began = time.monotonic()
     sources = load_sources(project_id)
+    for warning in sources.warnings:
+        print(f"tt-harness pool-sim: {project_id}: warning: {warning}", file=sys.stderr, flush=True)
     out = Path(work) / sources.project.shuttle / sources.project.macro
     out.mkdir(parents=True, exist_ok=True)
     (out / RESULT_NAME).unlink(missing_ok=True)

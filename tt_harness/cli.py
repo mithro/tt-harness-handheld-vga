@@ -204,15 +204,21 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def _fetch(project: manifest.Project, args: argparse.Namespace) -> fetch.Sources:
+    """Fetch with the sub-command's `--cache` and `--videos-repo`; print the fetch's warnings."""
+    sources = fetch.fetch(project, args.cache, args.videos_repo)
+    for warning in sources.warnings:
+        print(f"tt-harness {args.command}: warning: {warning}", file=sys.stderr)
+    return sources
+
+
 def _cmd_fetch(args: argparse.Namespace) -> int:
     try:
         projects = manifest.load(args.videos_repo or manifest.default_videos_repo())
-        sources = fetch.fetch(manifest.get(projects, args.project), args.cache)
+        sources = _fetch(manifest.get(projects, args.project), args)
     except (KeyError, FileNotFoundError, fetch.FetchError) as e:
         print(f"tt-harness fetch: {e.args[0] if isinstance(e, KeyError) else e}", file=sys.stderr)
         return 1
-    for warning in sources.warnings:
-        print(f"tt-harness fetch: warning: {warning}", file=sys.stderr)
     print(sources.root)
     return 0
 
@@ -221,7 +227,7 @@ def _cmd_reference(args: argparse.Namespace) -> int:
     try:
         projects = manifest.load(args.videos_repo or manifest.default_videos_repo())
         project = manifest.get(projects, args.project)
-        sources = fetch.fetch(project, args.cache)
+        sources = _fetch(project, args)
         out_dir = args.out_dir or REPO / "work" / "reference" / project.shuttle / project.macro
         dump = reference.simulate(sources, args.clocks, out_dir)
     except (KeyError, FileNotFoundError, fetch.FetchError, reference.ReferenceError) as e:
@@ -240,9 +246,7 @@ def _cmd_build_compare(args: argparse.Namespace) -> int:
         projects = manifest.load(args.videos_repo or manifest.default_videos_repo())
         project = manifest.get(projects, args.project)
         step = "fetch"
-        sources = fetch.fetch(project, args.cache)
-        for warning in sources.warnings:
-            print(f"tt-harness build-compare: warning: {warning}", file=sys.stderr)
+        sources = _fetch(project, args)
         out_dir = args.out_dir or (
             REPO
             / "build"
@@ -299,7 +303,7 @@ def _cmd_verdict(args: argparse.Namespace) -> int:
         projects = manifest.load(args.videos_repo or manifest.default_videos_repo())
         project = manifest.get(projects, args.project)
         verdict.check_matches(ref, project, RESET_CLOCKS)
-        sources = fetch.fetch(project, args.cache, args.videos_repo)
+        sources = _fetch(project, args)
         screen = prescreen.check(sources)
     except (
         KeyError,
@@ -411,7 +415,7 @@ def _cmd_run_compare(args: argparse.Namespace) -> int:
                 f"{ref.clocks}; the recording could not cover it"
             )
         step = "fetch"
-        sources = fetch.fetch(project, args.cache, args.videos_repo)
+        sources = _fetch(project, args)
         step = "pre-screen"
         screen = prescreen.check(sources)
         step = "build"
