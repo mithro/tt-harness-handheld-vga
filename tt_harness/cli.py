@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections.abc import Sequence
@@ -369,21 +370,39 @@ def _verdict_doc(
 
 
 def _existing_build(
-    project: manifest.Project, board: str, clocks: int, baud: int, out_dir: Path
-) -> Path | None:
-    """The bitstream in `out_dir` if it was built for exactly these settings, else None.
+    project: manifest.Project,
+    sources: fetch.Sources,
+    board: str,
+    toolchain: str,
+    clocks: int,
+    baud: int,
+    out_dir: Path,
+) -> tuple[Path, dict] | None:
+    """The bitstream in `out_dir` and its record, if built for exactly this, else None.
 
-    A build is taken as matching when the board top generated now, which carries the
-    project, its inputs, `clocks` and the baud divider, is byte for byte the one in
-    `out_dir`, and the bitstream there is not older than it. `build_compare` leaves no
-    bitstream behind when a build fails.
+    A build matches only when its record (`build.build_record`) exists and all of these
+    hold: every identity field (`build.build_identity`: project, repo, commit, patch,
+    board, toolchain, part, clocks, baud, settle, harness version) is equal; the current
+    source files hash to the recorded `inputs` (the same files, unchanged); the bitstream
+    hashes to the recorded value; and the board top generated now is byte for byte the one
+    in `out_dir`. A build without a record is not reused: it is rebuilt.
     """
     board_mod = build.BOARDS[board]
     top_v = out_dir / f"{board_mod.MODULE_NAME}.v"
     bitstream = out_dir / f"{board_mod.MODULE_NAME}.bit"
-    if not top_v.is_file() or not bitstream.is_file():
+    record_file = build.record_path(out_dir, board)
+    if not (top_v.is_file() and bitstream.is_file() and record_file.is_file()):
         return None
-    if bitstream.stat().st_mtime < top_v.stat().st_mtime:
+    try:
+        record = json.loads(record_file.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"build record {record_file} is not JSON ({e}); use --rebuild") from e
+    identity = build.build_identity(project, board, toolchain, clocks, baud)
+    if any(record.get(key) != value for key, value in identity.items()):
+        return None
+    if record.get("inputs") != build.source_hashes(sources):
+        return None
+    if record.get("bitstream_sha256") != hashlib.sha256(bitstream.read_bytes()).hexdigest():
         return None
     fresh = out_dir / f"{board_mod.MODULE_NAME}.check.v"
     try:
@@ -391,7 +410,7 @@ def _existing_build(
         same = board_mod.to_verilog(top, fresh).read_bytes() == top_v.read_bytes()
     finally:
         fresh.unlink(missing_ok=True)
-    return bitstream if same else None
+    return (bitstream, record) if same else None
 
 
 def _cmd_run_compare(args: argparse.Namespace) -> int:
@@ -426,12 +445,17 @@ def _cmd_run_compare(args: argparse.Namespace) -> int:
             / project.shuttle
             / project.macro
         )
-        bitstream = None
+        existing = None
         if not args.rebuild:
-            bitstream = _existing_build(project, args.board, args.clocks, args.baud, build_dir)
-        reused = bitstream is not None
-        if bitstream is None:
-            bitstream = build.build_compare(
+            existing = _existing_build(
+                project, sources, args.board, args.toolchain, args.clocks, args.baud, build_dir
+            )
+        reused = existing is not None
+        if existing is not None:
+            bitstream, record = existing
+            source_rewrites = record["source_rewrites"]
+        else:
+            result = build.build_compare(
                 project,
                 sources,
                 args.board,
@@ -440,7 +464,9 @@ def _cmd_run_compare(args: argparse.Namespace) -> int:
                 args.clocks,
                 baud=args.baud,
                 jobs=args.jobs,
-            ).bitstream
+            )
+            bitstream = result.bitstream
+            source_rewrites = [list(r) for r in result.source_rewrites]
         print(
             f"tt-harness run-compare: {'reusing' if reused else 'built'} {bitstream}",
             file=sys.stderr,
@@ -488,6 +514,9 @@ def _cmd_run_compare(args: argparse.Namespace) -> int:
         "board": args.board,
         "toolchain": args.toolchain,
         "baud": args.baud,
+        "commit": project.commit,
+        # Project files given to the tool modified (`build.BuildResult.source_rewrites`).
+        "source_rewrites": source_rewrites,
         "bitstream": str(bitstream),
         "bitstream_sha256": meta["bitstream_sha256"],
         "bitstream_reused": reused,
