@@ -117,7 +117,17 @@ signal, e.g. a CSR); `locked`, `clock_running` (outputs, `sys`); `uo_out`, `uio_
 
 from __future__ import annotations
 
-from migen import ClockDomain, ClockDomainsRenamer, Constant, If, Instance, Module, Mux, Signal
+from migen import (
+    Cat,
+    ClockDomain,
+    ClockDomainsRenamer,
+    Constant,
+    If,
+    Instance,
+    Module,
+    Mux,
+    Signal,
+)
 from migen.genlib.cdc import MultiReg
 
 from tt_harness.core.cdc import AsyncClearFlop, MultiBitCrossing
@@ -131,6 +141,9 @@ PROJECT_INSTANCE = "project"
 # is 512 system clocks). 1 MHz (200 system clocks per flip) and up read 1.
 CLOCK_RUNNING_TIMEOUT = 512
 ALIVE_DIVIDE = 4  # project clocks per flip of the alive toggle
+# The control word (`ctl_x`): bit positions.
+CTL_RELEASE, CTL_ENA, CTL_GAMEPAD, CTL_UI_IN = 0, 1, 2, 3
+CTL_BITS = CTL_UI_IN + 8
 
 
 class ProjectSlot(Module):
@@ -174,16 +187,27 @@ class ProjectSlot(Module):
         self.clock_domains.cd_project = cd = ClockDomain("project", reset_less=True)
         sd = self.sync.project
 
-        # sys registers that are the sources of the crossings.
-        ena_x = Signal()
-        gp_x = Signal()
+        # The control word and the gamepad buttons: one handshake each.
+        self.submodules.ctl_x = ctl_x = MultiBitCrossing(CTL_BITS)
+        self.submodules.buttons_x = MultiBitCrossing(24)
+
+        # sys registers that are the sources of the other crossings. The reset request is
+        # set by `rst_n` low at once, and cleared only when the control word the project
+        # holds is known to have its release bit 0 (the last word picked up has it 0 and has
+        # been acknowledged). A word with the release bit 1 is only ever picked up while the
+        # request is low, so after the release was written, with whatever `ena`,
+        # `gamepad_enable` and `ui_in` are then.
         ce_x = Signal()
         self.rst_req = rst_req = Signal(reset=1)
         self.sync += [
-            ena_x.eq(self.ena),
-            gp_x.eq(self.gamepad_enable),
             ce_x.eq(self.clock_enable),
-            rst_req.eq(~self.rst_n),
+            If(~self.rst_n, rst_req.eq(1)).Elif(
+                ~ctl_x.busy & ~ctl_x.hold[CTL_RELEASE], rst_req.eq(0)
+            ),
+        ]
+        self.comb += [
+            ctl_x.src.eq(Cat(~rst_req, self.ena, self.gamepad_enable, self.ui_in)),
+            self.buttons_x.src.eq(self.gamepad_buttons),
         ]
 
         # The clock, and `locked`.
@@ -199,18 +223,11 @@ class ProjectSlot(Module):
             self.comb += [cd.clk.eq(pc.clk), pc.enable.eq(ce_x)]
             self.specials += MultiReg(pc.locked, self.locked, odomain="sys", n=2)
 
-        # Single-bit levels into project.
-        ena_s, gp_s = Signal(), Signal()
-        self.specials += [
-            MultiReg(ena_x, ena_s, odomain="project", n=2),
-            MultiReg(gp_x, gp_s, odomain="project", n=2),
-        ]
-
-        # Multi-bit values into project: handshake.
-        self.submodules.ui_x = MultiBitCrossing(8)
-        self.submodules.buttons_x = MultiBitCrossing(24)
-        self.comb += [self.ui_x.src.eq(self.ui_in), self.buttons_x.src.eq(self.gamepad_buttons)]
-        ui_cap = self.ui_x.dst
+        # The delivered control word (project registers, all four fields from one word).
+        release_s = ctl_x.dst[CTL_RELEASE]
+        ena_s = ctl_x.dst[CTL_ENA]
+        gp_s = ctl_x.dst[CTL_GAMEPAD]
+        ui_cap = ctl_x.dst[CTL_UI_IN:]
 
         # The gamepad emulator, free-running in project.
         if clock_hz > 0:
@@ -239,7 +256,7 @@ class ProjectSlot(Module):
 
         # Reset chain.
         rst_d = Signal()
-        self.comb += rst_d.eq(~self.override_rst)
+        self.comb += rst_d.eq(release_s & ~self.override_rst)
         ff1 = AsyncClearFlop("project", rst_req, rst_d, behavioural=sim_clock)
         ff2 = AsyncClearFlop("project", rst_req, ff1.q, q=self.pin_rst_n, behavioural=sim_clock)
         self.specials += [ff1, ff2]
