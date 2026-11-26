@@ -416,3 +416,45 @@ across projects.
 - That nextpnr-xilinx handles the fractional MMCM and clock-enable buffer as LiteX emits
   them (it lists the primitives; no build has been run). Spike B settles it.
 - LiteX's behaviour when a requested clock is not exactly achievable.
+
+## Amendments after plan 1 (2026-11-26)
+
+What the spikes changed or settled. The body above is unchanged; where it disagrees with
+this section, this section holds.
+
+- **Settle of 3 system cycles.** The compare build waits 3 system cycles, not 2, between a
+  sys-side change and the next project edge and before each sample, so `pclk` is 80 ns on
+  the Arty and the sys to `pclk` paths get 30 ns
+  ([Spike A, "After Task 9b"](../../results/2026-11-spike-a-compare-build.md#after-task-9b);
+  [timing at settle 3](../../results/2026-11-spike-a-compare-build-9b-timing.md)).
+- **Explicit `ZHOLD` and the feedback gate.** `ProjectClock` gives its MMCM
+  `COMPENSATION="ZHOLD"` for both toolchains (with `INTERNAL` nextpnr-xilinx 0.8.2 ties
+  CLKFBIN to a constant and the MMCM never locks), and every clock build decodes its
+  bitstream and fails unless the MMCM's feedback is the dedicated `CLKFBOUT2IN`
+  ([Spike B, "After Task 7d"](../../results/2026-11-spike-b-project-clock.md#after-task-7d-2026-11-24-the-feedback-loop-closed)).
+- **Registered project inputs and the input gate.** Every project input but the clock is a
+  constant or comes straight from a flip-flop (`rst_n` from a register); both flows check
+  the implemented netlist and fail a build that has anything else
+  ([Spike A, "After Task 9c"](../../results/2026-11-spike-a-compare-build.md#after-task-9c);
+  [timing after Task 9c](../../results/2026-11-spike-a-compare-build-9c-timing.md)).
+- **Reference schema 3, `ideal` profile.** The shared reference is
+  `<shuttle>/<macro>/ideal/reference.json`, schema 3, from
+  [tt-harness-fpga-vga](https://github.com/mithro/tt-harness-fpga-vga); its `key.repo` and
+  `key.commit` must equal the manifest's ([`tt_harness/verdict.py`](../../../tt_harness/verdict.py)).
+  No results document shows a hardware run against schema 3: the runs of
+  [Spike A](../../results/2026-11-spike-a-compare-build.md) used the earlier layout.
+- **The PS1 Arty board.** The test board is the Digilent Arty A7-35T on host `pi7` of the
+  public fpgas.online PS1 site, not a Welland Arty
+  ([first hardware run](../../results/2026-11-first-hardware-run.md);
+  [`docs/arty-boards.md`](../../arty-boards.md)).
+- **25.174825 MHz, −6.94 ppm.** The solver's setting for 25.175 MHz (DIVCLK 1, `CLKOUT0`
+  35.75; MULT 9 from the Arty's 100 MHz, 18 from the Game Bub's 50 MHz) gives
+  25.174825 MHz, −6.94 ppm, not the 25.1736 MHz and 56 ppm under "Slot, clock and project
+  control" ([Spike B, results table](../../results/2026-11-spike-b-project-clock.md#results-table)).
+- **The fractional MMCM is settled.** Both flows build it; on the Arty both clocks were
+  measured exact and locked, the open flow's after the `ZHOLD` change; no
+  toolchain-specific solver rule is needed. The open flow's duty cycle is about 51.5%,
+  Vivado's 50%. This answers the fractional-MMCM half of the "Unverified" item above;
+  both flows also accept the `BUFGCE` with a wired enable, but whether the enable gates
+  the clock on silicon was not measured
+  ([Spike B, "Measured on hardware"](../../results/2026-11-spike-b-project-clock.md#measured-on-hardware-task-7c-2026-11-24)).
