@@ -65,8 +65,8 @@ their per-project inputs from the same files rather than fetching independently:
 - Ten designs have a non-zero fixed `ui_in` in the reference run, for example
   `tt_um_toivoh_retro_console` on tt06 and ttihp0p2 (0x30) and, on ttsky26c,
   `tt_um_moein_maleki_arm16` and `tt_um_nobleg30_uart_vga_scroller` (0x08). The
-  `reference.json` files from `tt-harness-fpga-vga` will carry `ui_in` and `uio_in` per
-  design once they exist.
+  `reference.json` files from `tt-harness-fpga-vga` carry `ui_in` and `uio_in` per
+  design (the values applied; schema 3, 2026-11-25).
 - Fetch logic: `ttvga/harness/job.py` (shallow fetch of the commit, then apply the patch).
 
 ## What is shared between the projects (as of 2026-11-23)
@@ -112,22 +112,31 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
   comparing. Pushed to `mithro/tinytapeout-vga-videos` main (148ccf5..87cea85). The videos testbench's clock counter is the
   per-clock sample index plus 1.
 - `tt-harness-fpga-vga`'s own reference files use standard FNV-1a 64. Its
-  `reference.json` schema is settling: id, clock_hz, clock_declared, reset_clocks, ui_in,
+  `reference.json` schema 3 has, among others: id, profile, clock_hz, clock_declared, reset_clocks, ui_in,
   uio_in, clocks, dump (`uo_out.bin.gz`), dump_sha256 (of the uncompressed bytes),
   uio_dump, uio_dump_sha256, mode, line_clocks, lines, sync polarities, width, height,
   frames (index, start_clock, hash, png), frames_complete, partial_frames_dropped, tools.
-- That schema (version 1) and `docs/frame-definition.md` were merged on local `main` of
-  `tt-harness-fpga-vga` at commit 34dbd75 on 2026-11-23. The fields this project relies
-  on: `dump` is `uo_out.bin.gz`, one byte per clock, byte *i* being `uo_out` after the
+- This project reads schema 3 only (`tt-harness-fpga-vga` commit 112ff4b, 2026-11-25;
+  `docs/frame-definition.md` in that repository). The file is
+  `work/reference/<shuttle>/<macro>/<profile>/reference.json`; this harness drives every
+  input itself, so it reads the `ideal` profile and checks `profile` is `ideal`. `ui_in`
+  and `uio_in` are the values applied. `ui_in_unmet` and `uio_in_unmet` are the bits
+  where the applied value differs from the requested one; non-zero means the design did
+  not see what was asked, and this project refuses such a reference. A design whose pads
+  do not settle has a `reference-fail.json` (`id`, `status`, `reason`, `timed_out`,
+  `limited`, `limits`) and no `reference.json`; this project reports its status and
+  reason. Schemas 1 and 2 and the old path without a profile directory are refused. The
+  fields this project relies on: `dump` is `uo_out.bin.gz`, one byte per clock, byte *i* being `uo_out` after the
   rising edge of clock *i*; clock 0 is the first reset clock; `rst_n` is low for the
   rising edges of clocks 0 to 9; `dump_sha256` is of the uncompressed bytes; `uio_dump`
-  is `uio.bin.gz`, two bytes per clock (`uio_out` then `uio_oe`). Reference files are to
-  appear under `work/reference/<shuttle>/<macro>/` in that checkout.
+  is `uio.bin.gz`, two bytes per clock (`uio_out` then `uio_oe`). Reference files are
+  under `work/reference/<shuttle>/<macro>/<profile>/` in that checkout.
 - For anyone cutting frames: a design using the VGA Playground's sync generator is cut
   one line later than its own row 0, so row 479 is black porch. Per-clock comparison is
   unaffected.
 - Reference files for the eight pool designs (and five calibration designs) exist since
-  2026-11-23 under `work/reference/<shuttle>/<macro>/` in the `tt-harness-fpga-vga`
+  2026-11-23 under `work/reference/<shuttle>/<macro>/` (since 2026-11-25
+  `.../<macro>/ideal/`, schema 3) in the `tt-harness-fpga-vga`
   checkout on this machine: `reference.json`, `uo_out.bin.gz` (6,000,000 clocks),
   `uio.bin.gz` and eight frame PNGs. That directory is git-ignored scratch, not in the
   repository. All eight use `ui_in` 0 and `uio_in` 0 and simulate to 640x480@60.

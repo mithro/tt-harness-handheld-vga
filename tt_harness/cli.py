@@ -56,7 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-dir",
         type=Path,
         default=None,
-        help="default: <repo>/work/reference/<shuttle>/<macro>",
+        help="default: <repo>/work/reference/<shuttle>/<macro> (this project's own simulation; "
+        "not the shared <shuttle>/<macro>/ideal/reference.json)",
     )
     ref_p.set_defaults(func=_cmd_reference)
 
@@ -120,7 +121,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-dir",
         type=Path,
         default=None,
-        help="shared reference files (default: $TT_REFERENCE_DIR)",
+        help="shared reference files, <shuttle>/<macro>/ideal/reference.json, schema 3 "
+        "(default: $TT_REFERENCE_DIR)",
     )
     verdict_p.set_defaults(func=_cmd_verdict)
 
@@ -186,7 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-dir",
         type=Path,
         default=None,
-        help="shared reference files (default: $TT_REFERENCE_DIR)",
+        help="shared reference files, <shuttle>/<macro>/ideal/reference.json, schema 3 "
+        "(default: $TT_REFERENCE_DIR)",
     )
     rc_p.set_defaults(func=_cmd_run_compare)
     pool.add_parser(sub)

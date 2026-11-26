@@ -87,7 +87,7 @@ def _check_against_reference(
     _assert_same(rec.samples, expected, "local reference")
     if shared:
         ref_dir = verdict.default_reference_dir()
-        if not (ref_dir / sources.project.id / "reference.json").is_file():
+        if not verdict.reference_path(ref_dir, sources.project.id).is_file():
             # The local reference matched; the shared comparison cannot run.
             pytest.skip(f"no shared reference for {sources.project.id} under {ref_dir}")
         try:

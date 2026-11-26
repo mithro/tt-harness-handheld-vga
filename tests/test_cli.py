@@ -65,12 +65,15 @@ def _frame(payload: bytes) -> bytes:
 def verdict_env(tmp_path, monkeypatch):
     """A reference dir, and fetch/pre-screen replaced so no Git or Yosys runs."""
     ref_dir = tmp_path / "reference"
-    d = ref_dir / "tt07" / "tt_um_tinytapeout_dvd_screensaver"
+    d = ref_dir / "tt07" / "tt_um_tinytapeout_dvd_screensaver" / "ideal"
     d.mkdir(parents=True)
     (d / "uo_out.bin.gz").write_bytes(gzip.compress(VERDICT_REF))
     doc = {
-        "schema": 1,
+        "schema": 3,
         "id": VERDICT_ID,
+        "profile": "ideal",
+        "ui_in_unmet": 0,
+        "uio_in_unmet": 0,
         "clock_hz": 25_175_000,
         "reset_clocks": 10,
         "ui_in": 0,
