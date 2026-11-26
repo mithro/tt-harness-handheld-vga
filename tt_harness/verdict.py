@@ -7,7 +7,9 @@ The reference is `tt-harness-fpga-vga`'s
 rising edge of clock i, clock 0 being the first reset clock. `dump_sha256` is of the
 uncompressed bytes. This harness drives every project input itself, so it reads the
 `ideal` profile only (`PROFILE`); a reference whose `ui_in_unmet` or `uio_in_unmet` is
-non-zero (requested input bits the profile could not apply) is refused. A design whose
+non-zero (requested input bits the profile could not apply) is refused, and so is one
+without `key.repo` and `key.commit`, the sources it was simulated from; `check_matches`
+refuses a reference whose sources or inputs are not the compare build's. A design whose
 simulation failed has a `reference-fail.json` and no `reference.json`; that is reported
 with its status and reason. Nothing older than schema 3 is read.
 """
@@ -18,17 +20,20 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from tt_harness.host.frame import Recording
+from tt_harness.manifest import Project
 
 SCHEMA = 3
 PROFILE = "ideal"
 DEFAULT_REFERENCE_DIR = "~/github/TinyTapeout/tt-harness-fpga-vga/work/reference"
 _COMPARE_BLOCK = 1 << 16
+_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 def default_reference_dir() -> Path:
@@ -38,6 +43,14 @@ def default_reference_dir() -> Path:
 
 class ReferenceInvalid(ValueError):
     """A reference file is missing, malformed, or does not match its dump."""
+
+
+class ReferenceMismatch(ValueError):
+    """A valid reference made from other sources or under other inputs than the build's.
+
+    Comparing against it would give a `mismatch` that is not the design's or the harness's
+    fault, so it is an error instead.
+    """
 
 
 def reference_path(ref_dir: Path, project_id: str) -> Path:
@@ -75,6 +88,8 @@ class Reference:
     samples: bytes  # the whole uncompressed dump; len(samples) >= clocks
     path: Path  # the reference.json read
     sha256: str  # dump_sha256, verified
+    repo: str  # key.repo: the repository the simulated sources came from
+    commit: str  # key.commit: the commit of those sources
 
 
 @dataclass(frozen=True)
@@ -126,6 +141,7 @@ def load_reference(ref_dir: Path, project_id: str) -> Reference:
     ui_in = _int_field(doc, "ui_in", path, 0, 255)
     uio_in = _int_field(doc, "uio_in", path, 0, 255)
     clock_hz = _int_field(doc, "clock_hz", path, 1)
+    repo, commit = _key_identity(doc, path)
 
     dump = doc.get("dump")
     if not isinstance(dump, str) or not dump or Path(dump).name != dump or dump in (".", ".."):
@@ -146,7 +162,43 @@ def load_reference(ref_dir: Path, project_id: str) -> Reference:
         )
     if clocks > len(samples):
         raise ReferenceInvalid(f"{path}: clocks {clocks} exceeds the dump's {len(samples)} bytes")
-    return Reference(clocks, reset_clocks, ui_in, uio_in, clock_hz, samples, path, actual)
+    return Reference(
+        clocks, reset_clocks, ui_in, uio_in, clock_hz, samples, path, actual, repo, commit
+    )
+
+
+def _key_identity(doc: dict, path: Path) -> tuple[str, str]:
+    """`key.repo` and `key.commit`: where the simulated sources came from."""
+    key = doc.get("key")
+    if not isinstance(key, dict):
+        raise ReferenceInvalid(f"{path}: key is {key!r}, expected an object with repo and commit")
+    repo, commit = key.get("repo"), key.get("commit")
+    if not isinstance(repo, str) or not repo:
+        raise ReferenceInvalid(f"{path}: key.repo is {repo!r}, expected a repository")
+    if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):
+        raise ReferenceInvalid(f"{path}: key.commit is {commit!r}, expected a 40-digit commit")
+    return repo, commit
+
+
+def check_matches(ref: Reference, project: Project, reset_clocks: int) -> None:
+    """Refuse a reference made from other sources or under other inputs than the build's.
+
+    The build's sources are `project`'s repository at its commit (the manifest's), its
+    inputs `project.ui_in` and `project.uio_in`, its reset `reset_clocks` clocks long.
+    Raises `ReferenceMismatch` naming the first field that differs and the reference file.
+    """
+    for name, theirs, ours in (
+        ("repo", ref.repo, project.repo),
+        ("commit", ref.commit, project.commit),
+        ("ui_in", f"0x{ref.ui_in:02x}", f"0x{project.ui_in:02x}"),
+        ("uio_in", f"0x{ref.uio_in:02x}", f"0x{project.uio_in:02x}"),
+        ("reset_clocks", ref.reset_clocks, reset_clocks),
+    ):
+        if theirs != ours:
+            raise ReferenceMismatch(
+                f"{project.id}: reference {name} {theirs} differs from the compare build's "
+                f"{ours} ({ref.path})"
+            )
 
 
 def _first_difference(a: bytes, b: bytes) -> int | None:

@@ -76,6 +76,7 @@ def _write_shared(env, samples: bytes, **fields) -> Path:
         "clocks": len(samples),
         "dump": "uo_out.bin.gz",
         "dump_sha256": hashlib.sha256(samples).hexdigest(),
+        "key": {"repo": "/nonexistent", "commit": "0" * 40, "sources_sha256": "0" * 64},
     }
     doc.update(fields)
     path = d / "reference.json"
@@ -160,8 +161,15 @@ class TestRunSim:
 
     def test_shared_reference_under_other_inputs_is_an_error(self, one_pool, tmp_path) -> None:
         _write_shared(one_pool, _true_samples(one_pool, tmp_path, CLOCKS), ui_in=0)
-        with pytest.raises(pool.PoolError, match="ui_in"):
+        with pytest.raises(verdict.ReferenceMismatch, match="ui_in"):
             pool.run_sim(ID, CLOCKS, one_pool["work"])
+
+
+def test_shared_reference_of_another_commit_is_an_error(one_pool) -> None:
+    key = {"repo": "/nonexistent", "commit": "e" * 40, "sources_sha256": "0" * 64}
+    _write_shared(one_pool, bytes(CLOCKS), key=key)
+    with pytest.raises(verdict.ReferenceMismatch, match="commit"):
+        pool._shared_reference(one_pool["sources"], CLOCKS)
 
 
 # pool-sim sub-command -----------------------------------------------------------------

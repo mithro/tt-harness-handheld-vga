@@ -100,16 +100,7 @@ def _shared_reference(sources: Sources, clocks: int) -> tuple[bytes, Path] | Non
     if not path.is_file() and not path.with_name("reference-fail.json").exists():
         return None  # a failed reference is not "none": load_reference says why
     ref = verdict.load_reference(verdict.default_reference_dir(), project.id)
-    for name, theirs, ours in (
-        ("ui_in", ref.ui_in, project.ui_in),
-        ("uio_in", ref.uio_in, project.uio_in),
-        ("reset_clocks", ref.reset_clocks, RESET_CLOCKS),
-    ):
-        if theirs != ours:
-            raise PoolError(
-                f"{project.id}: shared reference {name} {theirs} differs from the compare "
-                f"build's {ours} ({ref.path})"
-            )
+    verdict.check_matches(ref, project, RESET_CLOCKS)
     if ref.clocks < clocks:
         raise PoolError(
             f"{project.id}: shared reference spans {ref.clocks} clocks, fewer than the "

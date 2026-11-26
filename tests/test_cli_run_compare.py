@@ -21,6 +21,7 @@ ID = "tt07/tt_um_tinytapeout_dvd_screensaver"
 REF = bytes((i * 5 + 1) & 0xFF for i in range(3000))
 MANIFEST = Path(__file__).resolve().parent / "data" / "manifest"
 BOARD_ARGS = ["--host", "ps1.fpgas.online", "--port", "10722", "--uart", UART]
+PROJECT = manifest.get(manifest.load(MANIFEST), ID)
 
 
 @pytest.fixture
@@ -42,6 +43,7 @@ def env(tmp_path, monkeypatch):
         "clocks": len(REF),
         "dump": "uo_out.bin.gz",
         "dump_sha256": hashlib.sha256(REF).hexdigest(),
+        "key": {"repo": PROJECT.repo, "commit": PROJECT.commit, "sources_sha256": "0" * 64},
     }
     (d / "reference.json").write_text(json.dumps(doc))
     monkeypatch.setenv("TT_REFERENCE_DIR", str(tmp_path / "reference"))
