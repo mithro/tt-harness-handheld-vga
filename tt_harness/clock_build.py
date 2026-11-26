@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from operator import xor
 from pathlib import Path
@@ -553,25 +552,25 @@ def parse_vivado(
 # What the bitstream says ---------------------------------------------------------------------
 
 
-def decode_bitstream(bit: Path, part: str, out: Path) -> Path:
-    """Decode a `.bit` back to FASM with `bit2fasm` (openXC7); the FASM is written to `out`."""
+def decode_bitstream(bit: Path, part: str, out: Path, log: Path) -> Path:
+    """Decode a `.bit` back to FASM with `bit2fasm` (openXC7); the FASM is written to `out`.
 
-    with out.open("w") as fasm, out.with_suffix(".err").open("w") as err:
-        subprocess.run(
-            [
-                str(tool("bit2fasm")),
-                "--db-root",
-                str(PRJXRAY_DB / "artix7"),
-                "--part",
-                part,
-                "--bitread",
-                str(tool("bitread")),
-                str(bit),
-            ],
-            stdout=fasm,
-            stderr=err,
-            check=True,
-        )
+    Run through `verilate.run`: TMPDIR is `<repo>/tmp`, the command line and its standard
+    error are appended to `log`. A non-zero exit raises `BuildError`.
+    """
+    cmd = [
+        str(tool("bit2fasm")),
+        "--db-root",
+        str(PRJXRAY_DB / "artix7"),
+        "--part",
+        part,
+        "--bitread",
+        str(tool("bitread")),
+        str(bit),
+    ]
+    rc = verilate.run(cmd, log, out.parent, STEP_TIMEOUT_S, stdout=out)
+    if rc != 0:
+        raise BuildError(f"decoding {bit}: bit2fasm failed (exit {rc})", log)
     return out
 
 
@@ -589,7 +588,7 @@ def feedback_gate(job: Build) -> str:
     `BuildError` otherwise, because such a bitstream does not lock and no tool says so.
     """
     # The Vivado part of the Arty (-1L) is not in the prjxray database; it is the same die.
-    decode_bitstream(job.bitstream, job.board.parts["openxc7"], decoded_path(job))
+    decode_bitstream(job.bitstream, job.board.parts["openxc7"], decoded_path(job), job.log)
     try:
         return mmcm_fasm.check_feedback(decoded_path(job).read_text())
     except mmcm_fasm.FeedbackError as e:
