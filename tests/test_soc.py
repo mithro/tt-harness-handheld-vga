@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """The LiteX SoC of the demo build (`tt_harness/soc/`): its register map, its registers on the
-bus, its crossings, and the BIOS booting in Verilator.
+bus, its crossings, and the firmware booting in Verilator.
 
 - `test_csr_map_is_documented_and_current`: `docs/registers.md` is the generated CSR map of
   the reference configuration (`tt_harness.soc.registers`), every harness register and field
@@ -10,8 +10,9 @@ bus, its crossings, and the BIOS booting in Verilator.
   `uo_out`: every writable register reads back what was written and reaches the block it
   controls, the build facts read as built, and the measured timing, the framebuffer, the
   seven-segment duty and an at-speed CRC are read back through the registers.
-- `test_bios_boots_and_prints_banner` (`toolchain`: Verilator and the RISC-V GCC): the whole
-  SoC with VexRiscv and a real project, the BIOS compiled and run, its UART decoded.
+- `test_soc_boots_and_prints_banner` (`toolchain`: Verilator and the RISC-V GCC): the whole
+  SoC with VexRiscv and a project, the firmware (`firmware/`) compiled into the ROM and run,
+  its first console lines decoded from the UART.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from tt_harness.core.slot import ProjectSlot
 from tt_harness.demo.validate import DemoError
 from tt_harness.fetch import Sources
 from tt_harness.manifest import Project
-from tt_harness.soc import core, registers, sim
+from tt_harness.soc import core, firmware, registers, sim
 
 REPO = Path(__file__).resolve().parent.parent
 DATA = Path(__file__).resolve().parent / "data"
@@ -466,7 +467,7 @@ def test_with_clock_hz_0_no_register_waits_on_the_project_clock() -> None:
     assert seen.get("done")
 
 
-# The BIOS in Verilator ------------------------------------------------------------------------
+# The firmware in Verilator ---------------------------------------------------------------------
 
 
 def _counter() -> Sources:
@@ -493,19 +494,23 @@ def _counter() -> Sources:
 @pytest.mark.toolchain
 @pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
 @pytest.mark.skipif(
-    not (sim.RISCV_GCC / "riscv64-unknown-elf-gcc").is_file(), reason="no RISC-V GCC"
+    not (firmware.RISCV_GCC / f"{firmware.GCC_TRIPLE}-gcc").is_file(), reason="no RISC-V GCC"
 )
-def test_bios_boots_and_prints_banner(tmp_path: Path) -> None:
+def test_soc_boots_and_prints_banner(tmp_path: Path) -> None:
+    def booted(text: str) -> bool:
+        return "\ndemo ok " in sim.plain(text) and sim.plain(text).count("\n") >= 2
+
     result = sim.run(
         _counter(),
         demo(),
-        until=lambda text: "litex> " in sim.plain(text),
-        max_cycles=40_000_000,
+        until=booted,
+        max_cycles=20_000_000,
         out_dir=tmp_path,
-        with_firmware=False,
     )
     assert result.reached_until, result.text[-2000:]
-    text = result.plain
-    for phrase in ("Build your hardware, easily!", "BIOS CRC passed", "VexRiscv", "Memtest OK"):
-        assert phrase in text, phrase
-    assert text.index("Build your hardware") < text.index("litex> ")
+    lines = result.plain.splitlines()
+    assert lines[0] == (
+        f"boot project=tt00/tt_um_test_counter sys_hz={SYS_HZ} clock_hz={CLOCK_HZ}"
+        f" fb_width=320 fb_height=240 demo_json_bytes={len(demo())}"
+    )
+    assert lines[1] == "demo ok projects=1 steps=0"

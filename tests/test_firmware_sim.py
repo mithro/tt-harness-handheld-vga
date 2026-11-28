@@ -26,7 +26,7 @@ import pytest
 
 from tt_harness import pool, tools
 from tt_harness.core import vga
-from tt_harness.soc import sim
+from tt_harness.soc import firmware, sim
 
 DATA = Path(__file__).resolve().parent / "data" / "demo"
 DVD = "tt07/tt_um_tinytapeout_dvd_screensaver"
@@ -40,7 +40,7 @@ pytestmark = [
     pytest.mark.xdist_group("work-sources"),  # fetches into the shared work/sources cache
     pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed"),
     pytest.mark.skipif(
-        not (sim.RISCV_GCC / "riscv64-unknown-elf-gcc").is_file(), reason="no RISC-V GCC"
+        not (firmware.RISCV_GCC / f"{firmware.GCC_TRIPLE}-gcc").is_file(), reason="no RISC-V GCC"
     ),
 ]
 

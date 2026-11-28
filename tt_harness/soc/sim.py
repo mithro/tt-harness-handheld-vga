@@ -4,8 +4,7 @@
 `run(sources, demo_json, until, max_cycles)` builds `HarnessSoC` on the LiteX simulation
 platform (`platform()`) with a simulation slot (`ProjectSlot(sim_clock=True)`: no MMCM, the
 bench drives the project clock), compiles the firmware (`firmware/`, in the ROM:
-`tt_harness.soc.firmware`), or with `with_firmware=False` LiteX's BIOS, with the RISC-V
-GCC, generates the Verilog
+`tt_harness.soc.firmware`, with its pinned RISC-V GCC), generates the Verilog
 (with VexRiscv's), verilates it with the project's sources and the harness
 `tt_harness/sim/soc_main.cpp`, and runs it. The harness drives the 50 MHz system clock and the
 project clock at `clock_hz` of `demo.json` (not at all for 0), decodes the UART at 115200 baud
@@ -18,7 +17,7 @@ libevent and json-c, and its UART is a stream model, not the serial line.
 
 Files under `out_dir`:
 
-    litex/            the Builder's output: software/ (the firmware or the BIOS, the
+    litex/            the Builder's output: software/ (the firmware, the
                       generated headers, with the firmware's `demo_json.h` and
                       `firmware_config.h`), csr.csv, gateware/ (the Verilog and the ROM and
                       RAM init files the simulation reads)
@@ -53,7 +52,6 @@ SYS_CLK_HZ = 50_000_000
 FB_SIZE = (320, 240)
 TOP = "harness_sim"
 HARNESS = Path(__file__).resolve().parent.parent / "sim" / "soc_main.cpp"
-RISCV_GCC = tools.TOOLCHAINS / "riscv-gcc" / "bin"  # `scripts/setup_toolchains.py` puts it here
 RUN_TIMEOUT_S = 1800
 EXIT_CYCLE_LIMIT = 3
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -91,7 +89,7 @@ class SimResult:
 
 
 def plain(text: str) -> str:
-    """`text` without ANSI escape sequences (the BIOS colours its output) and carriage returns."""
+    """`text` without ANSI escape sequences (LiteX software may colour its output) and carriage returns."""
     return _ANSI.sub("", text).replace("\r", "")
 
 
@@ -127,48 +125,24 @@ def build_soc(sources: Sources, demo_json: bytes):
     return soc
 
 
-@contextlib.contextmanager
-def _toolchain_path():
-    """The repository's RISC-V GCC (`scripts/setup_toolchains.py`) first on PATH, for the
-    BIOS build (LiteX finds it there). No other GCC is used: a missing one is an error."""
-    gcc = RISCV_GCC / "riscv64-unknown-elf-gcc"
-    if not (gcc.is_file() and os.access(gcc, os.X_OK)):
-        raise FileNotFoundError(f"no RISC-V GCC at {gcc}: run scripts/setup_toolchains.py")
-    old = os.environ.get("PATH", "")
-    os.environ["PATH"] = f"{RISCV_GCC}{os.pathsep}{old}"
-    try:
-        yield
-    finally:
-        os.environ["PATH"] = old
-
-
 def _generate(
     soc,
     litex_dir: Path,
     *,
-    with_firmware: bool,
     fb_probes: Sequence[int],
     boot_demo_json: bytes | None,
 ) -> Path:
-    """Compile the firmware (or the BIOS) into the ROM and write the Verilog; return the
-    gateware directory."""
-    from litex.soc.integration.builder import Builder
-
-    options = {
-        "output_dir": str(litex_dir),
-        "compile_gateware": False,
-        "build_bundle": False,
-    }
-    if with_firmware:
-        builder = firmware.FirmwareBuilder(
-            soc, fb_probes=fb_probes, demo_json=boot_demo_json, **options
-        )
-    else:
-        if fb_probes or boot_demo_json is not None:
-            raise ValueError("fb_probes and boot_demo_json are firmware options")
-        builder = Builder(soc, compile_software=True, **options)
-    with _toolchain_path():
-        builder.build(build=False, run=False)
+    """Compile the firmware into the ROM and write the Verilog; return the gateware
+    directory."""
+    builder = firmware.FirmwareBuilder(
+        soc,
+        fb_probes=fb_probes,
+        demo_json=boot_demo_json,
+        output_dir=str(litex_dir),
+        compile_gateware=False,
+        build_bundle=False,
+    )
+    builder.build(build=False, run=False)
     gateware = Path(builder.gateware_dir)
     fragment = soc.get_fragment()
     soc.platform.finalize(fragment)
@@ -186,13 +160,12 @@ def run(
     *,
     out_dir: Path | None = None,
     timeout_s: float = RUN_TIMEOUT_S,
-    with_firmware: bool = True,
     fb_probes: Sequence[int] = (),
     boot_demo_json: bytes | None = None,
 ) -> SimResult:
     """Simulate the SoC with `sources`' project; see the module docstring.
 
-    `with_firmware=False` boots LiteX's BIOS instead of the firmware. `fb_probes`: the
+    `fb_probes`: the
     framebuffer pixels (`y * width + x`) the firmware reports in its `fb` console lines.
     `boot_demo_json`, for tests of the firmware's check at boot: the bytes embedded in the
     firmware instead of `demo_json` (which the build still validates).
@@ -213,7 +186,6 @@ def run(
     gateware = _generate(
         soc,
         out_dir / "litex",
-        with_firmware=with_firmware,
         fb_probes=fb_probes,
         boot_demo_json=boot_demo_json,
     )

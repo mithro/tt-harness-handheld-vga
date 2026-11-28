@@ -11,9 +11,9 @@ Two layers:
   levels (`sys_inputs()` lists them), so its crossings can be checked structurally
   (`tests/test_soc.py`, with `tests/cdc_structure.py`).
 - `HarnessSoC` (a LiteX `SoCCore`): VexRiscv (`standard`), UART at 115200 baud, timer,
-  integrated ROM (the BIOS), SRAM and main RAM, and the CSR modules `slot`, `gamepad`, `vga`,
-  `sevenseg`, `atspeed` and `info`, at fixed CSR locations (`CSR_LOCATIONS`) so their
-  addresses do not move between boards. Each register is described where it is made; the
+  integrated ROM (the firmware, `tt_harness.soc.firmware`), SRAM and main RAM, and the CSR
+  modules `slot`, `gamepad`, `vga`, `sevenseg`, `atspeed` and `info`, at fixed CSR locations
+  (`CSR_LOCATIONS`) so their addresses do not move between boards. Each register is described where it is made; the
   generated map with the firmware rules is `docs/registers.md`.
 - The test configuration, `HarnessSoC(..., cpu_type=None)`: the same CSR modules on a bus
   with no CPU, for register tests that drive the bus from a simulated master. It omits the

@@ -9,6 +9,8 @@ the simulation (`tt_harness.soc.sim`) and the board builds use it the same way,
 - writes the firmware's generated headers (`write_headers`: `demo_json.h`, the build's
   `demo.json` byte for byte, and `firmware_config.h`) next to LiteX's `csr.h`, after
   LiteX generates its own and before anything is compiled;
+- compiles with the repository's RISC-V GCC (`RISCV_GCC`) and no other: a missing one is a
+  `FileNotFoundError`, never a fall back to a GCC on PATH;
 - after the software is compiled, loads `firmware.bin` into the ROM (an image larger than
   the ROM is an error), so the gateware LiteX then writes boots the firmware.
 
@@ -23,16 +25,22 @@ This overrides two private methods of LiteX's `Builder` (`_generate_includes` an
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextlib
+import os
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from litex.soc.integration import soc as litex_soc
 from litex.soc.integration.builder import Builder
 
+from tt_harness import tools
 from tt_harness.soc import core
 from tt_harness.soc.core import shuttle_of
 
 FIRMWARE_DIR = Path(__file__).resolve().parent.parent.parent / "firmware"
+# The one RISC-V GCC the firmware is built with (`scripts/setup_toolchains.py` puts it here).
+RISCV_GCC = tools.TOOLCHAINS / "riscv-gcc" / "bin"
+GCC_TRIPLE = "riscv64-unknown-elf"
 PACKAGE = "firmware"
 IMAGE = "firmware.bin"
 
@@ -89,6 +97,25 @@ def write_headers(
     )
 
 
+@contextlib.contextmanager
+def pinned_gcc() -> Iterator[None]:
+    """`RISCV_GCC` first on PATH and LiteX told to use its triple, for the duration."""
+    gcc = RISCV_GCC / f"{GCC_TRIPLE}-gcc"
+    if not (gcc.is_file() and os.access(gcc, os.X_OK)):
+        raise FileNotFoundError(f"no RISC-V GCC at {gcc}: run scripts/setup_toolchains.py")
+    old = {k: os.environ.get(k) for k in ("PATH", "LITEX_ENV_CC_TRIPLE")}
+    os.environ["PATH"] = f"{RISCV_GCC}{os.pathsep}{old['PATH'] or ''}"
+    os.environ["LITEX_ENV_CC_TRIPLE"] = GCC_TRIPLE
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 class FirmwareBuilder(Builder):
     """LiteX's `Builder`, with the firmware in the ROM; see the module docstring."""
 
@@ -105,6 +132,10 @@ class FirmwareBuilder(Builder):
         self.boot_demo_json = demo_json
         self.add_software_package(PACKAGE, str(FIRMWARE_DIR))
         soc.integrated_rom_initialized = True  # no BIOS: the ROM is ours
+
+    def build(self, *args, **kwargs):
+        with pinned_gcc():
+            return super().build(*args, **kwargs)
 
     @property
     def firmware_dir(self) -> Path:
