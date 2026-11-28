@@ -205,6 +205,10 @@ def analyse(module, ports: dict, instances: dict[str, str]) -> Analysis:
                 )
             )
     for special, label in project_like:
+        if label in out.instance_inputs:
+            out.errors.append(
+                f"two instances are called {label}: their inputs cannot be told apart"
+            )
         out.instance_inputs[label] = {
             item.name: of(item.expr) for item in special.items if isinstance(item, Instance.Input)
         }

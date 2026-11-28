@@ -139,6 +139,29 @@ def test_every_project_input_depends_on_the_project_domain_only(top_and_analysis
     }
 
 
+def test_every_input_of_the_clocking_primitives_is_one_of_the_allowed_wires(
+    top_and_analysis,
+) -> None:
+    """The MMCM and the clock buffers take inputs too. Each one is named here with the domain
+    it may depend on, so a new wire from `sys` (or anywhere) into a primitive fails:
+
+    - `MMCME2_ADV`: its input clock, its own feedback, and `RST` (asynchronous to it; a `sys`
+      signal, undriven so far); every other input is a constant;
+    - `BUFG`: the MMCM output;
+    - `BUFGCE`: the MMCM output, and `CE` from the synchroniser in the free-running copy of
+      the project clock (`project_free`), never straight from `sys`.
+    """
+    _, a = top_and_analysis
+    assert set(a.instance_inputs) == {"project", *PRIMITIVES}
+    mmcm = a.instance_inputs["MMCME2_ADV"]
+    driven = {name: domains for name, domains in mmcm.items() if domains}
+    assert driven == {"CLKIN1": {"clock"}, "CLKFBIN": {"mmcm"}, "RST": {"sys"}}
+    constants = {"CLKIN2", "CLKINSEL", "PWRDWN", "DCLK", "DEN", "DWE", "DADDR", "DI"}
+    assert set(mmcm) - set(driven) == constants | {"PSCLK", "PSEN", "PSINCDEC"}
+    assert a.instance_inputs["BUFG"] == {"I": {"mmcm"}}
+    assert a.instance_inputs["BUFGCE"] == {"I": {"mmcm"}, "CE": {"project_free"}}
+
+
 def test_multireg_two_stages_is_two_flip_flops_in_the_emitted_verilog() -> None:
     """`n=2` is what Migen emits as two registers in the destination domain."""
 
