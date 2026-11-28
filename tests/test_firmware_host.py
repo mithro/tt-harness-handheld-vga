@@ -5,7 +5,7 @@ compiler (`cc`) and run behind the test `hal` of `tests/firmware/host_main.c`.
 The parser (`firmware/demo_parse.c`) must give the messages of `tt_harness.demo.validate`
 byte for byte, and the runner (`firmware/runner.c`) must make the writes of
 `tt_harness.demo.model.run`, event for event. The host program prints, for `parse`, either
-`ok` and the parsed demo or `errors` and every message (each ended by a NUL byte), and for
+`ok` and the parsed demo or `errors` and every message (each as its length and bytes), and for
 `run`, every write the runner makes through the `hal` (`T kind value`, `T` the runner's
 nominal time in ms) and every console line it logs (`log ...`).
 
@@ -17,8 +17,10 @@ form `model.run` and the traces use.
 from __future__ import annotations
 
 import json
+import math
 import random
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -94,8 +96,14 @@ def parse(host: Path, text: bytes, shuttle: str = SHUTTLE) -> tuple[str, list[st
         assert done.returncode == 0
         return "ok", rest.decode().splitlines()
     assert head == b"errors" and done.returncode == 1, done.stdout[:2000]
-    assert rest.endswith(b"\0")
-    return "errors", [m.decode("utf-8", errors="surrogateescape") for m in rest[:-1].split(b"\0")]
+    messages = []
+    while rest:
+        size, _, rest = rest.partition(b"\n")
+        n = int(size)
+        assert rest[n : n + 1] == b"\n"
+        messages.append(rest[:n].decode("utf-8", errors="surrogatepass"))
+        rest = rest[n + 1 :]
+    return "errors", messages
 
 
 def run(host: Path, demo: dict, until_ms: int, tick_ms: int = 1) -> tuple[list, list[str]]:
@@ -269,11 +277,46 @@ def test_the_entries_wrap_from_last_to_first(host: Path) -> None:
 
 
 NOT_JSON = (
-    b"", b" ", b"{", b"}", b"[1,]", b"[,1]", b"[1,,2]", b'{"a" "b"}', b'{"a":1,}', b'{"a":}',
-    b'{"a"}', b"01", b"-01", b"{} {}", b"1 2", b"tru", b"truex", b"nul", b'"\x01"', b"nan",
-    b"+1", b"{a:1}", b"[1:2]", b"1.", b".5", b"-", b"1e", b"1e+", b'"\\x"', b'"\\u12"', b"\x00",
-    b'{"a":1}\x00', b"\xef\xbb\xbf{}", b"[1}", b'{"a":1]', b"{1:2}", b'{"a":1 "b":2}',
-    b"Infinityx", b"--1", b"1.5e3.2",
+    b"",
+    b" ",
+    b"{",
+    b"}",
+    b"[1,]",
+    b"[,1]",
+    b"[1,,2]",
+    b'{"a" "b"}',
+    b'{"a":1,}',
+    b'{"a":}',
+    b'{"a"}',
+    b"01",
+    b"-01",
+    b"{} {}",
+    b"1 2",
+    b"tru",
+    b"truex",
+    b"nul",
+    b'"\x01"',
+    b"nan",
+    b"+1",
+    b"{a:1}",
+    b"[1:2]",
+    b"1.",
+    b".5",
+    b"-",
+    b"1e",
+    b"1e+",
+    b'"\\x"',
+    b'"\\u12"',
+    b"\x00",
+    b'{"a":1}\x00',
+    b"\xef\xbb\xbf{}",
+    b"[1}",
+    b'{"a":1]',
+    b"{1:2}",
+    b'{"a":1 "b":2}',
+    b"Infinityx",
+    b"--1",
+    b"1.5e3.2",
 )
 
 
@@ -300,8 +343,18 @@ def test_nan_and_infinity_are_values_as_in_python(host: Path) -> None:
     assert parse(host, text.encode()) == ("errors", validate.validate(json.loads(text), SHUTTLE))
 
 
-UTF8 = (b"\xff", b"{\x80}", b'"\xc3"', b'"\xe2\x28\xa1"', b'"\xe2\x82"', b'"\xed\xa0\x80"',
-        b'"\xf0\x9f\x98"', b'"\xc0\xaf"', b'"\xf4\x90\x80\x80"', b'"ok" \xe2')
+UTF8 = (
+    b"\xff",
+    b"{\x80}",
+    b'"\xc3"',
+    b'"\xe2\x28\xa1"',
+    b'"\xe2\x82"',
+    b'"\xed\xa0\x80"',
+    b'"\xf0\x9f\x98"',
+    b'"\xc0\xaf"',
+    b'"\xf4\x90\x80\x80"',
+    b'"ok" \xe2',
+)
 
 
 @pytest.mark.parametrize("text", UTF8, ids=lambda t: t.hex())
@@ -319,19 +372,19 @@ def test_a_repeated_key_is_not_valid_json(host: Path) -> None:
 
 
 def test_a_firmware_limit_is_a_loud_error(host: Path) -> None:
-    steps = [{"set": 1}, {"wait_ms": 1}] * 150  # 300 steps: valid, but more than the firmware holds
+    steps = [{"set": 1}, {"wait_ms": 1}] * 300  # 600 steps: valid, but more than the firmware holds
     demo = demo_of({**ONE, "steps": steps})
     assert validate.validate(demo, SHUTTLE) == []
     assert parse(host, json.dumps(demo).encode()) == (
         "errors",
-        ["firmware limit: more than 256 steps in all projects (DEMO_MAX_STEPS)"],
+        ["firmware limit: more than 512 steps in all projects (DEMO_MAX_STEPS)"],
     )
     pad = {"gamepad": [{"buttons": list(validate.GAMEPAD_BUTTONS[:11])}]}
-    demo = demo_of({**ONE, "steps": [pad] * 70 + [{"wait_ms": 1}]})  # 1,000-odd tokens
+    demo = demo_of({**ONE, "steps": [pad] * 125 + [{"wait_ms": 1}]})  # 2,100-odd tokens
     assert validate.validate(demo, SHUTTLE) == []
     assert parse(host, json.dumps(demo).encode()) == (
         "errors",
-        ["firmware limit: more than 1024 JSON tokens (DEMO_MAX_TOKENS)"],
+        ["firmware limit: more than 2048 JSON tokens (DEMO_MAX_TOKENS)"],
     )
     many = demo_of({**ONE, "steps": [1.5] * 200})  # more messages than the error buffer holds
     kind, messages = parse(host, json.dumps(many).encode())
@@ -354,12 +407,41 @@ def test_a_number_beyond_32_bits_is_a_loud_error(host: Path) -> None:
 # Python's str() of values, and messages of mutated files, against the validator ------------
 
 FLOATS = (
-    "0.0", "-0.0", "1.0", "1e22", "1e16", "1e15", "1e-5", "1e-4", "0.0001", "123456789.125",
-    "2.5e-7", "0.1", "0.30000000000000004", "1.7976931348623157e308", "1e309", "-1e400",
-    "5e-324", "4.9e-324", "2.4e-324", "2.5e-324", "1e-400", "2.2250738585072014e-308",
-    "2.2250738585072011e-308", "9007199254740993", "9007199254740993.0", "123.456e-2",
-    "0.000001234", "1234567890123456789012345678901234567890.0", "3.141592653589793238462643",
-    "1E+2", "1e-07", "100000000000000000000000.0", "8.98846567431158e307", "0.5", "-2.5e+300",
+    "0.0",
+    "-0.0",
+    "1.0",
+    "1e22",
+    "1e16",
+    "1e15",
+    "1e-5",
+    "1e-4",
+    "0.0001",
+    "123456789.125",
+    "2.5e-7",
+    "0.1",
+    "0.30000000000000004",
+    "1.7976931348623157e308",
+    "1e309",
+    "-1e400",
+    "5e-324",
+    "4.9e-324",
+    "2.4e-324",
+    "2.5e-324",
+    "1e-400",
+    "2.2250738585072014e-308",
+    "2.2250738585072011e-308",
+    "9007199254740993",
+    "9007199254740993.0",
+    "123.456e-2",
+    "0.000001234",
+    "1234567890123456789012345678901234567890.0",
+    "3.141592653589793238462643",
+    "1E+2",
+    "1e-07",
+    "100000000000000000000000.0",
+    "8.98846567431158e307",
+    "0.5",
+    "-2.5e+300",
 )
 
 
@@ -373,21 +455,42 @@ def test_python_str_of_numbers(host: Path) -> None:
         literals.append(f"{lit}e{rng.randrange(-330, 310)}")
     for _ in range(200):
         bits = rng.getrandbits(64)
-        f = __import__("struct").unpack("<d", bits.to_bytes(8, "little"))[0]
-        if f == f and f not in (float("inf"), float("-inf")):
+        f = struct.unpack("<d", bits.to_bytes(8, "little"))[0]
+        if math.isfinite(f):
             literals.append(repr(f))
     literals += ["-0", "0", "12345678901234567890123", "-99999999999999999999999999"]
-    steps = ",".join(f"[{lit}]" for lit in literals)
-    text = f'{{"version": 1, "shuttle": "{SHUTTLE}", "projects": [{{"address": 1, "subtile": 0, "duration_ms": 1, "clock_hz": 1, "ui_in": 0, "steps": [{steps}, {{"wait_ms": 1}}]}}]}}'
-    with pytest.raises(validate.DemoError) as raised:
-        validate.parse(text, SHUTTLE)
-    assert parse(host, text.encode()) == ("errors", raised.value.errors)
+    for at in range(0, len(literals), 40):  # 40 messages a file: within DEMO_ERRORS_TEXT
+        steps = ",".join(f"[{lit}]" for lit in literals[at : at + 40])
+        entry = (
+            '{"address": 1, "subtile": 0, "duration_ms": 1, "clock_hz": 1, "ui_in": 0, '
+            f'"steps": [{steps}, {{"wait_ms": 1}}]}}'
+        )
+        text = f'{{"version": 1, "shuttle": "{SHUTTLE}", "projects": [{entry}]}}'
+        with pytest.raises(validate.DemoError) as raised:
+            validate.parse(text, SHUTTLE)
+        assert parse(host, text.encode()) == ("errors", raised.value.errors)
 
 
 STRINGS = (
-    "", "a", "it's", 'say "hi"', "both ' and \"", "back\\slash", "tab\there", "nl\nx", "cr\rx",
-    "\x01\x1f\x7f", "\x80\x9f\xa0\xad", "é ü ß", "日本語", "\U0001f600", " ​﻿",
-    "", "\x00", "/", "\b\f",
+    "",
+    "a",
+    "it's",
+    'say "hi"',
+    "both ' and \"",
+    "back\\slash",
+    "tab\there",
+    "nl\nx",
+    "cr\rx",
+    "\x01\x1f\x7f",
+    "\x80\x9f\xa0\xad",
+    "é ü ß",
+    "日本語",
+    "\U0001f600",
+    "\u2028\u200b\ufeff",
+    "\ue000",
+    "\x00",
+    "/",
+    "\b\f",
 )
 
 
@@ -405,8 +508,12 @@ def _random_value(rng: random.Random, depth: int = 0):
         return rng.choice(STRINGS)
     if kind in (6, 7):
         return [_random_value(rng, depth + 1) for _ in range(rng.randrange(4))]
-    return {rng.choice(STRINGS + ("set", "wait_ms", "gamepad", "buttons")): _random_value(
-        rng, depth + 1) for _ in range(rng.randrange(4))}
+    return {
+        rng.choice(STRINGS + ("set", "wait_ms", "gamepad", "buttons")): _random_value(
+            rng, depth + 1
+        )
+        for _ in range(rng.randrange(4))
+    }
 
 
 def _mutate(rng: random.Random, conf):

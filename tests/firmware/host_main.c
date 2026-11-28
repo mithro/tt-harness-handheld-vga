@@ -4,8 +4,9 @@
 // call (tests/test_firmware_host.py builds and drives it). demo.json comes on stdin.
 //
 //     host parse SHUTTLE                 "ok\n" and the parsed demo, one line a project and
-//                                        one a step; or "errors\n" and every message, each
-//                                        ended by a NUL byte (exit status 1)
+//                                        one a step; or "errors\n" and every message as its
+//                                        length, a newline, its bytes and a newline (exit
+//                                        status 1)
 //     host run SHUTTLE UNTIL_MS TICK_MS  the runner ticked at 0, TICK_MS, 2 * TICK_MS, ...
 //                                        and at UNTIL_MS: every hal write as "T kind value"
 //                                        (T: the runner's nominal time of the write) and
@@ -90,9 +91,11 @@ int main(int argc, char **argv) {
             return 0;
         }
         printf("errors\n");
-        for (uint32_t i = 0; errors_get(&errs, i); i++) {
-            const char *m = errors_get(&errs, i);
-            fwrite(m, 1, strlen(m) + 1, stdout);
+        uint32_t len;
+        for (uint32_t i = 0; errors_get(&errs, i, &len); i++) {
+            printf("%lu\n", (unsigned long)len);
+            fwrite(errors_get(&errs, i, &len), 1, len, stdout);
+            printf("\n");
         }
         return 1;
     }
@@ -104,7 +107,8 @@ int main(int argc, char **argv) {
             return 2;
         }
         if (demo_parse(input, n, argv[2], &demo, &errs) != 0) {
-            fprintf(stderr, "demo.json refused: %s\n", errors_get(&errs, 0));
+            uint32_t len;
+            fprintf(stderr, "demo.json refused: %s\n", errors_get(&errs, 0, &len));
             return 2;
         }
         runner_init(&runner, &demo, &host_hal);
