@@ -151,6 +151,12 @@ def test_the_project_name_names_the_shuttle() -> None:
         soc_for_test(project_name="tt_um_test")
 
 
+@pytest.mark.parametrize("clock_hz", [0, 383_999])
+def test_audio_needs_a_running_clock_of_at_least_384_khz(clock_hz: int) -> None:
+    with pytest.raises(ValueError, match=f"audio needs a project clock.*not {clock_hz}"):
+        soc_for_test(slot=sim_slot(clock_hz), demo_json=demo(clock_hz=clock_hz), with_audio=True)
+
+
 def test_the_achieved_clock_is_the_exact_rational_of_the_mmcm_setting() -> None:
     slot = ProjectSlot(None, Signal(), 100_000_000, 25_175_000)
     assert core.achieved_clock(slot) == (3_600_000_000, 143)  # 100 MHz x 9 / 35.75

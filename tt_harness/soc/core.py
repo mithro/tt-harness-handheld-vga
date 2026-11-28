@@ -15,6 +15,10 @@ Two layers:
   `sevenseg`, `atspeed` and `info`, at fixed CSR locations (`CSR_LOCATIONS`) so their
   addresses do not move between boards. Each register is described where it is made; the
   generated map with the firmware rules is `docs/registers.md`.
+- The test configuration, `HarnessSoC(..., cpu_type=None)`: the same CSR modules on a bus
+  with no CPU, for register tests that drive the bus from a simulated master. It omits the
+  CPU, the ROM, the SRAM, the main RAM and the UART (whose FIFOs do not run in Migen's
+  simulator, and which nothing would use); the CSR map is otherwise the same.
 
 Crossings added here (the slot's and the check's are in their modules):
 
@@ -69,7 +73,7 @@ PMODS: tuple[str, ...] = (
 CSR_MODULES: tuple[str, ...] = ("slot", "gamepad", "vga", "sevenseg", "atspeed", "info")
 CSR_LOCATIONS = {name: 16 + i for i, name in enumerate(CSR_MODULES)}
 UART_BAUD = 115200
-ROM_SIZE = 0x10000  # the Builder shrinks it to the BIOS
+ROM_SIZE = 0x8000  # the BIOS is about 23 KiB; the ROM is this size whatever it holds
 SRAM_SIZE = 0x2000
 MAIN_RAM_SIZE = 0x8000  # for the firmware
 SEVENSEG_FRAME_HZ = 60  # the seven-segment window is about one display frame
@@ -122,11 +126,15 @@ def achieved_clock(slot: ProjectSlot) -> tuple[int, int]:
     """The project clock the slot produces, exactly, as (numerator, denominator) in Hz.
 
     From the MMCM setting: `clk_in_hz * CLKFBOUT_MULT_F / (DIVCLK_DIVIDE * CLKOUT0_DIVIDE_F)`,
-    both dividers multiples of 1/8. In a simulation build the bench drives the requested
-    clock (`clock_hz / 1`); a stopped clock (`clock_hz` 0) is `0 / 1`.
+    both dividers multiples of 1/8. In a simulation build (`slot.sim_clock`) the bench drives
+    exactly the requested clock (`clock_hz / 1`); a stopped clock (`clock_hz` 0, no MMCM)
+    is `0 / 1`.
     """
-    if slot.clock is None:
+    if slot.sim_clock:
         return slot.clock_hz, 1
+    if slot.clock is None:
+        assert slot.clock_hz == 0
+        return 0, 1
     s = slot.clock.setting
     f = Fraction(s.clk_in_hz) * Fraction(s.mult) / (s.divclk * Fraction(s.div))
     return f.numerator, f.denominator
@@ -259,8 +267,8 @@ class HarnessCore(Module):
         self.audio = None
         self.audio_sample = Signal((16, True))
         self.audio_valid = Signal()
-        if with_audio and slot.clock_hz > 0:
-            if slot.clock_hz < 8 * 48_000:
+        if with_audio:
+            if slot.clock_hz < 8 * 48_000:  # including 0: a stopped clock makes no sound
                 raise ValueError(
                     f"audio needs a project clock of at least {8 * 48_000} Hz, "
                     f"not {slot.clock_hz}: build without audio"
@@ -580,8 +588,8 @@ class HarnessSoC(SoCCore):
     provide `serial`, and the caller adds the CRG (`sys` domain). `project_name` is the
     manifest id `<shuttle>/<macro>`. `pmods`: the project's declared Pmods (`PMODS`).
     `reference_ui_in`: the reference stimulus' fixed `ui_in`, for the at-speed check.
-    `cpu_type=None` builds the SoC without a CPU and so without the UART (register tests drive
-    the bus instead; the UART's FIFOs also do not run in Migen's simulator);
+    `cpu_type=None` is the test configuration (module docstring): no CPU, ROM, SRAM, main
+    RAM or UART, only the CSR bus, which a register test drives from a simulated master.
     `sevenseg_window_log2` overrides the window chosen from the clock.
     """
 
