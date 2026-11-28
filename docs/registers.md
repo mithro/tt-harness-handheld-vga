@@ -49,6 +49,188 @@ uv run python -m tt_harness.soc.registers
 - `clock_running` reads 1 for a project clock of 1 MHz and up, and flickers below about
   0.39 MHz.
 
+## The firmware
+
+The demo build runs [`firmware/`](../firmware) from the ROM, in place of LiteX's BIOS:
+[`tt_harness/soc/firmware.py`](../tt_harness/soc/firmware.py) (`FirmwareBuilder`) builds it
+as a LiteX software package with the [RISC-V GCC](toolchains.md) and loads the image into
+the ROM. The simulation ([`tt_harness/soc/sim.py`](../tt_harness/soc/sim.py)) and the board
+builds use it the same way. At boot it
+
+1. puts the slot in its power-up state: `ena` 0, `rst_n` 0, clock stopped, no gamepad, capture
+   blanked;
+2. checks the embedded `demo.json` ([`demo_parse.c`](../firmware/demo_parse.c), the messages of
+   [`tt_harness/demo/validate.py`](../tt_harness/demo/validate.py) byte for byte) and the
+   build's own conditions (one project; its `clock_hz` is the slot's);
+3. runs it with the demo board's runner ([`runner.c`](../firmware/runner.c),
+   [`docs/demo-runner.md`](demo-runner.md)): the selection writes `ena`, the clock and `ui_in`
+   (and the first steps), then `rst_n` is released once;
+4. reports the clock, classifies the VGA mode from the measured counters once `locked`
+   ([`vga_mode.c`](../firmware/vga_mode.c), the C form of `vga.classify`) and programs the
+   capture with it.
+
+| Memory | Size | Holds |
+| --- | --- | --- |
+| `rom` | 64 KiB | code |
+| `rom` | 64 KiB | read-only data |
+| `rom` | 64 KiB | `demo.json` |
+| `rom` | 64 KiB | the `str.isprintable` table (`py_printable.h`) |
+| `rom` | 64 KiB | the initial values of data |
+| `main_ram` | 64 KiB | data |
+| `main_ram` | 64 KiB | the parsed demo |
+| `main_ram` | 64 KiB | the parser's JSON tokens |
+| `main_ram` | 64 KiB | the console ring |
+| `sram` | 8 KiB | the stack |
+
+### Console
+
+The UART (115200 baud) carries one line per event: a word or two, then `key=value` fields
+separated by spaces. Lines are queued in a 4 KiB ring and sent from the main loop, so logging
+does not delay the slot writes; a full ring waits, and no line is dropped or cut. `t_ms` is
+milliseconds since boot.
+
+#### `boot`
+
+| Field | Value |
+| --- | --- |
+| `project` | `<shuttle>/<macro>` |
+| `sys_hz` | system clock in Hz |
+| `clock_hz` | `info_clock_hz` |
+| `fb_width` | `info_fb_width` |
+| `fb_height` | `info_fb_height` |
+| `demo_json_bytes` | size of the embedded file |
+
+#### `demo ok`
+
+| Field | Value |
+| --- | --- |
+| `projects` | number of projects |
+| `steps` | number of steps in all projects |
+
+#### `demo error`
+
+| Field | Value |
+| --- | --- |
+| `count` | number of `error msg=` lines after it |
+
+#### `error msg=`
+
+The rest of the line is one message, whole, with `\` and control characters escaped:
+
+| Byte | Written as |
+| --- | --- |
+| `\` | `\\` |
+| newline | `\n` |
+| carriage return | `\r` |
+| other below 0x20 | `\xNN` |
+| 0x7f | `\x7f` |
+
+#### `error display`
+
+One line, once the project is held off (see "The error pattern"):
+
+| Field | Value |
+| --- | --- |
+| `sevenseg_error` | `sevenseg_error` read back, decimal |
+| `ena` | `slot_ena` read back |
+| `rst_n` | `slot_rst_n` read back |
+| `clock_enable` | `slot_clock_enable` read back |
+| `ui_in` | `slot_ui_in` read back, decimal |
+
+#### `state`, the selection
+
+| Field | Value |
+| --- | --- |
+| `t_ms` | time of the runner's event |
+| `entry` | index of the selected project |
+| `address` | its address |
+| `subtile` | its subtile |
+
+#### `state`, a write
+
+One field after `t_ms`, the value the runner wrote:
+
+| Field | Value |
+| --- | --- |
+| `ena` | `1` |
+| `clock_hz` | the requested clock |
+| `ui_in` | decimal |
+| `gamepad` | the report word: `0x` and six hex digits |
+| `rst_n` | the level |
+
+#### `state`, the release after the selection
+
+| Field | Value |
+| --- | --- |
+| `t_ms` | time of the release |
+| `rst_n` | `1` |
+| `source` | `enable` |
+
+#### `clock`
+
+| Field | Value |
+| --- | --- |
+| `t_ms` | time of the change |
+| `hz` | `info_clock_hz` |
+| `achieved_num` | `info_clock_hz_num` |
+| `achieved_den` | `info_clock_hz_den` |
+| `locked` | `slot_status.locked` |
+| `running` | `slot_status.clock_running` |
+
+#### `mode`
+
+`status` is `ok` (a known mode, the capture programmed), `unknown` (a steady timing that is
+no known mode) or `no_signal`. The fields present for each:
+
+| Field | Value | `ok` | `unknown` | `no_signal` |
+| --- | --- | --- | --- | --- |
+| `t_ms` | time of the change | yes | yes | yes |
+| `status` | the state of the signal | yes | yes | yes |
+| `name` | the table's row, such as `640x480@60` | yes | no | no |
+| `refresh_hz` | `clock_hz / (clocks_per_line * lines_per_frame)` to one decimal | yes | no | no |
+| `divider` | `vga_divider` written | yes | no | no |
+| `h_offset` | `vga_h_offset` written | yes | no | no |
+| `v_offset` | `vga_v_offset` written | yes | no | no |
+| `h_step` | `vga_h_step` written | yes | no | no |
+| `v_step` | `vga_v_step` written | yes | no | no |
+| `clocks_per_line` | measured | yes | yes | no |
+| `lines_per_frame` | measured | yes | yes | no |
+| `hsync_width` | measured | yes | yes | no |
+| `vsync_lines` | measured | yes | yes | no |
+| `hsync_positive` | `vga_status.hsync_positive` | yes | yes | no |
+| `vsync_positive` | `vga_status.vsync_positive` | yes | yes | no |
+
+#### `fb`
+
+| Field | Value |
+| --- | --- |
+| `t_ms` | time of the readout |
+| `frames` | `vga_frames` |
+| `pixels` | `addr:RR` pairs with a comma between them (`RR`: `vga_readback_data` in hex) |
+
+- A `clock` line is printed for the first status and then for each change that has held 50 ms
+  (`clock_running` flickers for a slow clock).
+- A `mode` line is printed for each change of the measurement once it is `locked`, or when the
+  signal is lost. `unknown` blanks the capture (`vga_blank` 1). A measurement that does not
+  hold still for a few reads is skipped until the next pass.
+- `fb` lines are printed every 20 ms, and only in builds given framebuffer probes
+  (`sim.run(fb_probes=...)`).
+- The `state` lines are the runner's writes in its order; the `gamepad` word is player 1 in
+  bits 23..12 and player 2 in bits 11..0 (`0xfff` absent), as `gamepad_buttons`.
+
+### The error pattern
+
+On an invalid `demo.json`, or one this build cannot run, the firmware prints `demo error` and
+every message, and never enables the project: `ena` 0, `rst_n` 0, the clock stopped, and
+nothing written to `slot_ui_in`, so the project's inputs stay at their reset value. It writes
+`SEVENSEG_ERROR_PATTERN` to `sevenseg_error`, the harness's own error display, which the host
+side shows; the pattern never reaches the project. `sevenseg_error` is 0 while there is no
+error.
+
+| Constant | Value | Segments |
+| --- | --- | --- |
+| `SEVENSEG_ERROR_PATTERN` ([`main.c`](../firmware/main.c)) | `0x79` | `E`: a, d, e, f, g |
+
 <!-- BEGIN GENERATED CSR MAP (uv run python -m tt_harness.soc.registers) -->
 
 ## CSR map
@@ -244,6 +426,7 @@ The pixel at `readback_addr`, valid one system clock after the address is writte
 | Register | Address | Words | Bits | Access | Reset |
 |---|---|---|---|---|---|
 | `sevenseg_duty` | `0xf0009800` | 2 | 64 | read-only | - |
+| `sevenseg_error` | `0xf0009808` | 1 | 8 | read-write | `0x0` |
 
 #### `sevenseg_duty`
 
@@ -268,6 +451,30 @@ The virtual seven-segment display's brightness, one byte a segment.
 - `f`: Duty of `uo_out[5]` (segment f) over the last window of 2**19 project clocks: 0 never lit to 255 always lit.
 - `g`: Duty of `uo_out[6]` (segment g) over the last window of 2**19 project clocks: 0 never lit to 255 always lit.
 - `dp`: Duty of `uo_out[7]` (segment dp) over the last window of 2**19 project clocks: 0 never lit to 255 always lit.
+
+#### `sevenseg_error`
+
+The harness's error display: a seven-segment pattern, bit i the segment of `uo_out[i]`; 0 is no error. The firmware sets it when it refuses demo.json; the host shows it. It never reaches the project.
+
+| Field | Bits | Access | Reset |
+|---|---|---|---|
+| `a` | 0 | read-write | `0x0` |
+| `b` | 1 | read-write | `0x0` |
+| `c` | 2 | read-write | `0x0` |
+| `d` | 3 | read-write | `0x0` |
+| `e` | 4 | read-write | `0x0` |
+| `f` | 5 | read-write | `0x0` |
+| `g` | 6 | read-write | `0x0` |
+| `dp` | 7 | read-write | `0x0` |
+
+- `a`: Segment a of the error pattern.
+- `b`: Segment b of the error pattern.
+- `c`: Segment c of the error pattern.
+- `d`: Segment d of the error pattern.
+- `e`: Segment e of the error pattern.
+- `f`: Segment f of the error pattern.
+- `g`: Segment g of the error pattern.
+- `dp`: Segment dp of the error pattern.
 
 ### `atspeed`
 

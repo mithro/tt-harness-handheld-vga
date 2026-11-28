@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """The LiteX SoC of the demo build (`tt_harness/soc/`): its register map, its registers on the
-bus, its crossings, and the BIOS booting in Verilator.
+bus, its crossings, and the firmware booting in Verilator.
 
 - `test_csr_map_is_documented_and_current`: `docs/registers.md` is the generated CSR map of
   the reference configuration (`tt_harness.soc.registers`), every harness register and field
@@ -10,8 +10,9 @@ bus, its crossings, and the BIOS booting in Verilator.
   `uo_out`: every writable register reads back what was written and reaches the block it
   controls, the build facts read as built, and the measured timing, the framebuffer, the
   seven-segment duty and an at-speed CRC are read back through the registers.
-- `test_bios_boots_and_prints_banner` (`toolchain`: Verilator and the RISC-V GCC): the whole
-  SoC with VexRiscv and a real project, the BIOS compiled and run, its UART decoded.
+- `test_soc_boots_and_prints_banner` (`toolchain`: Verilator and the RISC-V GCC): the whole
+  SoC with VexRiscv and a project, the firmware (`firmware/`) compiled into the ROM and run,
+  its first console lines decoded from the UART.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import types
 import zlib
 from pathlib import Path
 
@@ -36,7 +38,7 @@ from tt_harness.core.slot import ProjectSlot
 from tt_harness.demo.validate import DemoError
 from tt_harness.fetch import Sources
 from tt_harness.manifest import Project
-from tt_harness.soc import core, registers, sim
+from tt_harness.soc import core, firmware, registers, sim
 
 REPO = Path(__file__).resolve().parent.parent
 DATA = Path(__file__).resolve().parent / "data"
@@ -274,6 +276,7 @@ PATTERNS = {
     "vga_blank": 1,
     "vga_readback_addr": 7,
     "atspeed_clocks": 0xDEADBEEF,
+    "sevenseg_error": 0x79,
 }
 PROJECT_PERIOD = 20_400  # ps: about 49 MHz, unrelated to the 20 ns system clock
 WATCHDOG_CYCLES = 5_000  # system clocks; the bus generators here end within about 1_700
@@ -414,6 +417,18 @@ def test_registers_read_back() -> None:
     assert seen.get("done")
 
 
+def test_achieved_clock_refuses_a_slot_with_no_generator_and_a_rate() -> None:
+    """A slot with no clock generator can only be a stopped clock: a ValueError, even
+    under `python -O`, rather than an assert."""
+    slot = types.SimpleNamespace(sim_clock=False, clock=None, clock_hz=25_175_000)
+    with pytest.raises(ValueError, match="no clock generator but clock_hz is 25175000"):
+        core.achieved_clock(slot)
+    assert core.achieved_clock(types.SimpleNamespace(sim_clock=False, clock=None, clock_hz=0)) == (
+        0,
+        1,
+    )
+
+
 def test_with_clock_hz_0_no_register_waits_on_the_project_clock() -> None:
     """`clock_hz` 0 (review focus 2): no project clock at all, from power-up. Every register
     access completes, the reset is pulsed, an at-speed check is started and aborted, and the
@@ -430,6 +445,9 @@ def test_with_clock_hz_0_no_register_waits_on_the_project_clock() -> None:
             yield from write(name, value)
             assert (yield from read(name)) == value, name
         yield from write("slot_rst_n", 0)
+        yield from _wait(5)
+        # with no project clock the reset is still asserted: the flops clear asynchronously
+        assert (yield bus.soc.core.slot.pin_rst_n) == 0
         yield from write("slot_rst_n", 1)
         assert (yield from read("slot_rst_n")) == 1
         yield from write("atspeed_clocks", 40)
@@ -450,7 +468,7 @@ def test_with_clock_hz_0_no_register_waits_on_the_project_clock() -> None:
     assert seen.get("done")
 
 
-# The BIOS in Verilator ------------------------------------------------------------------------
+# The firmware in Verilator ---------------------------------------------------------------------
 
 
 def _counter() -> Sources:
@@ -477,18 +495,23 @@ def _counter() -> Sources:
 @pytest.mark.toolchain
 @pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
 @pytest.mark.skipif(
-    not (sim.RISCV_GCC / "riscv64-unknown-elf-gcc").is_file(), reason="no RISC-V GCC"
+    not (firmware.RISCV_GCC / f"{firmware.GCC_TRIPLE}-gcc").is_file(), reason="no RISC-V GCC"
 )
-def test_bios_boots_and_prints_banner(tmp_path: Path) -> None:
+def test_soc_boots_and_prints_banner(tmp_path: Path) -> None:
+    def booted(text: str) -> bool:
+        return "\ndemo ok " in sim.plain(text) and sim.plain(text).count("\n") >= 2
+
     result = sim.run(
         _counter(),
         demo(),
-        until=lambda text: "litex> " in sim.plain(text),
-        max_cycles=40_000_000,
+        until=booted,
+        max_cycles=20_000_000,
         out_dir=tmp_path,
     )
     assert result.reached_until, result.text[-2000:]
-    text = result.plain
-    for phrase in ("Build your hardware, easily!", "BIOS CRC passed", "VexRiscv", "Memtest OK"):
-        assert phrase in text, phrase
-    assert text.index("Build your hardware") < text.index("litex> ")
+    lines = result.plain.splitlines()
+    assert lines[0] == (
+        f"boot project=tt00/tt_um_test_counter sys_hz={SYS_HZ} clock_hz={CLOCK_HZ}"
+        f" fb_width=320 fb_height=240 demo_json_bytes={len(demo())}"
+    )
+    assert lines[1] == "demo ok projects=1 steps=0"

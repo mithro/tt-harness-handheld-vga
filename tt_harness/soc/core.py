@@ -11,9 +11,9 @@ Two layers:
   levels (`sys_inputs()` lists them), so its crossings can be checked structurally
   (`tests/test_soc.py`, with `tests/cdc_structure.py`).
 - `HarnessSoC` (a LiteX `SoCCore`): VexRiscv (`standard`), UART at 115200 baud, timer,
-  integrated ROM (the BIOS), SRAM and main RAM, and the CSR modules `slot`, `gamepad`, `vga`,
-  `sevenseg`, `atspeed` and `info`, at fixed CSR locations (`CSR_LOCATIONS`) so their
-  addresses do not move between boards. Each register is described where it is made; the
+  integrated ROM (the firmware, `tt_harness.soc.firmware`), SRAM and main RAM, and the CSR
+  modules `slot`, `gamepad`, `vga`, `sevenseg`, `atspeed` and `info`, at fixed CSR locations
+  (`CSR_LOCATIONS`) so their addresses do not move between boards. Each register is described where it is made; the
   generated map with the firmware rules is `docs/registers.md`.
 - The test configuration, `HarnessSoC(..., cpu_type=None)`: the same CSR modules on a bus
   with no CPU, for register tests that drive the bus from a simulated master. It omits the
@@ -35,7 +35,8 @@ register, so a design that stops producing sync is blanked without the firmware 
 "no signal" picture, never a frozen frame) as long as the project clock runs.
 
 `demo.json` is validated at build time with the configurator's messages (an invalid file is a
-`DemoError`), must hold exactly one project, and only its `clock_hz` is used, to check that
+`DemoError`), must fit the firmware's limits (`tt_harness.soc.limits`, the messages the
+firmware gives at boot), must hold exactly one project, and only its `clock_hz` is used, to check that
 the slot was built for it; the bytes go into the firmware image unchanged through the C
 header `demo_json_header` writes.
 """
@@ -59,6 +60,7 @@ from tt_harness.core.sevenseg import SevenSegSampler
 from tt_harness.core.slot import ProjectSlot
 from tt_harness.core.vga import PIXEL_BITS, Framebuffer, VgaCapture, VgaTiming
 from tt_harness.demo.validate import DemoError, Entry, parse
+from tt_harness.soc import limits
 
 # The Pmods a project may declare (the manifest's `pmods`); bit n of `info_pmods` is PMODS[n].
 PMODS: tuple[str, ...] = (
@@ -73,9 +75,12 @@ PMODS: tuple[str, ...] = (
 CSR_MODULES: tuple[str, ...] = ("slot", "gamepad", "vga", "sevenseg", "atspeed", "info")
 CSR_LOCATIONS = {name: 16 + i for i, name in enumerate(CSR_MODULES)}
 UART_BAUD = 115200
-ROM_SIZE = 0x8000  # the BIOS is about 23 KiB; the ROM is this size whatever it holds
+# The ROM holds the firmware (`tt_harness.soc.firmware`), its str.isprintable() table and
+# demo.json: about 41 KiB with the largest shipped demo.json, so the next power of two
+# (`tests/test_firmware_build.py` checks the fit with that file).
+ROM_SIZE = 0x10000
 SRAM_SIZE = 0x2000
-MAIN_RAM_SIZE = 0x8000  # for the firmware
+MAIN_RAM_SIZE = 0x10000  # the firmware's data: the parser's 32 KiB of JSON tokens and the rest
 SEVENSEG_FRAME_HZ = 60  # the seven-segment window is about one display frame
 # (name, bits) of the timing word, low bits first.
 TIMING_FIELDS: tuple[tuple[str, int], ...] = (
@@ -115,6 +120,9 @@ def demo_entry(demo_json: bytes, shuttle: str) -> Entry:
     except UnicodeDecodeError as e:
         raise DemoError([f"not UTF-8: {e}"]) from e
     demo = parse(text, shuttle)
+    over = limits.check(text, shuttle)  # what the firmware cannot hold, as it says at boot
+    if over:
+        raise DemoError(over)
     if len(demo.projects) != 1:
         raise DemoError(
             [f"this build runs exactly one project; demo.json has {len(demo.projects)}"]
@@ -133,7 +141,8 @@ def achieved_clock(slot: ProjectSlot) -> tuple[int, int]:
     if slot.sim_clock:
         return slot.clock_hz, 1
     if slot.clock is None:
-        assert slot.clock_hz == 0
+        if slot.clock_hz != 0:
+            raise ValueError(f"the slot has no clock generator but clock_hz is {slot.clock_hz}")
         return 0, 1
     s = slot.clock.setting
     f = Fraction(s.clk_in_hz) * Fraction(s.mult) / (s.divclk * Fraction(s.div))
@@ -489,6 +498,18 @@ class SevenSegCSR(LiteXModule, AutoCSR):
             getattr(self._duty.fields, seg).eq(core.duty[8 * i : 8 * i + 8])
             for i, seg in enumerate(SEGMENTS)
         ]
+        self._error = CSRStorage(
+            fields=[
+                CSRField(seg, size=1, description=f"Segment {seg} of the error pattern.")
+                for seg in SEGMENTS
+            ],
+            description=(
+                "The harness's error display: a seven-segment pattern, bit i the segment of"
+                " `uo_out[i]`; 0 is no error. The firmware sets it when it refuses demo.json;"
+                " the host shows it. It never reaches the project."
+            ),
+        )
+        self.error = self._error.storage
 
 
 class AtSpeedCSR(LiteXModule, AutoCSR):
