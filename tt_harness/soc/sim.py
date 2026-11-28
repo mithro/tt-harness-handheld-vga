@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import select
 import subprocess
 import time
@@ -51,6 +52,7 @@ TOP = "harness_sim"
 HARNESS = Path(__file__).resolve().parent.parent / "sim" / "soc_main.cpp"
 RUN_TIMEOUT_S = 1800
 EXIT_CYCLE_LIMIT = 3
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 _IO = (
     ("sys_clk", 0, Pins(1)),
@@ -77,6 +79,16 @@ class SimResult:
     @property
     def text(self) -> str:
         return self.uart.decode("utf-8", errors="replace")
+
+    @property
+    def plain(self) -> str:
+        """`text` without ANSI escape sequences and carriage returns."""
+        return plain(self.text)
+
+
+def plain(text: str) -> str:
+    """`text` without ANSI escape sequences (the BIOS colours its output) and carriage returns."""
+    return _ANSI.sub("", text).replace("\r", "")
 
 
 def platform() -> SimPlatform:
@@ -143,7 +155,8 @@ def _generate(soc, litex_dir: Path) -> Path:
     fragment = soc.get_fragment()
     soc.platform.finalize(fragment)
     output = soc.platform.get_verilog(fragment, name=TOP)
-    output.write(str(gateware / f"{TOP}.v"))
+    with contextlib.chdir(gateware):  # the memory init files are written to the cwd
+        output.write(f"{TOP}.v")
     return gateware
 
 
@@ -193,27 +206,34 @@ def run(
     ]
     received = bytearray()
     reached = False
-    with log.open("a") as err:
+    # The UART bytes come on a pipe of their own: Verilator prints its messages on stdout.
+    uart_r, uart_w = os.pipe()
+    cmd += ["--uart-fd", str(uart_w)]
+    with log.open("a") as err, os.fdopen(uart_r, "rb", buffering=0) as uart:
         err.write("$ " + " ".join(cmd) + "\n")
         err.flush()
-        proc = subprocess.Popen(
-            cmd,
-            cwd=gateware,
-            stdout=subprocess.PIPE,
-            stderr=err,
-            env=dict(os.environ, TMPDIR=str(verilate.scratch_dir())),
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=gateware,
+                stdout=err,
+                stderr=err,
+                pass_fds=(uart_w,),
+                env=dict(os.environ, TMPDIR=str(verilate.scratch_dir())),
+                start_new_session=True,
+            )
+        finally:
+            os.close(uart_w)
         deadline = time.monotonic() + timeout_s
         timed_out = False
         try:
             while True:
                 left = deadline - time.monotonic()
-                ready, _, _ = select.select([proc.stdout], [], [], max(left, 0))
+                ready, _, _ = select.select([uart], [], [], max(left, 0))
                 if not ready:
                     timed_out = True
                     break
-                chunk = os.read(proc.stdout.fileno(), 4096)
+                chunk = os.read(uart.fileno(), 4096)
                 if not chunk:
                     break
                 received += chunk
@@ -223,7 +243,6 @@ def run(
         finally:
             if proc.poll() is None:
                 verilate.kill_group(proc)
-            proc.stdout.close()
             proc.wait()
     uart_file.write_bytes(bytes(received))
     if timed_out:

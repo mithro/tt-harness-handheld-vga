@@ -405,12 +405,12 @@ def test_bios_boots_and_prints_banner(tmp_path: Path) -> None:
     result = sim.run(
         _counter(),
         demo(),
-        until=lambda text: "litex> " in text,
+        until=lambda text: "litex> " in sim.plain(text),
         max_cycles=40_000_000,
         out_dir=tmp_path,
     )
     assert result.reached_until, result.text[-2000:]
-    text = result.text
+    text = result.plain
     for phrase in ("Build your hardware, easily!", "BIOS CRC passed", "VexRiscv", "Memtest OK"):
         assert phrase in text, phrase
     assert text.index("Build your hardware") < text.index("litex> ")

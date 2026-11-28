@@ -2,18 +2,20 @@
 //
 // Verilator harness for the demo build's SoC (tt_harness/soc/sim.py).
 //
-//     Vtop --sys-hz S --project-hz P --baud B --max-cycles M
+//     Vtop --sys-hz S --project-hz P --baud B --max-cycles M --uart-fd F
 //
 // Drives two unrelated clocks: sys_clk at S Hz and project_clk at P Hz (P = 0: the
 // project clock never toggles, as with clock_hz 0). Edges are scheduled on an exact
 // picosecond grid, edge k of a clock at floor(k * 1e12 / (2 f)), so the long-run rate is
 // exact. sys_rst is held high for the first 16 system cycles. The UART line serial_tx
 // is decoded as 8N1 at B baud, sampled in the middle of each bit in system cycles, and
-// every received byte is written to standard output at once (unbuffered), so a reader
-// can stop the simulation when it has seen enough. serial_rx is held idle (1).
+// every received byte is written at once (unbuffered) to file descriptor F, a pipe of its
+// own (Verilator prints its messages on standard output), so a reader can stop the
+// simulation when it has seen enough. serial_rx is held idle (1).
 //
 // Exit status: 2 bad arguments; 3 the cycle limit was reached; 4 framing error (a stop
-// bit that is 0). The simulation otherwise runs until it is killed.
+// bit that is 0); 5 the UART output cannot be written. The simulation otherwise runs
+// until it is killed.
 
 #include <cerrno>
 #include <cstdint>
@@ -35,7 +37,7 @@ constexpr uint64_t kPsPerSecond = 1000000000000ULL;
 [[noreturn]] void usage(const char* why) {
     std::fprintf(stderr,
                  "soc_main: %s\n"
-                 "usage: Vtop --sys-hz S --project-hz P --baud B --max-cycles M\n",
+                 "usage: Vtop --sys-hz S --project-hz P --baud B --max-cycles M --uart-fd F\n",
                  why);
     std::exit(2);
 }
@@ -98,7 +100,8 @@ struct Uart {
 
 int main(int argc, char** argv) {
     uint64_t sys_hz = 0, project_hz = 0, baud = 0, max_cycles = 0;
-    bool have[4] = {false, false, false, false};
+    uint64_t uart_fd = 0;
+    bool have[5] = {false, false, false, false, false};
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         if (a.rfind("+verilator", 0) == 0) continue;
@@ -116,11 +119,14 @@ int main(int argc, char** argv) {
         } else if (a == "--max-cycles") {
             max_cycles = parse_u64("--max-cycles", v);
             have[3] = true;
+        } else if (a == "--uart-fd") {
+            uart_fd = parse_u64("--uart-fd", v);
+            have[4] = true;
         } else {
             usage(("unknown argument " + a).c_str());
         }
     }
-    if (!(have[0] && have[1] && have[2] && have[3])) usage("all four options are required");
+    if (!(have[0] && have[1] && have[2] && have[3] && have[4])) usage("all five options are required");
     if (sys_hz == 0 || baud == 0 || baud * 4 > sys_hz) usage("need 0 < 4 * baud <= sys-hz");
 
     auto context = std::make_unique<VerilatedContext>();
@@ -164,7 +170,7 @@ int main(int argc, char** argv) {
         }
         if (got >= 0) {
             const unsigned char byte = static_cast<unsigned char>(got);
-            if (write(1, &byte, 1) != 1) {
+            if (write(static_cast<int>(uart_fd), &byte, 1) != 1) {
                 std::fprintf(stderr, "soc_main: cannot write: %s\n", std::strerror(errno));
                 return 5;
             }
