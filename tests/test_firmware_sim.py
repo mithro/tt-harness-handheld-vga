@@ -15,6 +15,10 @@ decoded, and the tests read its lines (docs/registers.md, "Console").
   white glyph for every button and a green one for a held button; framebuffer pixels read
   back through the CSR window (`fb` lines) show the A glyph white before the step that
   presses A and green after it, the B glyph white throughout.
+- `test_sim_with_clock_hz_0_nothing_waits_on_the_project_clock`: a demo with `clock_hz` 0
+  (no project clock at all): the boot, `demo ok`, the selection and release, a `clock` line
+  (not locked, not running) and a `mode` line (no signal) are printed, and `fb` lines keep
+  coming 100 ms on: the main loop never waits for the project domain.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ from pathlib import Path
 
 import pytest
 from source_cache import load_or_skip
+from test_soc import _counter
+from test_soc import demo as counter_demo
 
 from tt_harness import tools
 from tt_harness.core import vga
@@ -245,3 +251,36 @@ def test_sim_gamepad_step_reaches_the_design(tmp_path: Path) -> None:
     for p in after:
         assert [p[a] for a in A_GLYPH] == [GREEN] * 2, p
         assert [p[a] for a in B_GLYPH] == [WHITE], p
+
+
+def test_sim_with_clock_hz_0_nothing_waits_on_the_project_clock(tmp_path: Path) -> None:
+    def until(text: str) -> bool:
+        return any(ln.startswith("fb ") and int(fields(ln)["t_ms"]) >= 100 for ln in complete(text))
+
+    demo_json = counter_demo(clock_hz=0)
+    result = sim.run(
+        _counter(),
+        demo_json,
+        until=until,
+        max_cycles=10_000_000,  # 200 ms: nothing may wait for the project clock
+        out_dir=tmp_path,
+        fb_probes=(0,),
+    )
+    assert result.reached_until, result.text[-3000:]
+    out = complete(result.text)
+    assert out[0].startswith("boot project=tt00/tt_um_test_counter sys_hz=50000000 clock_hz=0 ")
+    assert out[1] == "demo ok projects=1 steps=0"
+    states = [ln.split(" ", 2)[2] for ln in out if ln.startswith("state ")]
+    assert states == [
+        "entry=0 address=1 subtile=0",
+        "ena=1",
+        "clock_hz=0",
+        "ui_in=0",
+        "rst_n=1 source=enable",
+    ]
+    clock = [fields(ln) for ln in out if ln.startswith("clock ")]
+    assert clock and all((c["locked"], c["running"]) == ("0", "0") for c in clock)
+    assert (clock[0]["hz"], clock[0]["achieved_num"], clock[0]["achieved_den"]) == ("0", "0", "1")
+    mode = [fields(ln) for ln in out if ln.startswith("mode ")]
+    assert mode and all(m == {"t_ms": m["t_ms"], "status": "no_signal"} for m in mode)
+    assert sum(ln.startswith("fb ") for ln in out) >= 5
