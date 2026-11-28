@@ -155,16 +155,22 @@ struct vga_state {
 static struct vga_state vga_shown;
 static int vga_shown_valid;
 
-static void vga_read(struct vga_state *v) {
-    for (;;) {  // the same publication: frames unchanged around the reads
+// One publication of the measurement (vga_frames unchanged around the reads); 0 if none held
+// still for VGA_READ_TRIES reads: a design whose "sync" toggles far faster than video
+// publishes all the time, and the main loop must go on (the console, the runner).
+#define VGA_READ_TRIES 4
+
+static int vga_read(struct vga_state *v) {
+    for (int k = 0; k < VGA_READ_TRIES; k++) {
         uint32_t f = vga_frames_read();
         v->timing.clocks_per_line = vga_clocks_per_line_read();
         v->timing.lines_per_frame = vga_lines_per_frame_read();
         v->timing.hsync_width = vga_hsync_width_read();
         v->timing.vsync_lines = vga_vsync_lines_read();
         v->status = vga_status_read();
-        if (vga_frames_read() == f) return;
+        if (vga_frames_read() == f) return 1;
     }
+    return 0;
 }
 
 static int vga_same(const struct vga_state *a, const struct vga_state *b) {
@@ -178,7 +184,7 @@ static int vga_same(const struct vga_state *a, const struct vga_state *b) {
 
 static void report_mode(uint32_t now) {
     struct vga_state v;
-    vga_read(&v);
+    if (!vga_read(&v)) return;  // not steady: no report this time
     if (!(slot_status_read() & 2)) v.status |= VGA_NO_SIGNAL;  // stopped clock: stale timing
     if (!(v.status & (VGA_LOCKED | VGA_NO_SIGNAL))) return;  // wait for a steady timing
     if (vga_shown_valid && vga_same(&v, &vga_shown)) return;
