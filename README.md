@@ -39,6 +39,8 @@ see [`docs/toolchains.md`](docs/toolchains.md).
 - [`docs/gamebub-hardware.md`](docs/gamebub-hardware.md): verified Game Bub hardware facts
   the design depends on.
 - [`docs/toolchains.md`](docs/toolchains.md): installing and using the FPGA toolchains.
+- [`docs/cdc-constraints.md`](docs/cdc-constraints.md): the timing constraints and checks the
+  FPGA build must apply to the clock-domain crossings.
 
 ## Licence
 
@@ -67,5 +69,5 @@ so use it only with the markers that leave those out):
 ```sh
 uv run pytest -m "not toolchain and not vivado" -n 16 --dist loadgroup -q -W error   # fast, parallel
 uv run pytest tests/test_slot.py tests/test_atspeed.py tests/test_atspeed_abort.py tests/test_atspeed_pins.py \
-    tests/test_atspeed_random.py tests/test_crossing.py --run-slow -m "not vivado" -n 16 --dist loadgroup -q -W error
+    tests/test_atspeed_random.py tests/test_crossing.py tests/test_slot_order.py tests/test_cdc_structure.py --run-slow -m "not vivado" -n 16 --dist loadgroup -q -W error
 ```

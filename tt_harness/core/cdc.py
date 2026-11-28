@@ -14,10 +14,13 @@ was held stable in the sending domain.
 
 Assumptions (all hold for the harness; each is repeated where it matters):
 
-1. The two clocks are unrelated, but neither is faster than about 1000x the other, and the
-   sending domain's clock does not stop while a transfer is in flight. (The receiving
-   domain's clock may stop at any time and for any length: nothing in the sending domain
-   waits for it.)
+1. The two clocks are unrelated, but neither is faster than about 1000x the other. Either
+   clock may stop at any time and for any length, and nothing in one domain waits for the
+   other. What is required of a stopped clock is only what a stopped clock gives: its
+   registers hold. A stopped receiver delivers nothing until it runs again (the sender goes
+   on and the newest value follows); a stopped sender (`rep_x` in `atspeed.py`, whose sender
+   is the project clock) leaves `hold` and `req` still, so a transfer in flight is still
+   captured whole and its acknowledge simply waits to be seen.
 2. `MultiReg` (two flip-flops in the destination domain, no logic between them, marked
    no-retiming; the tools constrain them as `ASYNC_REG`) resolves metastability within one
    destination clock. This is the standard two-flop synchroniser.
@@ -27,6 +30,30 @@ Assumptions (all hold for the harness; each is repeated where it matters):
    passes two flip-flops first). Place and route must therefore keep the delay of `hold`
    bits to the capture register below about one receiving-domain clock period (a
    `set_max_delay -datapath_only` constraint; done in the later build task, not here).
+
+Constraints the FPGA build must apply
+-------------------------------------
+
+For the build task (also `docs/cdc-constraints.md`); `hold`, `dst`, `req`, `ack_o` are the
+registers of each `MultiBitCrossing`, `rst_req` and the reset flops are in `slot.py`, the gate
+is `tt_harness/input_gate.py`:
+
+- `set_max_delay -datapath_only` from each `hold` register to its `dst` register:
+  - the sys -> project buses (`ctl_x`, `buttons_x`, `cmd_x`): at most the project period
+    (15.15 ns at 66 MHz);
+  - `rep_x` (project -> sys): at most 20 ns.
+- The same bound from each `req`, `ack_o`, single-bit synchroniser source and `LOCKED` to its
+  first synchroniser flop.
+- `rst_req` to the `FDCE` `CLR` pins: max-delay, or a false path on those pins only.
+- Never `set_clock_groups` or a blanket false path: they override max-delay.
+- `ASYNC_REG` on every synchroniser pair and on both reset flops.
+- No `SRL16` / `SRLC32` on any crossing, in either flow.
+- The checks to run:
+  - the gate on the openXC7 netlist with the `BUFGCE` output net as `expected`;
+  - `vivado_tcl` on the routed design;
+  - two negative builds per flow that must be rejected: `pin_ena` from a `sys` register, and
+    a LUT on `rst_req` -> `CLR`;
+  - the cross-domain path report lists only the held buses and the synchroniser inputs.
 """
 
 from __future__ import annotations

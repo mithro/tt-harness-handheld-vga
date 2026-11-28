@@ -263,7 +263,7 @@ class _Sim:
         return r.stdout.splitlines()
 
     def limit(self, n: int) -> int:
-        return (n + 1000) * (self.proj_ps + 100)  # the launch delay is ~400 sys clocks
+        return (n + 1000) * (self.proj_ps + 100)  # N clocks and a generous margin
 
     def check_script(self, n: int, settle_ps: int = 2_000_000) -> list[str]:
         return [
@@ -316,6 +316,7 @@ def design(request, tmp_path_factory) -> _Sim:
 
 @pytest.mark.toolchain
 @pytest.mark.parametrize("n", [1, 9, 10, 11, 100, 1_000_000, 6_000_000])
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_crc_equals_crc_of_reference_dump(design: _Sim, n: int) -> None:
     done, crc = design.crc(n)
     assert done == 1, "the check did not finish"
@@ -323,6 +324,7 @@ def test_crc_equals_crc_of_reference_dump(design: _Sim, n: int) -> None:
 
 
 @pytest.mark.toolchain
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_crc_differs_when_one_byte_differs(design: _Sim) -> None:
     n = 5_000
     done, crc = design.crc(n)
@@ -340,6 +342,7 @@ def test_crc_differs_when_one_byte_differs(design: _Sim) -> None:
 
 
 @pytest.mark.toolchain
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_restart_gives_the_same_crc(design: _Sim) -> None:
     n = 20_000
     script = ["set rst_n 1", "set ena 1", "run 2000000", f"set clocks {n:x}"]
@@ -351,6 +354,7 @@ def test_restart_gives_the_same_crc(design: _Sim) -> None:
 
 
 @pytest.mark.toolchain
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_start_at_every_phase_of_the_project_clock_gives_the_same_crc(design: _Sim) -> None:
     n = 3_000
     # `run` before each start moves it against the project clock; the clocks are unrelated.
@@ -368,6 +372,7 @@ def test_start_at_every_phase_of_the_project_clock_gives_the_same_crc(design: _S
 
 
 @pytest.mark.toolchain
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_reset_asserts_with_the_project_clock_stopped_in_verilator(design: _Sim) -> None:
     """The reset cell as Migen emits it: the pin falls at once with no clock, and rises only
     after the clock restarts (second project edge after it)."""

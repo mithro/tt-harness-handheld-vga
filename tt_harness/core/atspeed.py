@@ -21,7 +21,8 @@ The only things that cross between the domains are two `MultiBitCrossing` handsh
 
 - command word, `sys` -> `project`: `{seq (16), run (1), n (32)}`. `seq` is a `reset_less` system
   register, incremented by every `start` (so it never returns to an old value on a system
-  reset); `run` is 1 from a `start` until an `abort`, a system reset or the result; `n` is N.
+  reset); `run` is 1 from a `start` until an `abort` or a system reset (it is NOT cleared when
+  the result arrives); `n` is N.
 - report word, `project` -> `sys`: `{my_seq (16), phase (2), crc (32)}` with phase 0 idle, 1
   active, 2 finished (`fin`); the project register word is written whenever it changes.
 
@@ -31,6 +32,7 @@ Protocol::
     abort   run := 0, busy := 0, done := 0                     (next sys clock)
     sys reset                                                  run, busy, done := 0 (seq kept)
     report delivered with run, my_seq == seq and phase == fin: done := 1, busy := 0, crc := its crc
+                                                               (run stays 1)
 
     project, acting only on the delivered command register `cmd`:
       IDLE   (override off, reset chain back to normal):
@@ -106,14 +108,16 @@ Using the at-speed check (firmware-facing; `docs/registers.md` will need this in
   for it, and `clock_hz: 0` never runs it); recover a stuck one with `abort`.
 - A `start` cancels any earlier start: the last one wins, and only its result is reported.
 - An `abort` (any time, clock running or stopped) clears `busy` and `done` within one system clock
-  but can leave ONE cut block at the pins: the override on with the design held in reset (reset
-  low for the whole block), then released. With the clock running it is cut within about
-  7 Tp + 4 Ts + `UNWIND_CLOCKS` of the abort (`cut_samples` in the tests); with the clock stopped when the abort is given, the start word already in
-  flight begins the check on resume and the `run = 0` word cuts it: the block is about
-  3 + ceil(3 Ts / Tp) project clocks long (measured 3 to 6 at 2.5 to 66 MHz against a 50 MHz
-  `sys`). No `done` is reported for it. The design is left in an unknown state, so firmware must
-  reset the design after any abort (and after a finished check: the stimulus is not the
-  software's).
+  but can leave ONE cut block at the pins: the override on, reset low from its first clock,
+  then released. With the clock running it is cut within about 7 Tp + 4 Ts + `UNWIND_CLOCKS`
+  of the abort (`cut_samples` in the tests); with the clock stopped when the abort is given,
+  the start word already in flight begins the check on resume and the `run = 0` word cuts
+  it: the block is at most 4 + ceil(4 Ts / Tp) project clocks long (9 seen at 66 MHz against
+  a 50 MHz `sys`). Reset is low for the WHOLE block only when the cut comes within the 10
+  reset clocks: that is every such stopped-clock block up to an 83 MHz project clock (at
+  100 MHz the block leaves reset by one clock). No `done` is reported for it. The design is
+  left in an unknown state, so firmware must reset the design after any abort (and after a
+  finished check: the stimulus is not the software's).
 - With the check cut at any point the pins are `0{1..10}` (reset low from the first override
   clock) and never malformed; a check not cut is `0{10}1+`.
 - `seq` is 16 bits and incremented by every start: 65,536 starts with none seen by the project
@@ -122,8 +126,9 @@ Using the at-speed check (firmware-facing; `docs/registers.md` will need this in
 
 Not proven here, for the build task: the held bus (`hold` in `cdc.py`) of each of the two
 handshakes, in both directions, is read by the other domain without synchronisers on the argument
-that it is stable, and needs a maximum-delay constraint of less than one destination-clock period
-(20 ns at 50 MHz). Nothing else in this module needs a constraint.
+that it is stable, and needs a maximum-delay constraint of at most one destination-clock period:
+the PROJECT period for the command word (15.15 ns at 66 MHz), 20 ns for the report word. The full
+list for the build is in `cdc.py` ("Constraints the FPGA build must apply").
 
 Firmware and `clock_hz: 0`. With no project clock an at-speed check is meaningless: firmware must
 not start one. If it does, `busy` stays high and `abort` recovers it, one system clock later;
@@ -183,6 +188,8 @@ class AtSpeedCheck(Module):
             # `crc` needs no latch of its own: it is taken from the same delivered word as the
             # `fin` that sets `done`, and a new `start` clears `done` before any later report
             # (whose `my_seq` differs, so it is ignored) can arrive: `crc` is only valid while `done`.
+            # (`rep_x.valid` is redundant here, the other three terms being levels of the
+            # delivered word; it is kept so the result is taken at the delivery.)
             If(
                 rep_x.valid & run & (rep_seq == seq) & (rep_phase == PHASE_FIN),
                 self.done.eq(1),
@@ -271,8 +278,7 @@ class AtSpeedCheck(Module):
                     If(complete, crc_out.eq(~crc_acc), phase.eq(PHASE_FIN), *unwind()),
                 ),
             )
-            .Elif(
-                state == S_UNW,
+            .Else(  # S_UNW, and the unused fourth state value (no reset in this domain)
                 If(tmr != 0, tmr.eq(tmr - 1)).Else(state.eq(S_IDLE)),
             ),
         ]

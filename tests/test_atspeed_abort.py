@@ -253,9 +253,9 @@ def test_abort_with_the_clock_stopped_then_started_never_reports_and_any_begin_i
     assert len(rec.pins) > 100
     blocks = assert_clean(rec.pins, full_last=False)
     # One cut block: the word in flight begins the check, the `run = 0` word cuts it. Its
-    # length is about 3 + ceil(3 Ts / Tp) override samples (measured 3 to 6 at 2.5 to 66 MHz),
-    # and the design is held in reset for ALL of them (low samples == block length).
-    bound = 3 + -(-3 * 20_000 // CLOCKS["normal"][0])
+    # length is at most 4 + ceil(4 Ts / Tp) override samples (`atspeed.py`), and at this
+    # clock the design is held in reset for ALL of them (low samples == block length).
+    bound = 4 + -(-4 * 20_000 // CLOCKS["normal"][0])
     assert len(blocks) == 1, blocks
     length, low = blocks[0]
     assert length <= bound and low == length, (blocks, bound)

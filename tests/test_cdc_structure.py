@@ -157,6 +157,30 @@ def test_multireg_two_stages_is_two_flip_flops_in_the_emitted_verilog() -> None:
     assert block.count("<=") == 2, block
 
 
+def test_the_emitted_reset_flop_is_cleared_asynchronously() -> None:
+    """The behavioural form of `AsyncClearFlop` (simulation builds): the clear is in the
+    sensitivity list and is tested first, as in an FDCE; and the synthesis form IS an FDCE
+    with the clear on `CLR`."""
+
+    class M(Module):
+        def __init__(self, behavioural: bool) -> None:
+            self.clock_domains.cd_project = ClockDomain("project", reset_less=True)
+            self.clear, self.d, self.q = (Signal(name_override=n) for n in ("clear", "d", "q"))
+            self.specials += AsyncClearFlop(
+                "project", self.clear, self.d, q=self.q, behavioural=behavioural
+            )
+
+    m = M(True)
+    text = str(verilog.convert(m, ios={m.clear, m.d, m.q}))
+    assert "always @(posedge project_clk or posedge clear) begin\n\tif (clear)\n" in text
+    assert text.count("always @(") == 1 and "<= d;" in text
+    m = M(False)
+    text = str(verilog.convert(m, ios={m.clear, m.d, m.q}))
+    fdce = text[text.index("FDCE") :]
+    assert ".CLR(clear)" in fdce and ".C(project_clk)" in fdce and ".D(d)" in fdce
+    assert "always @(" not in text
+
+
 # The analyser itself: what it must refuse ------------------------------------------------------
 
 
