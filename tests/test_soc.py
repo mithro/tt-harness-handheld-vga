@@ -486,6 +486,7 @@ def test_bios_boots_and_prints_banner(tmp_path: Path) -> None:
         until=lambda text: "litex> " in sim.plain(text),
         max_cycles=40_000_000,
         out_dir=tmp_path,
+        with_firmware=False,
     )
     assert result.reached_until, result.text[-2000:]
     text = result.plain

@@ -3,7 +3,9 @@
 
 `run(sources, demo_json, until, max_cycles)` builds `HarnessSoC` on the LiteX simulation
 platform (`platform()`) with a simulation slot (`ProjectSlot(sim_clock=True)`: no MMCM, the
-bench drives the project clock), compiles the BIOS with the RISC-V GCC, generates the Verilog
+bench drives the project clock), compiles the firmware (`firmware/`, in the ROM:
+`tt_harness.soc.firmware`), or with `with_firmware=False` LiteX's BIOS, with the RISC-V
+GCC, generates the Verilog
 (with VexRiscv's), verilates it with the project's sources and the harness
 `tt_harness/sim/soc_main.cpp`, and runs it. The harness drives the 50 MHz system clock and the
 project clock at `clock_hz` of `demo.json` (not at all for 0), decodes the UART at 115200 baud
@@ -16,9 +18,10 @@ libevent and json-c, and its UART is a stream model, not the serial line.
 
 Files under `out_dir`:
 
-    litex/            the Builder's output: software/ (BIOS, generated headers, with
-                      `demo_json.h` for the firmware), csr.csv, gateware/ (the Verilog and
-                      the ROM and RAM init files the simulation reads)
+    litex/            the Builder's output: software/ (the firmware or the BIOS, the
+                      generated headers, with the firmware's `demo_json.h` and
+                      `firmware_config.h`), csr.csv, gateware/ (the Verilog and the ROM and
+                      RAM init files the simulation reads)
     obj/              Verilator build directory
     sim.log           Verilator, make, compiler and simulation output
     uart.bin          every byte received on the UART
@@ -32,7 +35,7 @@ import re
 import select
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,7 +47,7 @@ from migen import ClockSignal, Signal
 from tt_harness import tools, verilate
 from tt_harness.core.slot import ProjectSlot
 from tt_harness.fetch import Sources
-from tt_harness.soc import core
+from tt_harness.soc import core, firmware
 
 SYS_CLK_HZ = 50_000_000
 FB_SIZE = (320, 240)
@@ -139,21 +142,33 @@ def _toolchain_path():
         os.environ["PATH"] = old
 
 
-def _generate(soc, litex_dir: Path) -> Path:
-    """Compile the BIOS into the ROM and write the Verilog; return the gateware directory."""
+def _generate(
+    soc,
+    litex_dir: Path,
+    *,
+    with_firmware: bool,
+    fb_probes: Sequence[int],
+    boot_demo_json: bytes | None,
+) -> Path:
+    """Compile the firmware (or the BIOS) into the ROM and write the Verilog; return the
+    gateware directory."""
     from litex.soc.integration.builder import Builder
 
-    builder = Builder(
-        soc,
-        output_dir=str(litex_dir),
-        compile_software=True,
-        compile_gateware=False,
-        build_bundle=False,
-    )
+    options = {
+        "output_dir": str(litex_dir),
+        "compile_gateware": False,
+        "build_bundle": False,
+    }
+    if with_firmware:
+        builder = firmware.FirmwareBuilder(
+            soc, fb_probes=fb_probes, demo_json=boot_demo_json, **options
+        )
+    else:
+        if fb_probes or boot_demo_json is not None:
+            raise ValueError("fb_probes and boot_demo_json are firmware options")
+        builder = Builder(soc, compile_software=True, **options)
     with _toolchain_path():
         builder.build(build=False, run=False)
-    generated = Path(builder.generated_dir)
-    (generated / "demo_json.h").write_text(core.demo_json_header(soc.demo_json))
     gateware = Path(builder.gateware_dir)
     fragment = soc.get_fragment()
     soc.platform.finalize(fragment)
@@ -171,8 +186,16 @@ def run(
     *,
     out_dir: Path | None = None,
     timeout_s: float = RUN_TIMEOUT_S,
+    with_firmware: bool = True,
+    fb_probes: Sequence[int] = (),
+    boot_demo_json: bytes | None = None,
 ) -> SimResult:
     """Simulate the SoC with `sources`' project; see the module docstring.
+
+    `with_firmware=False` boots LiteX's BIOS instead of the firmware. `fb_probes`: the
+    framebuffer pixels (`y * width + x`) the firmware reports in its `fb` console lines.
+    `boot_demo_json`, for tests of the firmware's check at boot: the bytes embedded in the
+    firmware instead of `demo_json` (which the build still validates).
 
     Raises `SimError` if the build fails, the harness reports an error, or the run takes
     longer than `timeout_s` of wall time without `until` or the cycle limit ending it.
@@ -187,7 +210,13 @@ def run(
         stale.unlink(missing_ok=True)
 
     soc = build_soc(sources, demo_json)
-    gateware = _generate(soc, out_dir / "litex")
+    gateware = _generate(
+        soc,
+        out_dir / "litex",
+        with_firmware=with_firmware,
+        fb_probes=fb_probes,
+        boot_demo_json=boot_demo_json,
+    )
     extra = [Path(f) for f, *_ in soc.platform.sources if str(f).endswith(".v")]
     extra.append(gateware / f"{TOP}.v")
     try:

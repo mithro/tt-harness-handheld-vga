@@ -84,6 +84,11 @@ static void add_error(const char *s) {
     msg_end();
 }
 
+void errors_add(struct errors *errs, const char *message) {
+    E = errs;
+    add_error(message);
+}
+
 // ---- UTF-8, with Python's error messages ----------------------------------------------------
 
 static int utf8_check(const unsigned char *s, size_t n) {

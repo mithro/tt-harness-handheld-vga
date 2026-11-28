@@ -75,7 +75,7 @@ CSR_LOCATIONS = {name: 16 + i for i, name in enumerate(CSR_MODULES)}
 UART_BAUD = 115200
 ROM_SIZE = 0x8000  # the BIOS is about 23 KiB; the ROM is this size whatever it holds
 SRAM_SIZE = 0x2000
-MAIN_RAM_SIZE = 0x8000  # for the firmware
+MAIN_RAM_SIZE = 0x10000  # the firmware's data: the parser's 32 KiB of JSON tokens and the rest
 SEVENSEG_FRAME_HZ = 60  # the seven-segment window is about one display frame
 # (name, bits) of the timing word, low bits first.
 TIMING_FIELDS: tuple[tuple[str, int], ...] = (

@@ -63,6 +63,9 @@ struct errors {
 int demo_parse(const char *text, size_t len, const char *shuttle, struct demo *out,
                struct errors *errs);
 
+// Add a message after those demo_parse gave (the firmware's own checks of a valid file).
+void errors_add(struct errors *errs, const char *message);
+
 // The i-th message (0-based) and its length in *len; NULL past the last.
 const char *errors_get(const struct errors *errs, uint32_t i, uint32_t *len);
 
