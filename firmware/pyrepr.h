@@ -25,7 +25,7 @@
 
 #include "text.h"
 
-#define PY_MAX_DIGITS 100
+#include "firmware_limits.h"  // PY_MAX_DIGITS
 
 // The number of significant digits of a JSON number literal (leading and trailing zeros
 // not counted; 0 for zero).

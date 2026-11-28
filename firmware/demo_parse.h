@@ -13,13 +13,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DEMO_MAX_TOKENS 2048    // JSON tokens (jsmn), 16 bytes each
-#define DEMO_MAX_PROJECTS 32    // entries of "projects"
-#define DEMO_MAX_STEPS 512      // steps of all projects together
-#define DEMO_MAX_DEPTH 32       // nesting of arrays and objects
-#define DEMO_ERRORS_TEXT 4096   // bytes of all messages together
-#define DEMO_SHUTTLE_MAX 64     // bytes of the shuttle name, with its NUL
-#define DEMO_MAX_MS 2147483647u // duration_ms and wait_ms (the runner's clock is 32 bits)
+// The limits (DEMO_MAX_TOKENS, DEMO_MAX_PROJECTS, DEMO_MAX_STEPS, DEMO_MAX_DEPTH,
+// DEMO_ERRORS_TEXT, DEMO_SHUTTLE_MAX, DEMO_MAX_MS, DEMO_MAX_U32, PY_MAX_DIGITS) and their
+// messages are generated from tt_harness/soc/limits.py, which checks the same at build time.
+#include "firmware_limits.h"
 
 enum step_kind { STEP_SET, STEP_WAIT, STEP_GAMEPAD };
 
@@ -49,10 +46,13 @@ struct demo {
 
 // Every message in `text`, in the order the validator gives them, each as its length (two
 // bytes, low first), its bytes and a NUL (a message may hold a NUL: a value's str()).
+// A message that does not fit is left out; the last message then counts them
+// (DEMO_MSG_NOT_SHOWN), and later messages that fit are still kept.
 struct errors {
     uint32_t count;
-    uint32_t used;  // bytes of text in use
-    int full;       // a message did not fit: the last one is the firmware-limit message
+    uint32_t used;        // bytes of text in use
+    uint32_t not_shown;   // messages left out
+    uint32_t summary_at;  // where the count message starts, when not_shown
     char text[DEMO_ERRORS_TEXT];
 };
 

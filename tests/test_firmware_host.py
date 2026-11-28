@@ -30,6 +30,7 @@ from test_demo_model import expected_events
 from tt_harness.core import vga
 from tt_harness.demo import model, validate
 from tt_harness.demo.model import Event
+from tt_harness.soc import core, firmware, limits
 
 REPO = Path(__file__).resolve().parent.parent
 FIRMWARE = REPO / "firmware"
@@ -71,10 +72,13 @@ def host(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("firmware-host")
     binary = out / "host"
     log = out / "cc.log"
+    generated = out / "generated"
+    firmware.write_portable_headers(generated)
     cmd = [
         CC,
         *CFLAGS,
         f"-I{FIRMWARE}",
+        f"-I{generated}",
         f"-I{REPO / 'tt_harness' / 'core'}",
         "-o",
         str(binary),
@@ -390,11 +394,55 @@ def test_a_firmware_limit_is_a_loud_error(host: Path) -> None:
     )
     many = demo_of({**ONE, "steps": [1.5] * 200})  # more messages than the error buffer holds
     kind, messages = parse(host, json.dumps(many).encode())
-    assert kind == "errors"
     want = validate.validate(many, SHUTTLE)
-    assert messages[:-1] == want[: len(messages) - 1]
-    assert messages[-1].startswith("firmware limit: ") and "DEMO_ERRORS_" in messages[-1]
+    assert (kind, messages) == ("errors", limits.stored(want))
     assert len(messages) < len(want)
+    left_out = len(want) - (len(messages) - 1)
+    assert messages[-1] == f"{limits.NOT_SHOWN}{left_out}"
+
+
+def test_a_message_too_long_to_keep_is_counted_and_later_ones_are_kept(host: Path) -> None:
+    """One message longer than the error text holds is left out, the messages after it
+    are kept, and the last message says one was not shown."""
+    huge = {**ONE, "address": "x" * 5000}  # its message holds the whole value
+    demo = {
+        "version": 1,
+        "shuttle": SHUTTLE,
+        "projects": [huge, {**ONE, "subtile": -1}, {**ONE, "clock_hz": "fast"}],
+    }
+    want = validate.validate(demo, SHUTTLE)
+    assert len(want) == 3 and len(want[0]) > limits.ERRORS_TEXT
+    assert parse(host, json.dumps(demo).encode()) == (
+        "errors",
+        [want[1], want[2], f"{limits.NOT_SHOWN}1"],
+    )
+    assert limits.stored(want) == [want[1], want[2], f"{limits.NOT_SHOWN}1"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {**ONE, "steps": [{"set": 1}, {"wait_ms": 1}] * 300},
+        {**ONE, "clock_hz": 2**40, "duration_ms": 2**31},
+        {
+            **ONE,
+            "steps": [{"gamepad": [{"buttons": list(validate.GAMEPAD_BUTTONS[:11])}]}] * 125
+            + [{"wait_ms": 1}],
+        },
+        {**ONE, "address": 10**120},
+    ],
+    ids=["steps", "32-bit", "tokens", "digits"],
+)
+def test_a_limit_fails_at_build_and_at_boot_with_the_same_text(host: Path, entry: dict) -> None:
+    """A file the validator accepts but the firmware cannot hold: the build
+    (`core.demo_entry`) refuses it with exactly the messages the firmware gives at boot."""
+    text = json.dumps(demo_of(entry))
+    assert validate.validate(json.loads(text), SHUTTLE) == []
+    with pytest.raises(validate.DemoError) as raised:
+        core.demo_entry(text.encode(), SHUTTLE)
+    assert raised.value.errors
+    assert all(m.startswith(limits.PREFIX) for m in raised.value.errors)
+    assert parse(host, text.encode()) == ("errors", raised.value.errors)
 
 
 def test_a_number_beyond_32_bits_is_a_loud_error(host: Path) -> None:
@@ -550,12 +598,10 @@ def test_mutated_files_give_the_validators_messages(host: Path, seed: int) -> No
         want = validate.validate(conf, SHUTTLE)
         kind, messages = parse(host, text.encode("utf-8", errors="surrogatepass"))
         if want:
-            assert (kind, messages) == ("errors", want), text
-        else:  # valid; the firmware may still not hold it (a number beyond 32 bits)
-            assert kind == "ok" or all(m.startswith("firmware limit: ") for m in messages), (
-                text,
-                messages,
-            )
+            assert (kind, messages) == ("errors", limits.stored(want)), text
+        else:  # valid; the firmware may still not hold it, as the build check says
+            over = limits.check(text, SHUTTLE)
+            assert (kind, messages if over else []) == ("errors" if over else "ok", over), text
 
 
 def _python_capture(cpl, lpf, hsw, vsl, clock_hz, fb_w, fb_h):

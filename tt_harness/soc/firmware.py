@@ -7,7 +7,8 @@ the simulation (`tt_harness.soc.sim`) and the board builds use it the same way,
 
 - adds `firmware/` as a software package and does not build the BIOS;
 - writes the firmware's generated headers (`write_headers`: `demo_json.h`, the build's
-  `demo.json` byte for byte, and `firmware_config.h`) next to LiteX's `csr.h`, after
+  `demo.json` byte for byte, `firmware_config.h`, and `firmware_limits.h` from
+  `tt_harness.soc.limits`) next to LiteX's `csr.h`, after
   LiteX generates its own and before anything is compiled;
 - compiles with the repository's RISC-V GCC (`RISCV_GCC`) and no other: a missing one is a
   `FileNotFoundError`, never a fall back to a GCC on PATH;
@@ -34,7 +35,7 @@ from litex.soc.integration import soc as litex_soc
 from litex.soc.integration.builder import Builder
 
 from tt_harness import tools
-from tt_harness.soc import core
+from tt_harness.soc import core, limits
 from tt_harness.soc.core import shuttle_of
 
 FIRMWARE_DIR = Path(__file__).resolve().parent.parent.parent / "firmware"
@@ -95,6 +96,15 @@ def write_headers(
     (generated_dir / "firmware_config.h").write_text(
         firmware_config_header(soc.project_name, fb_probes)
     )
+    write_portable_headers(generated_dir)
+
+
+def write_portable_headers(directory: Path) -> None:
+    """The generated headers that do not depend on the SoC (the host tests build with them
+    too): `firmware_limits.h`."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "firmware_limits.h").write_text(limits.header())
 
 
 @contextlib.contextmanager

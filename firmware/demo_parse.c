@@ -19,7 +19,7 @@
 #define JSMN_STATIC
 #include "third_party/jsmn.h"
 
-#define LIMIT "firmware limit: "
+#define LIMIT DEMO_LIMIT_PREFIX
 
 static jsmntok_t tok[DEMO_MAX_TOKENS];
 static const char *js;      // the text
@@ -29,13 +29,11 @@ static struct errors *E;
 
 // ---- messages -------------------------------------------------------------------------------
 
-static const char overflow_message[] =
-    LIMIT "more messages than fit in DEMO_ERRORS_TEXT (4096 bytes)";
-
 static void errors_reset(struct errors *e) {
     e->count = 0;
     e->used = 0;
-    e->full = 0;
+    e->not_shown = 0;
+    e->summary_at = 0;
     e->text[0] = '\0';
 }
 
@@ -47,15 +45,19 @@ const char *errors_get(const struct errors *e, uint32_t i, uint32_t *len) {
     return (const char *)p + 2;
 }
 
-// A message is built in place at the end of the text, with room kept for the overflow
-// message; msg_end() keeps it, or replaces it with the overflow message if it did not fit.
+// A message is built in place at the end of the text. It is kept if it fits with
+// DEMO_NOT_SHOWN_ROOM bytes still free; one that does not is left out and counted, and the
+// last message is then DEMO_MSG_NOT_SHOWN with the count (tt_harness.soc.limits.stored).
 static struct text msg;
 
 static struct text *msg_begin(void) {
-    size_t keep = 2 + sizeof overflow_message;  // the length, the message, its NUL
-    size_t room = E->full ? 0 : DEMO_ERRORS_TEXT - E->used;
-    text_init(&msg, E->text + E->used + 2, room > keep + 2 ? room - keep - 2 : 0);
-    if (room <= keep + 2) msg.full = 1;
+    if (E->not_shown) {  // take the count message off the end; msg_end puts it back
+        E->used = E->summary_at;
+        E->count--;
+    }
+    size_t room = DEMO_ERRORS_TEXT - E->used - DEMO_NOT_SHOWN_ROOM;  // >= 0: always kept free
+    // the length (2), the message (at most cap - 1 bytes) and its NUL: room bytes at most
+    text_init(&msg, E->text + E->used + 2, room > 2 ? room - 2 : 0);
     return &msg;
 }
 
@@ -67,16 +69,19 @@ static void keep_message(size_t len) {
 }
 
 static void msg_end(void) {
-    if (E->full) return;
     if (msg.full) {
-        struct text t;
-        text_init(&t, E->text + E->used + 2, DEMO_ERRORS_TEXT - E->used - 2);
-        text_str(&t, overflow_message);
-        keep_message(t.len);
-        E->full = 1;
-        return;
+        E->not_shown++;
+    } else {
+        keep_message(msg.len);
     }
-    keep_message(msg.len);
+    if (E->not_shown) {
+        struct text t;
+        E->summary_at = E->used;
+        text_init(&t, E->text + E->used + 2, DEMO_NOT_SHOWN_ROOM - 2);
+        text_str(&t, DEMO_MSG_NOT_SHOWN);
+        text_u32(&t, E->not_shown);
+        keep_message(t.len);
+    }
 }
 
 static void add_error(const char *s) {
@@ -492,7 +497,7 @@ static int json_ok(void) {
     jsmn_init(&parser);
     ntok = jsmn_parse(&parser, js, js_len, tok, DEMO_MAX_TOKENS);
     if (ntok == JSMN_ERROR_NOMEM) {
-        add_error(LIMIT "more than 2048 JSON tokens (DEMO_MAX_TOKENS)");
+        add_error(DEMO_MSG_TOKENS);
         return 0;
     }
     if (ntok < 0) {
@@ -508,7 +513,7 @@ static int json_ok(void) {
     if (!ws_only(0, tok_from(0))) return not_json("expecting a value", 0), 0;
     int next = check_value(0, 0);
     if (too_deep) {
-        add_error(LIMIT "JSON nested deeper than 32 (DEMO_MAX_DEPTH)");
+        add_error(DEMO_MSG_DEPTH);
         return 0;
     }
     if (next < 0) return not_json(bad.what, bad.at), 0;
@@ -525,7 +530,7 @@ static int json_ok(void) {
         return 0;
     }
     if (too_long) {
-        add_error(LIMIT "a number with more than 100 significant digits (PY_MAX_DIGITS)");
+        add_error(DEMO_MSG_DIGITS);
         return 0;
     }
     return 1;
@@ -622,9 +627,9 @@ static struct jint jint_of(int i) {
 
 static int jint_zero(struct jint v) { return v.n == 1 && v.d[0] == '0'; }
 
-// v <= limit, for v >= 0.
+// 0 <= v <= limit (a negative v is not: 0).
 static int jint_le(struct jint v, uint32_t limit) {
-    if (v.neg) return 1;
+    if (v.neg) return 0;
     if (v.n > 10) return 0;
     uint64_t x = 0;
     for (int k = 0; k < v.n; k++) x = x * 10 + (uint64_t)(v.d[k] - '0');
@@ -1006,11 +1011,11 @@ static void extract(const char *shuttle, struct demo *out) {
     for (; shuttle[k] && k + 1 < DEMO_SHUTTLE_MAX; k++) out->shuttle[k] = shuttle[k];
     out->shuttle[k] = '\0';
     if (shuttle[k]) {
-        add_error(LIMIT "a shuttle name longer than 63 bytes (DEMO_SHUTTLE_MAX)");
+        add_error(DEMO_MSG_SHUTTLE);
         return;
     }
     if (tok[p].size > DEMO_MAX_PROJECTS) {
-        add_error(LIMIT "more than 32 projects (DEMO_MAX_PROJECTS)");
+        add_error(DEMO_MSG_PROJECTS);
         return;
     }
     out->project_count = (uint32_t)tok[p].size;
@@ -1019,17 +1024,17 @@ static void extract(const char *shuttle, struct demo *out) {
     for (int i = 0; i < tok[p].size; i++, e = skip(e)) {
         struct project *pr = &out->projects[i];
         uint32_t ui;
-        get_u32(i, -1, obj_get(e, "address"), "address", 0xffffffffu, &pr->address);
-        get_u32(i, -1, obj_get(e, "subtile"), "subtile", 0xffffffffu, &pr->subtile);
+        get_u32(i, -1, obj_get(e, "address"), "address", DEMO_MAX_U32, &pr->address);
+        get_u32(i, -1, obj_get(e, "subtile"), "subtile", DEMO_MAX_U32, &pr->subtile);
         get_u32(i, -1, obj_get(e, "duration_ms"), "duration_ms", DEMO_MAX_MS, &pr->duration_ms);
-        get_u32(i, -1, obj_get(e, "clock_hz"), "clock_hz", 0xffffffffu, &pr->clock_hz);
+        get_u32(i, -1, obj_get(e, "clock_hz"), "clock_hz", DEMO_MAX_U32, &pr->clock_hz);
         get_u32(i, -1, obj_get(e, "ui_in"), "ui_in", 255, &ui);
         pr->ui_in = (uint8_t)ui;
         int steps = obj_get(e, "steps");
         pr->first_step = (uint16_t)out->step_count;
         pr->step_count = (uint16_t)tok[steps].size;
         if (out->step_count + (uint32_t)tok[steps].size > DEMO_MAX_STEPS) {
-            add_error(LIMIT "more than 512 steps in all projects (DEMO_MAX_STEPS)");
+            add_error(DEMO_MSG_STEPS);
             return;
         }
         int s = steps + 1;

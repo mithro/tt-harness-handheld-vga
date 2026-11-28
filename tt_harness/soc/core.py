@@ -35,7 +35,8 @@ register, so a design that stops producing sync is blanked without the firmware 
 "no signal" picture, never a frozen frame) as long as the project clock runs.
 
 `demo.json` is validated at build time with the configurator's messages (an invalid file is a
-`DemoError`), must hold exactly one project, and only its `clock_hz` is used, to check that
+`DemoError`), must fit the firmware's limits (`tt_harness.soc.limits`, the messages the
+firmware gives at boot), must hold exactly one project, and only its `clock_hz` is used, to check that
 the slot was built for it; the bytes go into the firmware image unchanged through the C
 header `demo_json_header` writes.
 """
@@ -59,6 +60,7 @@ from tt_harness.core.sevenseg import SevenSegSampler
 from tt_harness.core.slot import ProjectSlot
 from tt_harness.core.vga import PIXEL_BITS, Framebuffer, VgaCapture, VgaTiming
 from tt_harness.demo.validate import DemoError, Entry, parse
+from tt_harness.soc import limits
 
 # The Pmods a project may declare (the manifest's `pmods`); bit n of `info_pmods` is PMODS[n].
 PMODS: tuple[str, ...] = (
@@ -115,6 +117,9 @@ def demo_entry(demo_json: bytes, shuttle: str) -> Entry:
     except UnicodeDecodeError as e:
         raise DemoError([f"not UTF-8: {e}"]) from e
     demo = parse(text, shuttle)
+    over = limits.check(text, shuttle)  # what the firmware cannot hold, as it says at boot
+    if over:
+        raise DemoError(over)
     if len(demo.projects) != 1:
         raise DemoError(
             [f"this build runs exactly one project; demo.json has {len(demo.projects)}"]

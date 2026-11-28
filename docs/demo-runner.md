@@ -207,10 +207,13 @@ model and to the vectors in [`tests/data/demo/`](../tests/data/demo). Where they
 2. A reset cut by the duration timer (open question 3) is still released, at its own time, unless
    the next entry asserts reset first: a design is never left held in reset. The model does
    not show that release.
-3. Firmware limits: a file that would pass the validator can still be refused at boot, with a
-   `firmware limit: ...` message naming the limit (`DEMO_MAX_TOKENS`, `DEMO_MAX_PROJECTS`,
-   `DEMO_MAX_STEPS`, `DEMO_MAX_DEPTH`, `DEMO_ERRORS_TEXT`, in
-   [`demo_parse.h`](../firmware/demo_parse.h)), or a value beyond 32 bits.
+3. Firmware limits: a file that passes the validator can be more than the firmware holds:
+   JSON tokens, projects, steps, nesting, digits of a number, or a value beyond 32 bits. The
+   limits and their `firmware limit: ...` messages are defined once, in
+   [`tt_harness/soc/limits.py`](../tt_harness/soc/limits.py), generated into the firmware
+   as `firmware_limits.h`, and checked at build time with the same text the firmware prints
+   at boot. Messages that do not fit `DEMO_ERRORS_TEXT` bytes are left out and counted in
+   a last message; later ones that fit are kept.
 4. Unprintable characters in a printed string: `str.isprintable` comes from a table of the
    Unicode ranges Python treats as unprintable ([`pyrepr.c`](../firmware/pyrepr.c)); a code
    point that a later Unicode version assigns may print differently.
