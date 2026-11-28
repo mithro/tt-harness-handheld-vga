@@ -59,14 +59,78 @@ is `tt_harness/input_gate.py`:
   - two negative builds per flow that must be rejected: `pin_ena` from a `sys` register, and
     a LUT on `rst_req` -> `CLR`;
   - the cross-domain path report lists only the held buses and the synchroniser inputs.
+
+The named registers, marked in the netlist
+------------------------------------------
+
+The registers above are marked where they are made, with the Verilog attribute `CDC_ATTR`
+(`mark`, with `keep` so that Yosys does not drop the marked name of a net that has two), so
+the build can find them in both tools' netlists without a second list of names:
+
+- `CDC_SOURCE`: a register whose output another clock domain reads: each `MultiBitCrossing`'s
+  `hold`, `req` and `ack_o`, and the slot's `rst_req`, `ce_x` (the clock enable) and `alive`
+  toggle (`slot.py`);
+- `CDC_SYNC`: the first register of the receiving domain: each `MultiBitCrossing`'s `dst`,
+  the first flop of every `MultiReg` (marked by its lowering, `MarkedMultiReg`, which the
+  FPGA build installs in place of LiteX's) and both `AsyncClearFlop`s.
+
+The demo build (`tt_harness/demo_build.py`) fails on any path between two clock domains that
+does not start at a `CDC_SOURCE` register and end at a `CDC_SYNC` one, and constrains those
+that do (`set_max_delay -datapath_only` in Vivado, the same budget in the open flow).
 """
 
 from __future__ import annotations
 
+from litex.build.xilinx.common import XilinxMultiRegImpl
 from migen import ClockSignal, If, Instance, Module, Signal, wrap
 from migen.fhdl.specials import SPECIAL_INPUT, SPECIAL_OUTPUT, Special
 from migen.fhdl.verilog import _printexpr as verilog_printexpr
 from migen.genlib.cdc import MultiReg
+
+# The Verilog attribute that names the registers of every crossing, and its two values (see
+# "The named registers, marked in the netlist" above).
+CDC_ATTR = "tt_cdc"
+CDC_SOURCE = "source"
+CDC_SYNC = "sync"
+CDC_ROLES = (CDC_SOURCE, CDC_SYNC)
+# Also on every marked register: Yosys keeps only one name of nets that alias (a `dst` that
+# a CSR reads through an `assign` loses its own), and the mark goes with the dropped name.
+KEEP_ATTR = ("keep", "true")
+
+
+def mark(signal: Signal, role: str) -> Signal:
+    """Mark `signal`, a register, as a crossing's `role` (`CDC_SOURCE` or `CDC_SYNC`)."""
+    if role not in CDC_ROLES:
+        raise ValueError(f"unknown crossing role {role!r}; known: {', '.join(CDC_ROLES)}")
+    signal.attr.add((CDC_ATTR, role))
+    signal.attr.add(KEEP_ATTR)
+    return signal
+
+
+def role_of(attrs) -> str | None:
+    """The crossing role in a set of Migen attributes, or None."""
+    roles = [v for a in attrs if isinstance(a, tuple) and a[0] == CDC_ATTR for v in a[1:]]
+    if len(roles) > 1:
+        raise ValueError(f"a register has more than one crossing role: {roles}")
+    return roles[0] if roles else None
+
+
+class MarkedMultiReg:
+    """Lowering of Migen's `MultiReg` for the FPGA builds: LiteX's Xilinx one (two flops,
+    `ASYNC_REG`, no shift-register extraction) with its first flop marked `CDC_SYNC`.
+    Install it with `special_overrides()`."""
+
+    @staticmethod
+    def lower(dr):
+        impl = XilinxMultiRegImpl(dr.i, dr.o, dr.odomain, dr.n)
+        if impl.regs:
+            mark(impl.regs[0], CDC_SYNC)
+        return impl
+
+
+def special_overrides() -> dict:
+    """The special overrides an FPGA build of the harness passes to `get_verilog`."""
+    return {MultiReg: MarkedMultiReg}
 
 
 class AsyncClearFlop(Special):
@@ -122,7 +186,7 @@ class _XilinxFdce(Module):
     def __init__(self, flop: AsyncClearFlop):
         self.specials += Instance(
             "FDCE",
-            attr={"async_reg"},
+            attr={"async_reg", (CDC_ATTR, CDC_SYNC)},
             p_INIT=0,
             i_C=flop.clk,
             i_CE=1,
@@ -186,6 +250,9 @@ class MultiBitCrossing(Module):
         req_s = Signal()  # req in odomain
         ack_s = Signal()  # ack_o in idomain
         self.hold, self.req, self.ack_o, self.req_s, self.ack_s = hold, req, ack_o, req_s, ack_s
+        for register in (hold, req, ack_o):
+            mark(register, CDC_SOURCE)
+        mark(self.dst, CDC_SYNC)
 
         self.specials += [
             MultiReg(req, req_s, odomain=odomain, n=2),

@@ -172,7 +172,7 @@ from migen import (
 )
 from migen.genlib.cdc import MultiReg
 
-from tt_harness.core.cdc import AsyncClearFlop, MultiBitCrossing
+from tt_harness.core.cdc import CDC_SOURCE, AsyncClearFlop, MultiBitCrossing, mark
 from tt_harness.core.clocking import ProjectClock
 from tt_harness.core.gamepad import FRAME_RATE_HZ, GamepadEmulator
 
@@ -218,6 +218,10 @@ class ProjectSlot(Module):
         self.pin_rst_n = Signal()
         self.pin_ena = Signal()
         self.pin_ui_in = Signal(8)
+        # The constant 0, as a named net, so the netlist gate (`tt_harness.input_gate`) can
+        # find the port's connection.
+        self.pin_uio_in = Signal(8)
+        self.comb += self.pin_uio_in.eq(0)
         # project-domain overrides (AtSpeedCheck).
         self.override = Signal()
         self.override_rst = Signal()
@@ -244,6 +248,8 @@ class ProjectSlot(Module):
         # `gamepad_enable` and `ui_in` are then.
         ce_x = Signal()
         self.rst_req = rst_req = Signal(reset=1)
+        mark(ce_x, CDC_SOURCE)  # read by ProjectClock's enable synchroniser
+        mark(rst_req, CDC_SOURCE)  # the asynchronous clear of the reset flops
         self.sync += [
             ce_x.eq(self.clock_enable),
             If(~self.rst_n, rst_req.eq(1)).Elif(
@@ -309,6 +315,7 @@ class ProjectSlot(Module):
         # clock_running.
         divider = Signal(2, reset_less=True)
         alive = Signal(reset_less=True)
+        mark(alive, CDC_SOURCE)
         sd += [divider.eq(divider + 1), If(divider == ALIVE_DIVIDE - 1, alive.eq(~alive))]
         alive_s = Signal()
         alive_d = Signal(reset_less=True)
@@ -334,7 +341,7 @@ class ProjectSlot(Module):
                 i_rst_n=self.pin_rst_n,
                 i_ena=self.pin_ena,
                 i_ui_in=self.pin_ui_in,
-                i_uio_in=Constant(0, 8),
+                i_uio_in=self.pin_uio_in,
                 o_uo_out=self.uo_out,
                 o_uio_out=self.uio_out,
                 o_uio_oe=self.uio_oe,
