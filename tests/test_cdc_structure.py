@@ -334,3 +334,21 @@ def test_the_analyser_reports_the_domains_feeding_each_memory_port() -> None:
     assert a.errors == []
     ports = sorted((p.domain, sorted(p.input_domains)) for p in a.memory_ports)
     assert ports == [("project", ["sys"]), ("sys", ["sys"])]
+
+
+def test_the_analyser_reports_an_asynchronous_memory_read_as_an_error() -> None:
+    """A port with `async_read` is distributed RAM, its read data combinational from the
+    address: the framebuffer must be block RAM."""
+
+    class M(Module):
+        def __init__(self) -> None:
+            self.clock_domains.cd_sys = ClockDomain("sys")
+            self.mem = mem = Memory(8, 4, name="buffer")
+            read = mem.get_port(async_read=True, clock_domain="sys")
+            self.specials += mem, read
+            a = Signal(2)
+            self.sync += a.eq(a + 1)
+            self.comb += read.adr.eq(a)
+
+    a = cdc_structure.analyse(M(), {}, {})
+    assert a.errors == ["a port of memory buffer reads asynchronously"]

@@ -30,7 +30,8 @@ What is reported:
 - `memory_ports`: each port of a `Memory`, with its clock domain (the domain of its read data)
   and the domains of its inputs (address, write data and enables). A memory written in one
   domain and read in another is a dual-clock block RAM: each port must be fed from its own
-  domain only.
+  domain only. A port that reads asynchronously (`async_read`) is an error: its read data
+  is combinational, not block RAM's registered output.
 """
 
 from __future__ import annotations
@@ -126,7 +127,13 @@ def analyse(module, ports: dict, instances: dict[str, str]) -> Analysis:
         elif isinstance(special, _MemoryPort):
             special_output(special.dat_r, special.clock.cd, "a memory port")
         elif isinstance(special, Memory):
-            pass  # its ports are listed as specials of their own
+            # Its ports are specials of their own (above). A read that is combinational from
+            # the address is not block RAM, and its data is in no clock domain.
+            for port in special.ports:
+                if port.async_read and port.dat_r is not None:
+                    out.errors.append(
+                        f"a port of memory {special.name_override} reads asynchronously"
+                    )
         elif isinstance(special, Instance):
             label = special.name_override or special.of
             outputs = [i for i in special.items if isinstance(i, Instance.Output)]
