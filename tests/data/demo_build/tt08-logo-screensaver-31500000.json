@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "shuttle": "tt08",
+  "projects": [
+    {
+      "address": 716,
+      "subtile": 0,
+      "duration_ms": 60000,
+      "clock_hz": 31500000,
+      "ui_in": 0,
+      "steps": []
+    }
+  ]
+}
