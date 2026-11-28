@@ -498,6 +498,18 @@ class SevenSegCSR(LiteXModule, AutoCSR):
             getattr(self._duty.fields, seg).eq(core.duty[8 * i : 8 * i + 8])
             for i, seg in enumerate(SEGMENTS)
         ]
+        self._error = CSRStorage(
+            fields=[
+                CSRField(seg, size=1, description=f"Segment {seg} of the error pattern.")
+                for seg in SEGMENTS
+            ],
+            description=(
+                "The harness's error display: a seven-segment pattern, bit i the segment of"
+                " `uo_out[i]`; 0 is no error. The firmware sets it when it refuses demo.json;"
+                " the host shows it. It never reaches the project."
+            ),
+        )
+        self.error = self._error.storage
 
 
 class AtSpeedCSR(LiteXModule, AutoCSR):

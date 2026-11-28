@@ -221,8 +221,10 @@ model and to the vectors in [`tests/data/demo/`](../tests/data/demo). Where they
    of U+0000..U+10FFFF. A board whose Python has another Unicode version may print a code
    point assigned in one version and not the other differently.
 5. The error display: the board enables its factory-test design to show the pattern on the
-   7-segment display; the harness holds the chosen project disabled and in reset and writes
-   the pattern to `ui_in` ([`docs/registers.md`](registers.md), "The error pattern").
+   7-segment display. The harness holds the chosen project disabled, in reset and with its
+   clock stopped, writes nothing to its `ui_in`, and writes the pattern to `sevenseg_error`,
+   the harness's own error display that the host side shows
+   ([`docs/registers.md`](registers.md), "The error pattern").
 
 ## Not covered here
 

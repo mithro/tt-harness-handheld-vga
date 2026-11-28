@@ -276,6 +276,7 @@ PATTERNS = {
     "vga_blank": 1,
     "vga_readback_addr": 7,
     "atspeed_clocks": 0xDEADBEEF,
+    "sevenseg_error": 0x79,
 }
 PROJECT_PERIOD = 20_400  # ps: about 49 MHz, unrelated to the 20 ns system clock
 WATCHDOG_CYCLES = 5_000  # system clocks; the bus generators here end within about 1_700

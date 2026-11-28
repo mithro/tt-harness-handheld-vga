@@ -9,8 +9,8 @@ decoded, and the tests read its lines (docs/registers.md, "Console").
   settings `tt_harness.core.vga.classify` gives for the same measurements.
 - `test_sim_invalid_demo_is_loud_and_project_stays_disabled`: an invalid demo.json in the
   image (the gamepad vector of `tests/data/demo/invalid/`) prints every message of the
-  vector, exactly, and the project is never enabled: in reset, clock stopped, ui_in
-  blinking the seven-segment error pattern.
+  vector, exactly, and the project is never enabled (in reset, clock stopped, `ui_in` at its
+  reset value) while the harness's `sevenseg_error` holds the error pattern.
 - `test_sim_gamepad_step_reaches_the_design`: `ttsky25a/tt_um_gamepad_pmod_demo` draws a
   white glyph for every button and a green one for a held button; framebuffer pixels read
   back through the CSR window (`fb` lines) show the A glyph white before the step that
@@ -34,6 +34,7 @@ GAMEPAD = "ttsky25a/tt_um_gamepad_pmod_demo"
 WHITE = vga.pack(3, 3, 3)
 GREEN = vga.pack(0, 3, 0)
 FB_WIDTH = sim.FB_SIZE[0]
+SEVENSEG_ERROR_PATTERN = 0x79  # "E": segments a, d, e, f, g (firmware/main.c)
 
 pytestmark = [
     pytest.mark.toolchain,
@@ -142,7 +143,7 @@ def test_sim_invalid_demo_is_loud_and_project_stays_disabled(tmp_path: Path) -> 
     result = sim.run(
         src,
         demo(project),  # the build validates this one
-        until=lambda text: sum(ln.startswith("error display ") for ln in complete(text)) >= 2,
+        until=lambda text: any(ln.startswith("error display ") for ln in complete(text)),
         max_cycles=40_000_000,
         out_dir=tmp_path,
         boot_demo_json=invalid.read_bytes(),  # the image holds this one
@@ -155,10 +156,15 @@ def test_sim_invalid_demo_is_loud_and_project_stays_disabled(tmp_path: Path) -> 
     assert messages == expected  # none of these holds a character the console escapes
     assert not [ln for ln in out if ln.startswith(("state ", "demo ok", "mode ", "clock "))]
     display = [fields(ln) for ln in out if ln.startswith("error display ")]
-    for d in display:
-        assert (d["ena"], d["rst_n"], d["clock_enable"]) == ("0", "0", "0")
-    assert [d["ui_in"] for d in display[:2]] == [str(0x79), "0"]
-    assert int(display[1]["t_ms"]) - int(display[0]["t_ms"]) in (250, 251)
+    assert display == [
+        {
+            "sevenseg_error": str(SEVENSEG_ERROR_PATTERN),  # read back from the register
+            "ena": "0",
+            "rst_n": "0",
+            "clock_enable": "0",
+            "ui_in": "0",  # slot_ui_in's reset value: nothing was written to it
+        }
+    ]
 
 
 def _addr(x: int, y: int) -> int:

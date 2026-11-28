@@ -6,7 +6,7 @@
 // "Console"). It runs from the ROM, in place of LiteX's BIOS.
 //
 // An invalid demo.json (or one this build cannot run) is a loud failure: every message is
-// printed, the project is never enabled, and ui_in blinks the seven-segment error pattern.
+// printed, the project is never enabled, and sevenseg_error holds the error pattern.
 
 #include <generated/csr.h>
 #include <generated/soc.h>
@@ -19,10 +19,9 @@
 #include "text.h"
 #include "vga_mode.h"
 
-// The error pattern, as the demo board shows it: an "E" (segments a, d, e, f, g) on the
-// seven-segment display, on ui_in of a project held in reset, blinking with 0.
+// The error pattern the demo board shows: an "E" (segments a, d, e, f, g), written to the
+// harness's error display (the sevenseg_error register) when demo.json is refused.
 #define SEVENSEG_ERROR_PATTERN 0x79
-#define ERROR_BLINK_MS 250
 #define STATUS_SETTLE_MS 50  // a slot_status change must hold this long to be reported
 #define FB_PROBE_MS 20       // the period of `fb` lines, when probes are configured
 
@@ -81,32 +80,26 @@ static void check_build(uint32_t clock_hz) {
 }
 
 static void error_display(void) {
-    // the project is never enabled: in reset, clock stopped, ui_in showing the pattern
+    // The project is never enabled: disabled, in reset, clock stopped, its inputs as at
+    // reset. The pattern goes to the harness's own display (sevenseg_error), not the project.
     gamepad_enable_write(0);
     slot_ena_write(0);
     slot_clock_enable_write(0);
     slot_rst_n_write(0);
-    uint32_t on = 1, next = clock_ms();
-    for (;;) {
-        uint32_t now = clock_ms();
-        console_poll();
-        if ((int32_t)(now - next) < 0) continue;
-        next += ERROR_BLINK_MS;
-        slot_ui_in_write(on ? SEVENSEG_ERROR_PATTERN : 0);
-        struct text *t = line();
-        text_str(t, "error display t_ms=");
-        text_u32(t, now);
-        text_str(t, " ena=");
-        text_u32(t, slot_ena_read());
-        text_str(t, " rst_n=");
-        text_u32(t, slot_rst_n_read());
-        text_str(t, " clock_enable=");
-        text_u32(t, slot_clock_enable_read());
-        text_str(t, " ui_in=");
-        text_u32(t, slot_ui_in_read());
-        console_text(t);
-        on = !on;
-    }
+    sevenseg_error_write(SEVENSEG_ERROR_PATTERN);
+    struct text *t = line();
+    text_str(t, "error display sevenseg_error=");
+    text_u32(t, sevenseg_error_read());
+    text_str(t, " ena=");
+    text_u32(t, slot_ena_read());
+    text_str(t, " rst_n=");
+    text_u32(t, slot_rst_n_read());
+    text_str(t, " clock_enable=");
+    text_u32(t, slot_clock_enable_read());
+    text_str(t, " ui_in=");
+    text_u32(t, slot_ui_in_read());
+    console_text(t);
+    for (;;) console_poll();
 }
 
 // ---- clock and VGA reports --------------------------------------------------------------
