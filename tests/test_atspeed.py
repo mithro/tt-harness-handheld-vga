@@ -290,8 +290,12 @@ def design(request, tmp_path_factory) -> _Sim:
         pytest.skip("verilator not installed")
     project_id = request.param
     ref_dir = verdict.default_reference_dir()
-    if not (ref_dir / project_id / "reference.json").is_file():
-        pytest.skip(f"no shared reference for {project_id} under {ref_dir}")
+    if not ref_dir.is_dir():
+        pytest.skip(f"no shared reference directory {ref_dir} (set TT_REFERENCE_DIR)")
+    # The directory is there: a pool design without its reference is a FAILURE, not a skip
+    # (a skip here once hid every test below after the reference layout changed).
+    ref_file = verdict.reference_path(ref_dir, project_id)
+    assert ref_file.is_file(), f"no shared reference for {project_id}: {ref_file} is missing"
     ref = verdict.load_reference(ref_dir, project_id)
     try:
         sources = pool.load_sources(project_id)
