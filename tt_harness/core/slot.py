@@ -20,14 +20,14 @@ Crossings (every signal that passes between the domains; see also `cdc.py`)
 
 sys -> project, each source a direct `sys` flip-flop owned by the slot:
 
-- `ena`, `gamepad_enable`: two-flop `MultiReg`, then (`ena`) the final register or
-  (`gamepad_enable`) the mux select in front of the final register.
-- reset request (`rst_req`, the inverse of `rst_n`; a `sys` flop whose value after a `sys`
-  reset is "asserted"): the asynchronous clear of the reset chain (below). The clear pin
-  sees a glitch-free flip-flop output.
-- `ui_in` (8 bits), `gamepad_buttons` (24 bits): `MultiBitCrossing` (toggle handshake,
-  `hold` register stable while the request crosses; see `cdc.py`, which also gives the
-  worst-case latency).
+- the control word `{release, ena, gamepad_enable, ui_in}` (11 bits, `ctl_x`): ONE
+  `MultiBitCrossing` (toggle handshake, `hold` register stable while the request crosses;
+  see `cdc.py`, which also gives the worst-case latency), so the project always holds the
+  four fields of one word ("The control word" below). No control crosses as a separate bit.
+- `gamepad_buttons` (24 bits, `buttons_x`): its own `MultiBitCrossing`.
+- reset request (`rst_req`; a `sys` flop whose value after a `sys` reset is "asserted"): the
+  asynchronous clear of the reset chain (below). The clear pin sees a glitch-free flip-flop
+  output.
 - `clock_enable`: into `ProjectClock.enable`, which synchronises it into the MMCM's own
   clock domain (`ProjectClock` docstring).
 
@@ -57,28 +57,70 @@ Reset: asynchronous assert, synchronous release
 -----------------------------------------------
 
 The project's `rst_n` is the output of the second of two `AsyncClearFlop`s (FDCE) in
-`project`, both cleared by the request, with `d` of the first from the at-speed check::
+`project`, both cleared by the request, with `d` of the first the release bit of the
+delivered control word (a `project` register) gated by the at-speed check::
 
-    rst_req (sys flop) --+------------------------------+  async clear (CLR) of both
-                         v                              v
-    ~override_rst -----------> [ FF1 D ]  Q --> [ FF2 D ]  Q --> project.rst_n (pin)
-                                    ^ project clock       ^ project clock
+    rst_req (sys flop) ---------+---------------------+  async clear (CLR) of both
+                                v                     v
+    release & ~override_rst --> [ FF1 D ]  Q --> [ FF2 D ]  Q --> project.rst_n (pin)
+    (project registers)              ^ project clock       ^ project clock
 
 Assertion works with the project clock stopped: the pin goes low as soon as the request
-does. Release is synchronous: after the request is released the pin goes high just after the
-second project edge (a request released within the setup/recovery window of an edge may take
-one more). `rst_n` is therefore never changed except by the output of a project-clock
-flip-flop or by the clear of that flip-flop, which only a glitch-free `sys` flip-flop can
-drive. The chain starts at 0 (design in reset) on power-up. The at-speed check asserts reset
-synchronously through `d` of FF1 (it overrides nothing else on this path), so both reset
-sources combine without any logic on the pin.
+does, one system clock after `rst_n` is written 0. Release is synchronous: the pin goes high
+just after the second project edge at which the delivered release bit is 1 and the request is
+low. `rst_n` is therefore never changed except by the output of a project-clock flip-flop or
+by the clear of that flip-flop, which only a glitch-free `sys` flip-flop can drive. The chain
+starts at 0 (design in reset) on power-up. The at-speed check asserts reset synchronously
+through `d` of FF1 (it overrides nothing else on this path), so the reset sources combine
+without any logic on the pin.
+
+The control word: the order of writes is kept at the pins
+---------------------------------------------------------
+
+Firmware writes `ui_in` and `ena` (and `gamepad_enable`) and then releases `rst_n`; a design
+may read its `ui_in` straps in its first clocks out of reset. So the release travels WITH the
+values: `{release, ena, gamepad_enable, ui_in}` cross as one word, the delivered release bit
+is FF1's `d`, and `pin_ena` / `pin_ui_in` are registered from the same delivered word. On
+the first project clock at which the design sees `rst_n` high, `ena` and `ui_in` therefore
+hold the last values written before the release was written (or newer ones), at any clock
+ratio and with the clock stopped during the writes: the pins take the word's values one
+clock after it is delivered and `rst_n` two clocks after (`tests/test_slot_order.py`).
+
+The release bit sent is `~rst_req`, and the request is a set/clear flop in `sys`::
+
+    rst_n written 0                                       -> rst_req := 1   (next sys clock)
+    rst_n is 1, no transfer in flight and the last word
+    picked up had release 0 (so the project holds 0)      -> rst_req := 0
+
+so the request (the clear pins) is released only once the project is known to hold release
+0, and a word with release 1 is picked up only after that, with the values of that moment.
+Without this a release bit delivered earlier would still be in the project during a short
+reset pulse, and `rst_n` would rise again after two clocks with the old `ui_in`. Consequences:
+
+- Release latency with nothing in flight: the request falls one system clock after the
+  write, the word is picked up one system clock later, and the pin rises at the 5th project
+  edge after that (two synchroniser flops, the capture, FF1, FF2): 3 project clocks and one
+  system clock more than a bare two-flop release. With a transfer in flight, or after a reset
+  pulse given to a running design (whose release-0 word must first be delivered and
+  acknowledged), up to about 3 project and 4 system clocks more.
+- A reset pulse of any length, however short, holds the design in reset until that round
+  trip is done: about 8 project clocks or more.
+- With the project clock stopped a reset stays asserted until the clock runs (it could not
+  be released without a clock anyway); nothing in `sys` waits.
+- A write of `ena` or `ui_in` AFTER the release is its own later word.
+
+Not part of the word: `gamepad_buttons` (its own crossing, read by the emulator at the start
+of each frame: button values are not ordered against the release) and, when `gamepad_enable`
+is set, bits 6:4 of the project's `ui_in`, which then come from the emulator in `project` and
+not from the word. `gamepad_enable` itself is in the word, so the mux select is in place at
+the release.
 
 The `ui_in[6:4]` mux and the gamepad
 ------------------------------------
 
-With `gamepad_enable` (synchronised into `project`) set, bits 6:4 of the project's `ui_in`
+With `gamepad_enable` (a field of the delivered control word) set, bits 6:4 of the project's `ui_in`
 are the gamepad emulator's `data` (bit 6), `clock` (bit 5) and `latch` (bit 4); otherwise,
-and for the other five bits always, they are the crossed `ui_in`. The mux is in FRONT of the
+and for the other five bits always, they are the word's `ui_in`. The mux is in FRONT of the
 final `project` register, so the pin is still a direct flip-flop output; this adds one
 project clock of delay to the gamepad signals (they arrive one clock after the emulator's
 own outputs), which a receiver does not care about (it needs levels to last a slot of 4 or

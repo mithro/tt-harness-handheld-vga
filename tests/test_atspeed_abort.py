@@ -69,7 +69,17 @@ def setup(b: Bench, per: int = 1):
     number of system clocks in a project clock)."""
     yield b.slot.rst_n.eq(1)
     yield b.slot.ui_in.eq(SW_UI)
-    yield from waits(40 + 8 * per)
+    yield from waits(40 + 14 * per)
+
+
+def stop_clock(b: Bench):
+    """Stop the project clock with the design released and the pins at the software's values.
+    (A bench that starts with the clock stopped releases reset only some clocks after the
+    clock starts, because the release crosses in the control word: a check cut before that
+    would be over before the first normal sample, where `assert_clean` starts judging.)"""
+    assert ((yield b.slot.pin_rst_n), (yield b.slot.pin_ui_in)) == (1, SW_UI)
+    yield b.ce_project.eq(0)
+    yield from waits(3)
 
 
 def start(b: Bench, n: int):
@@ -218,12 +228,16 @@ def test_abort_with_the_clock_stopped_then_started_never_reports_and_any_begin_i
     `run = 0` word follows within the handshake latency and cuts it. What is guaranteed: no
     `done`, one well-formed cut block (reset low from its first clock), pins normal again
     within `cut_samples`.
+
+    The clock is stopped only once the pins are at the software's values (`stop_clock`), so
+    that the cut block is one the pin checker judges.
     """
-    b = make(running=False)
+    b = make()
     rec, out = Recorder(b), {}
 
     def sysgen():
         yield from setup(b)
+        yield from stop_clock(b)
         yield from start(b, 40)
         yield from waits(50)
         out["busy_before"] = yield b.check.busy
@@ -573,11 +587,12 @@ def test_a_run_0_word_with_a_new_seq_never_begins_a_check() -> None:
     start word is in flight, a second start and an abort follow, and on resume the word in
     flight is delivered first and then the newest one, `run = 0` with the second `seq`. Only
     the first start may begin (and is cut); the `run = 0` word must not begin a second one."""
-    b = make(running=False)
+    b = make()
     rec, out = Recorder(b), {}
 
     def sysgen():
         yield from setup(b)
+        yield from stop_clock(b)
         yield from start(b, 40)
         yield from waits(30)
         yield from start(b, 41)  # a second `seq` never delivered with `run = 1`

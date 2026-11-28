@@ -37,8 +37,16 @@ def waits(n: int):
 
 
 def _settle(period: int) -> int:
-    """System clocks that are certainly enough for anything in flight to arrive."""
-    return 40 + 30 * period // SYS_PERIOD
+    """System clocks that are certainly enough for anything in flight to arrive: three
+    transfers in a row (at most 4 project clocks and 3 system clocks each) and the two reset
+    flops are under 20 project clocks."""
+    return 40 + 24 * period // SYS_PERIOD
+
+
+def _offsets(period: int) -> tuple[int, ...]:
+    """Phases of the project clock tried: against a clock much slower than `sys` the phase
+    within a system period changes nothing, so one."""
+    return tuple(o for o in OFFSETS if o < period) if period < 100_000 else OFFSETS[1:2]
 
 
 def scenario(period: int, offset: int, stopped: bool, start: str, gap: int, gamepad: bool = False):
@@ -90,7 +98,7 @@ def scenario(period: int, offset: int, stopped: bool, start: str, gap: int, game
         if stopped:
             yield from waits(25)
             yield slot.ce_project.eq(1)
-        yield from waits(3 * _settle(period))
+        yield from waits(_settle(period))
 
     run(slot, [sysgen()], [rec()], project=(period, offset))
     return pins, lines
@@ -111,9 +119,7 @@ def test_rst_n_never_rises_before_the_ena_and_ui_in_written_before_the_release(
     clock: str, stopped: bool, start: str, gap: int
 ) -> None:
     period = PERIODS[clock]
-    for offset in OFFSETS:
-        if offset >= period:
-            continue
+    for offset in _offsets(period):
         pins, _ = scenario(period, offset, stopped, start, gap)
         high = [k for k, p in enumerate(pins) if p[0] == 1]
         assert high, f"offset {offset}: rst_n never rose ({pins[:12]})"
@@ -151,9 +157,7 @@ def test_release_latency_when_nothing_is_in_flight(clock: str) -> None:
     which the design sees `rst_n` high: 5 project clocks after the word is picked up, which
     is two system clocks after the write."""
     period = PERIODS[clock]
-    for offset in OFFSETS:
-        if offset >= period:
-            continue
+    for offset in _offsets(period):
         slot = gate(ProjectSlot(None, Signal(), 100_000_000, 25_175_000, sim_clock=True))
         phase = {"released": False}
         seen: list[int] = []

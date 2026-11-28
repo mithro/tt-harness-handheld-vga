@@ -32,7 +32,7 @@ from test_gamepad import _expected_levels
 from tt_harness.compare import inputs
 from tt_harness.core.cdc import AsyncClearFlop
 from tt_harness.core.gamepad import FRAME_SLOTS
-from tt_harness.core.slot import CLOCK_RUNNING_TIMEOUT, ProjectSlot
+from tt_harness.core.slot import CLOCK_RUNNING_TIMEOUT, CTL_ENA, CTL_GAMEPAD, CTL_UI_IN, ProjectSlot
 
 SYS_HZ = 50_000_000
 PERIODS = (39_700, 27_300)  # project clock periods unrelated to 20 ns, in ps
@@ -124,7 +124,8 @@ def _is_subsequence(small: list[int], big: list[int]) -> bool:
 def test_multibit_control_is_never_mixed(period: int, which: str) -> None:
     """The project only ever holds written values, in order, and ends on the last one."""
     zero, one = (0x00, 0xFF) if which == "ui_in" else (0x000000, 0xFFFFFF)
-    crossing = "ui_x" if which == "ui_in" else "buttons_x"
+    # `ui_in` is the top field of the control word (the other fields stay 0 here).
+    crossing, shift = ("ctl_x", CTL_UI_IN) if which == "ui_in" else ("buttons_x", 0)
     values = _writes(zero, one, rounds=1)
     gaps = GAPS
     delivered_everywhere: set[tuple[int, int]] = set()
@@ -145,7 +146,9 @@ def test_multibit_control_is_never_mixed(period: int, which: str) -> None:
 
         def projgen():
             while True:
-                seen.append((yield x.dst))
+                word = yield x.dst
+                assert word & ((1 << shift) - 1) == 0
+                seen.append(word >> shift)
                 yield
 
         def monitor():
@@ -247,8 +250,11 @@ def test_multibit_latency_is_within_the_stated_bound(period: int) -> None:
 
 @pytest.mark.parametrize("period", [39_700, pytest.param(27_300, marks=pytest.mark.slow)])
 def test_reset_release_is_synchronous_at_every_phase(period: int) -> None:
-    """`rst_n` at the pin rises just after a project clock edge, the second after the
-    request is released, and falls at once on assertion."""
+    """`rst_n` at the pin rises just after a project clock edge and falls at once on
+    assertion. Which edge: the release bit travels in the control word, so with nothing in
+    flight the request falls one system clock after the write, the word is picked up one
+    system clock later (edge `c + 1` below), and the pin rises at the fifth project edge after
+    that (two synchroniser flops, the capture, the two reset flops)."""
     for offset in OFFSETS:
         if offset >= period:
             continue
@@ -270,7 +276,7 @@ def test_reset_release_is_synchronous_at_every_phase(period: int) -> None:
                     yield
                     c += 1
                 yield slot.rst_n.eq(1)
-                cycles["release"].append(c + 1)  # rst_req changes after edge c + 1
+                cycles["release"].append(c + 1)  # rst_req falls at edge c + 1
                 for _ in range(60):
                     yield
                     c += 1
@@ -287,10 +293,10 @@ def test_reset_release_is_synchronous_at_every_phase(period: int) -> None:
         falls = [t for (t, v), (_, p) in zip(log[1:], log, strict=False) if v == 0 and p == 1]
         assert len(rises) == 3 and len(falls) == 3, (offset, rises, falls)
         for c, tr in zip(cycles["release"], rises, strict=True):
-            t_req = sys_edge(c)  # the request is released here
-            _e1, e2 = [e for e in edges if e > t_req][:2]
-            assert 0 <= tr - e2 <= 2 * TICK_PERIOD, (
-                f"offset {offset}: rose at {tr}, second edge after release {e2}"
+            t_word = sys_edge(c + 1)  # the word with the release bit is picked up here
+            e5 = [e for e in edges if e > t_word][4]
+            assert 0 <= tr - e5 <= 2 * TICK_PERIOD, (
+                f"offset {offset}: rose at {tr}, fifth edge after the pick-up {e5}"
             )
         for c, tf in zip(cycles["assert"], falls, strict=True):
             assert 0 <= tf - sys_edge(c) <= 2 * TICK_PERIOD, f"offset {offset}: fell at {tf}"
@@ -303,7 +309,10 @@ def test_reset_release_is_synchronous_at_every_phase(period: int) -> None:
 
 def test_reset_asserts_with_the_project_clock_stopped() -> None:
     """The clock stops, then the request: `rst_n` falls with no clock edge at all, stays low
-    after the request is released, and rises two clocks after the clock restarts."""
+    after the request is released, and rises after the clock restarts: the word with the
+    release bit 0 (in flight) arrives in 3 project clocks and is acknowledged, the request
+    falls and the word with the release bit follows (about 5 system clocks), and that takes
+    5 project clocks (and one for phase) to the pin."""
     slot = make()
     log: list[tuple[int, int]] = []
     clock = {"t": 0}
@@ -329,7 +338,7 @@ def test_reset_asserts_with_the_project_clock_stopped() -> None:
         marks["still_low"] = yield slot.pin_rst_n
         yield slot.ce_project.eq(1)  # the clock restarts
         marks["restart"] = clock["t"]
-        yield from waits(20)
+        yield from waits(40)
         marks["high"] = yield slot.pin_rst_n
 
     run(slot, [sysgen()], tick_gens=[_passive(tickgen())])
@@ -341,7 +350,7 @@ def test_reset_asserts_with_the_project_clock_stopped() -> None:
         for (t, v), (_, p) in zip(log[1:], log, strict=False)
         if v == 1 and p == 0 and t > marks["restart"]
     )
-    assert rise - marks["restart"] <= 3 * 39_700 + 2 * TICK_PERIOD
+    assert rise - marks["restart"] <= 9 * 39_700 + 5 * SYS_PERIOD + 2 * TICK_PERIOD
 
 
 # Gamepad mux ----------------------------------------------------------------------------------
@@ -428,16 +437,17 @@ def test_stopped_clock_never_blocks_the_system_side(how: str) -> None:
         done["locked"] = yield slot.locked
         done["running"] = yield slot.clock_running
         done["rst_pin"] = yield slot.pin_rst_n
-        done["ui_x_busy"] = yield slot.ui_x.busy
+        done["ctl_x_busy"] = yield slot.ctl_x.busy
         # No system-side register is stuck: the latest value is held, ready to go.
-        done["held"] = yield slot.ui_x.hold
+        done["held"] = yield slot.ctl_x.hold
 
     run(slot, [sysgen()], project=None)
     assert done["cycles"] == 90
     assert done["locked"] == 0 and done["running"] == 0
     assert done["rst_pin"] == 0
-    assert done["ui_x_busy"] == 1  # a transfer waits for the clock; the writer never does
-    assert done["held"] == 0x11  # the in-flight transfer carries the first value; see below
+    assert done["ctl_x_busy"] == 1  # a transfer waits for the clock; the writer never does
+    # The in-flight word carries the first values written (release bit 0); see below.
+    assert done["held"] == 0x11 << CTL_UI_IN | 1 << CTL_ENA | 1 << CTL_GAMEPAD
 
 
 def test_values_written_while_stopped_arrive_after_the_clock_starts() -> None:
@@ -554,13 +564,13 @@ def test_reset_request_and_every_crossing_source_is_a_direct_sys_register() -> N
     flops = [s for s in fragment.specials if isinstance(s, AsyncClearFlop)]
     into_project = [m for m in multiregs if m.odomain == "project"]
     into_sys = [m for m in multiregs if m.odomain == "sys"]
-    assert len(into_project) == 2 + 2  # ena, gamepad_enable; the two handshakes' requests
+    assert len(into_project) == 2  # the two handshakes' requests: nothing else crosses
     for m in into_project:
         assert sys_register(m.i), f"a MultiReg into project from a non-sys-register {m.i}"
     for f in flops:
         assert sys_register(f.clear), "the asynchronous reset request is not a sys register"
     assert {f.cd for f in flops} == {"project"} and len(flops) == 2
-    for x in (slot.ui_x, slot.buttons_x):
+    for x in (slot.ctl_x, slot.buttons_x):
         assert sys_register(x.hold) and sys_register(x.req)
         assert project_register(x.ack_o) and project_register(x.dst)
     locked_src = slot.clock.locked
@@ -572,7 +582,7 @@ def test_reset_request_and_every_crossing_source_is_a_direct_sys_register() -> N
     # Nothing from `sys` is used directly in a `project` register: the slot's own project
     # statements read no signal that is assigned in `sys` (hold is the one allowed read).
     sys_signals = sync["sys"]
-    allowed = {slot.ui_x.hold, slot.buttons_x.hold}
+    allowed = {slot.ctl_x.hold, slot.buttons_x.hold}
     from migen.fhdl.tools import list_signals
 
     for stmts in fragment.sync.get("project", []):
