@@ -250,35 +250,81 @@ def _picture(clock: int) -> int:
     return _uo(0, 0, 0, hsync, vsync)
 
 
+# Every writable register and a value to write to it (none is its reset value).
+PATTERNS = {
+    "slot_ena": 1,
+    "slot_rst_n": 1,
+    "slot_ui_in": 0xC3,
+    "slot_clock_enable": 1,
+    "gamepad_enable": 1,
+    "gamepad_buttons": 0xA5A5A5,
+    "vga_divider": 5,
+    "vga_h_offset": 0xABC,
+    "vga_v_offset": 0x5A5,
+    "vga_h_step": 3,
+    "vga_v_step": 2,
+    "vga_blank": 1,
+    "vga_readback_addr": 7,
+    "atspeed_clocks": 0xDEADBEEF,
+}
+PROJECT_PERIOD = 20_400  # ps: about 49 MHz, unrelated to the 20 ns system clock
+WATCHDOG_CYCLES = 5_000  # system clocks; the bus generators here end within about 1_700
+
+
+class _Bus:
+    """A finalised SoC without a CPU, a wishbone master in its place, and register access by
+    name (`registers.registers` gives the addresses)."""
+
+    def __init__(self, soc) -> None:
+        soc.clock_domains.cd_sys = ClockDomain("sys")
+        self.master = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+        soc.bus.add_master(name="tb", master=self.master)
+        soc.finalize()
+        self.soc = soc
+        self.regs = {r.name: r for r in registers.registers(soc)}
+
+    def write(self, name: str, value: int):
+        reg = self.regs[name]
+        for i in range(reg.words):  # big ordering: the first word holds the top bits
+            word = (value >> (32 * (reg.words - 1 - i))) & 0xFFFFFFFF
+            yield from self.master.write((reg.address >> 2) + i, word)
+
+    def read(self, name: str):
+        reg = self.regs[name]
+        value = 0
+        for i in range(reg.words):
+            value = value << 32 | (yield from self.master.read((reg.address >> 2) + i))
+        return value
+
+
+def _wait(n: int):
+    for _ in range(n):
+        yield
+
+
+def _watchdog(seen: dict):
+    """A system-clock generator that fails the run if the bus generator has not finished
+    within `WATCHDOG_CYCLES`: a register access that waits on a stopped clock never ends."""
+
+    @passive
+    def gen():
+        for _ in range(WATCHDOG_CYCLES):
+            if seen.get("done"):
+                return
+            yield
+        raise AssertionError(f"the bus generator did not end within {WATCHDOG_CYCLES} cycles")
+
+    return gen()
+
+
 def test_registers_read_back() -> None:
-    soc = soc_for_test()
-    soc.clock_domains.cd_sys = ClockDomain("sys")
-    master = wishbone.Interface(data_width=32, address_width=32, addressing="word")
-    soc.bus.add_master(name="tb", master=master)
-    soc.finalize()
-    regs = {r.name: r for r in registers.registers(soc)}
+    bus = _Bus(soc_for_test())
+    soc, read, write = bus.soc, bus.read, bus.write
     slot = soc.core.slot
     state = {"constant": False}
     seen = {}
 
-    def write(name: str, value: int):
-        reg = regs[name]
-        for i in range(reg.words):  # big ordering: the first word holds the top bits
-            word = (value >> (32 * (reg.words - 1 - i))) & 0xFFFFFFFF
-            yield from master.write((reg.address >> 2) + i, word)
-
-    def read(name: str):
-        reg = regs[name]
-        value = 0
-        for i in range(reg.words):
-            value = value << 32 | (yield from master.read((reg.address >> 2) + i))
-        return value
-
-    def wait(n: int):
-        for _ in range(n):
-            yield
-
-    def bus():
+    def master():
         # Build facts.
         assert (yield from read("info_clock_hz")) == CLOCK_HZ
         assert (yield from read("info_clock_hz_num")) == CLOCK_HZ
@@ -288,28 +334,12 @@ def test_registers_read_back() -> None:
         pmods = yield from read("info_pmods")
         assert pmods == (1 << core.PMODS.index("tiny-vga")) | (1 << core.PMODS.index("gamepad"))
         # Every writable register reads back what was written.
-        patterns = {
-            "slot_ena": 1,
-            "slot_rst_n": 1,
-            "slot_ui_in": 0xC3,
-            "slot_clock_enable": 1,
-            "gamepad_enable": 1,
-            "gamepad_buttons": 0xA5A5A5,
-            "vga_divider": 5,
-            "vga_h_offset": 0xABC,
-            "vga_v_offset": 0x5A5,
-            "vga_h_step": 3,
-            "vga_v_step": 2,
-            "vga_blank": 1,
-            "vga_readback_addr": 7,
-            "atspeed_clocks": 0xDEADBEEF,
-        }
-        for name, value in patterns.items():
+        for name, value in PATTERNS.items():
             yield from write(name, value)
             assert (yield from read(name)) == value, name
         # The slot's controls reach its pins (gamepad mux off).
         yield from write("gamepad_enable", 0)
-        yield from wait(200)
+        yield from _wait(60)
         assert (yield slot.pin_ena) == 1 and (yield slot.pin_ui_in) == 0xC3
         assert (yield slot.pin_rst_n) == 1
         assert (yield soc.core.slot.gamepad.buttons) == 0xA5A5A5
@@ -325,13 +355,15 @@ def test_registers_read_back() -> None:
             ("vga_blank", 0),
         ):
             yield from write(name, value)
-        yield from wait(8 * 2 * LINE * FRAME_LINES)  # eight frames at half the sys rate
+        # The timing locked long ago (the project clock has run from power-up); the buffer
+        # needs the vsync edge that ends the hold after the clear, then one whole frame.
+        yield from _wait(3 * LINE * FRAME_LINES * PROJECT_PERIOD // 20_000)
         assert (yield from read("vga_clocks_per_line")) == LINE
         assert (yield from read("vga_lines_per_frame")) == FRAME_LINES
         assert (yield from read("vga_hsync_width")) == HSYNC
         assert (yield from read("vga_vsync_lines")) == 1
         assert (yield from read("vga_status")) == 0b0100, "locked; negative syncs; a signal"
-        assert (yield from read("vga_frames")) >= 6
+        assert (yield from read("vga_frames")) >= 3
         pixels = []
         for addr in range(8):
             yield from write("vga_readback_addr", addr)
@@ -339,7 +371,7 @@ def test_registers_read_back() -> None:
         assert pixels == [vga.pack(*_colour(x, y)) for y in range(2) for x in range(4)]
         # A constant on uo_out: the seven-segment duty and an at-speed CRC of it.
         state["constant"] = True
-        yield from wait(100)
+        yield from _wait(40)
         duty = yield from read("sevenseg_duty")
         want = sum((255 if CONSTANT >> i & 1 else 0) << (8 * i) for i in range(8))
         assert duty == want, hex(duty)
@@ -348,7 +380,7 @@ def test_registers_read_back() -> None:
         for _ in range(100):
             if (yield from read("atspeed_status")) == 0b10:  # done, not busy
                 break
-            yield from wait(20)
+            yield from _wait(10)
         assert (yield from read("atspeed_status")) == 0b10
         assert (yield from read("atspeed_crc")) == zlib.crc32(bytes([CONSTANT]) * 40)
         yield from write("atspeed_control", 2)  # abort clears done
@@ -366,11 +398,47 @@ def test_registers_read_back() -> None:
     # A 10 ns tick: the reset release's exact timing is not under test here (`test_slot.py`).
     run(
         gate(soc),
-        sys_gens=[bus()],
+        sys_gens=[master(), _watchdog(seen)],
         project_gens=[picture()],
-        project=(40_000, 5_050),
+        project=(PROJECT_PERIOD, 5_050),
         tick_period=10_000,
     )
+    assert seen.get("done")
+
+
+def test_with_clock_hz_0_no_register_waits_on_the_project_clock() -> None:
+    """`clock_hz` 0 (review focus 2): no project clock at all, from power-up. Every register
+    access completes, the reset is pulsed, an at-speed check is started and aborted, and the
+    status reads as `docs/registers.md` says: `slot_status` 0, `no_signal` 1, duty 0."""
+    bus = _Bus(soc_for_test(slot=sim_slot(0), demo_json=demo(clock_hz=0)))
+    read, write = bus.read, bus.write
+    seen = {}
+
+    def master():
+        assert (yield from read("info_clock_hz")) == 0
+        assert (yield from read("info_clock_hz_num")) == 0
+        assert (yield from read("info_clock_hz_den")) == 1
+        for name, value in PATTERNS.items():
+            yield from write(name, value)
+            assert (yield from read(name)) == value, name
+        yield from write("slot_rst_n", 0)
+        yield from write("slot_rst_n", 1)
+        assert (yield from read("slot_rst_n")) == 1
+        yield from write("atspeed_clocks", 40)
+        yield from write("atspeed_control", 1)  # start: busy, and it never runs
+        assert (yield from read("atspeed_status")) == 0b01
+        yield from write("atspeed_control", 2)  # abort
+        assert (yield from read("atspeed_status")) == 0
+        yield from _wait(600)  # past the 512-clock clock_running timeout
+        assert (yield from read("slot_status")) == 0, "neither locked nor running"
+        vga_status = yield from read("vga_status")
+        assert vga_status >> 3 & 1 == 1, "no_signal from power-up"
+        assert (yield from read("vga_frames")) == 0
+        assert (yield from read("sevenseg_duty")) == 0
+        assert (yield from read("atspeed_status")) == 0
+        seen["done"] = True
+
+    run(gate(bus.soc), sys_gens=[master(), _watchdog(seen)], project=None, tick_period=10_000)
     assert seen.get("done")
 
 
