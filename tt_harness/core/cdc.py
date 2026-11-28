@@ -49,7 +49,9 @@ is `tt_harness/input_gate.py`:
 - `ASYNC_REG` on every synchroniser pair and on both reset flops.
 - No `SRL16` / `SRLC32` on any crossing, in either flow.
 - The checks to run:
-  - the gate on the openXC7 netlist with the `BUFGCE` output net as `expected`;
+  - the gate on the openXC7 netlist with the `BUFGCE` output net as `expected`,
+    `("BUFGCE",)` as `allowed_trace` and `("MMCME2_ADV", "CLKOUT0")` as `clock_sources` and
+    `allowed_source`;
   - `vivado_tcl` on the routed design;
   - two negative builds per flow that must be rejected: `pin_ena` from a `sys` register, and
     a LUT on `rst_req` -> `CLR`;
