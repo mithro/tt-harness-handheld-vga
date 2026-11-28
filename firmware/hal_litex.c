@@ -81,6 +81,11 @@ static void put(char c) {
     head++;
 }
 
+void console_write(const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) put(s[i]);
+    console_poll();
+}
+
 void console_line(const char *s, size_t n) {
     for (size_t i = 0; i < n; i++) put(s[i]);
     put('\n');
@@ -91,4 +96,12 @@ void console_flush(void) {
     while (tail != head) console_poll();
 }
 
-void console_text(const struct text *t) { console_line(t->buf, t->len); }
+// A line built in a fixed buffer. Every such line has a bounded length that fits
+// (firmware.py bounds the project name and the probes); if one ever did not, it says so.
+void console_text(const struct text *t) {
+    console_line(t->buf, t->len);
+    if (t->full) {
+        static const char cut[] = "error source=console msg=the line above was cut";
+        console_line(cut, sizeof cut - 1);
+    }
+}

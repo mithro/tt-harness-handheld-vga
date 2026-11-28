@@ -42,7 +42,7 @@ INVALID = sorted(
     p for p in (DATA / "invalid").glob("*.json") if not p.name.endswith(".errors.json")
 )
 TRACES = sorted((DATA / "traces").glob("*.json"))
-SOURCES = ("demo_parse.c", "pyrepr.c", "runner.c", "text.c", "vga_mode.c")
+SOURCES = ("console_fmt.c", "demo_parse.c", "pyrepr.c", "runner.c", "text.c", "vga_mode.c")
 CC = shutil.which("cc")
 CFLAGS = (
     "-std=c11",
@@ -705,3 +705,40 @@ def test_a_string_value_prints_as_pythons_repr(host: Path, text: str) -> None:
     assert len(want) == 1
     raw = json.dumps(demo, ensure_ascii=False).encode("utf-8", errors="surrogatepass")
     assert parse(host, raw) == ("errors", want)
+
+
+def _console_escape(message: bytes) -> bytes:
+    """docs/registers.md, "Console", `error msg=`."""
+    out = bytearray()
+    for b in message:
+        if b == 0x5C:
+            out += b"\\\\"
+        elif b == 0x0A:
+            out += b"\\n"
+        elif b == 0x0D:
+            out += b"\\r"
+        elif b < 0x20 or b == 0x7F:
+            out += b"\\x%02x" % b
+        else:
+            out.append(b)
+    return bytes(out)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        b"short",
+        bytes(range(256)) * 3,  # every byte; 1,500-odd bytes once escaped
+        b"x" * 4000,  # as long as a message can be
+        ("\\ \n \r " * 200).encode(),
+    ],
+    ids=["short", "every-byte", "4000", "escapes"],
+)
+def test_an_error_line_is_never_cut(host: Path, message: bytes) -> None:
+    """The console's `error msg=` line carries the whole message, however long once
+    escaped (the firmware once cut it at 511 bytes)."""
+    done = subprocess.run([str(host), "errline"], input=message, capture_output=True, check=False)
+    assert done.returncode == 0 and done.stderr == b""
+    want = b"error msg=" + _console_escape(message) + b"\n"
+    assert len(want) > 512 or message == b"short"
+    assert done.stdout == want

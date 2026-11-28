@@ -46,6 +46,12 @@ PACKAGE = "firmware"
 IMAGE = "firmware.bin"
 
 
+# The firmware builds its fixed-format console lines in a 512-byte buffer: these bound the
+# two parts of a line whose length depends on the build.
+MAX_NAME = 128  # bytes of the project name (the `boot` line)
+MAX_PROBES = 32  # framebuffer probes (the `fb` line)
+
+
 def _c_string(text: str) -> str:
     if not all(32 <= ord(c) < 127 and c not in '"\\' for c in text):
         raise ValueError(f"not a plain ASCII name: {text!r}")
@@ -55,6 +61,10 @@ def _c_string(text: str) -> str:
 def firmware_config_header(project_name: str, fb_probes: Sequence[int]) -> str:
     """`firmware_config.h`: the project name, its shuttle (for the demo.json check) and the
     framebuffer pixels the firmware reports in `fb` lines (none: no `fb` lines)."""
+    if len(project_name) > MAX_NAME:
+        raise ValueError(f"project name longer than {MAX_NAME} bytes: {project_name!r}")
+    if len(fb_probes) > MAX_PROBES:
+        raise ValueError(f"{len(fb_probes)} framebuffer probes, more than {MAX_PROBES}")
     probes = ", ".join(str(int(p)) for p in fb_probes) or "0"
     return (
         "/* SPDX-License-Identifier: Apache-2.0 */\n"

@@ -11,6 +11,7 @@
 #include <generated/csr.h>
 #include <generated/soc.h>
 
+#include "console_fmt.h"
 #include "demo_json.h"        // generated: the build's demo.json, byte for byte
 #include "demo_parse.h"
 #include "firmware_config.h"  // generated: project name, shuttle, framebuffer probes
@@ -39,20 +40,6 @@ static struct text *line(void) {
     static struct text t;
     text_init(&t, line_buf, sizeof line_buf);
     return &t;
-}
-
-// A message as a console field: backslash and control characters escaped.
-static void escaped(struct text *t, const char *s, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c == '\\') text_str(t, "\\\\");
-        else if (c == '\n') text_str(t, "\\n");
-        else if (c == '\r') text_str(t, "\\r");
-        else if (c < 0x20 || c == 0x7f) {
-            text_str(t, "\\x");
-            text_hex(t, c, 2);
-        } else text_char(t, (char)c);
-    }
 }
 
 // The build's own refusals of a valid demo.json (tt_harness/soc/core.py, same messages).
@@ -293,10 +280,7 @@ int main(void) {
         uint32_t len;
         for (uint32_t i = 0; i < errs.count; i++) {
             const char *m = errors_get(&errs, i, &len);
-            t = line();
-            text_str(t, "error msg=");
-            escaped(t, m, len);
-            console_text(t);
+            console_error_msg(console_write, m, len);  // streamed: any length, never cut
         }
         error_display();
     }

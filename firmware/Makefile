@@ -14,7 +14,8 @@ VGA_MODES_DIR := $(abspath $(FIRMWARE_DIR)/../tt_harness/core)
 include ../include/generated/variables.mak
 include $(SOC_DIRECTORY)/software/common.mak
 
-OBJECTS = crt0.o main.o hal_litex.o vga_mode.o runner.o demo_parse.o pyrepr.o text.o
+OBJECTS = crt0.o main.o hal_litex.o console_fmt.o vga_mode.o runner.o demo_parse.o pyrepr.o \
+          text.o
 
 CFLAGS += -I$(FIRMWARE_DIR) -I$(BUILDINC_DIRECTORY)/generated -I$(VGA_MODES_DIR) \
           -Wextra -Werror -Wno-missing-field-initializers -Wno-type-limits \

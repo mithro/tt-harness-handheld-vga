@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "console_fmt.h"
 #include "demo_parse.h"
 #include "hal.h"
 #include "pyrepr.h"
@@ -86,6 +87,8 @@ static unsigned long number(const char *text) {
     return v;
 }
 
+static void stdout_sink(const char *s, size_t n) { fwrite(s, 1, n, stdout); }
+
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "parse") == 0) {
         size_t n = read_input();
@@ -120,6 +123,12 @@ int main(int argc, char **argv) {
             runner_tick(&runner, (uint32_t)now);
             if (now == until) break;
         }
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "errline") == 0) {
+        // the console's error line for the message on stdin
+        size_t n = read_input();
+        console_error_msg(stdout_sink, input, (uint32_t)n);
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "nonprintable") == 0) {

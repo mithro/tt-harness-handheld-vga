@@ -21,7 +21,9 @@ uint32_t clock_ms(void);
 // The console's ring of queued bytes (a power of two).
 #define CONSOLE_RING 4096
 
-// Queue one console line: the text and a newline. It waits only if the ring is full.
+// Queue bytes of console output (no newline added). It waits only if the ring is full.
+void console_write(const char *s, size_t n);
+// Queue one console line: the text and a newline.
 void console_line(const char *s, size_t n);
 void console_text(const struct text *t);
 // Send queued bytes while the UART has room; call it from every loop.
