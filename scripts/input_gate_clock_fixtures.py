@@ -80,6 +80,10 @@ def main() -> int:
         "modules": {
             TOP: {
                 "netnames": {n: {"bits": v["bits"]} for n, v in module["netnames"].items()},
+                "ports": {
+                    n: {"direction": v["direction"], "bits": v["bits"]}
+                    for n, v in module["ports"].items()
+                },
                 "cells": {
                     name: {
                         "type": c["type"],

@@ -38,12 +38,16 @@ through clock buffers (`BUFG`, `IBUF`, `BUFGCE`, ...) and records the cells walk
 names seen further back (`ClockTrace.cells`, `.upstream`), so the CALLER can require exactly
 the project clock's own chain (`allowed_trace`). The walk ends
 
-- at a net with no driver (a port of the top);
+- at an input port of the top, recorded in `ClockTrace.source` as `(PORT, name)`;
 - at a clock source the caller named (`clock_sources`, e.g. `("MMCME2_ADV", "CLKOUT0")`: the
   project clock is `MMCME2_ADV.CLKOUT0 -> BUFGCE -> C`), recorded in `ClockTrace.source`,
   which `allowed_source` can then require;
-- at any other cell (a LUT gating a clock, an MMCM output nobody named, an inverter), which
-  fails (`stopped_at`).
+- at any other cell (a LUT gating a clock, an MMCM output nobody named, an inverter), at a
+  clock buffer with no input, or at a net that nothing drives and that is not an input
+  port, all of which fail (`stopped_at`).
+
+`clock_sources`, and `clock_offenders`' `allowed_trace` and `allowed_source`, are required
+arguments: the caller always says exactly which chain and which source are the project clock.
 
 An inverted clock pin (`IS_C_INVERTED`) on a flip-flop driving a project input is an offender:
 it is a register of the other clock edge. The check fails closed: see `clock_offenders`. The
@@ -103,6 +107,7 @@ _REPORT_LINE = re.compile(
 )
 UNCONNECTED = "unconnected"
 CLOCK_BUFFERS = ("BUFG", "IBUF", "BUFGCE", "BUFH", "BUFHCE")  # one clock input, pin I
+PORT = "port"  # `ClockTrace.source` of a walk that ended at an input port: (PORT, port name)
 MAX_CLOCK_HOPS = 16  # a longer chain is not a plain buffer chain: it fails the check
 
 
@@ -379,8 +384,8 @@ class ClockTrace:
     first cell that is neither a clock buffer nor a named clock source (a LUT gating the
     clock, say), else None. `upstream`: the names of the nets further back (information: a
     name here is a DIFFERENT clock net from the one on the pin). `source`: (cell type, pin)
-    of the clock source the walk ended at, when the caller named it; None when it ended at a
-    net with no driver (a port). `inverted`: the `C` pin is inverted (`IS_C_INVERTED`); None
+    of the clock source the walk ended at, when the caller named it, or `(PORT, name)` for
+    an input port of the top; None only for a trace with no walk (Vivado) or a stopped one. `inverted`: the `C` pin is inverted (`IS_C_INVERTED`); None
     when that could not be read. The Vivado report gives only the net on the `C` pin and the
     inversion: `cells` and `upstream` are empty and `source` is None.
     """
@@ -419,16 +424,17 @@ def yosys_driver_clocks(
     netlist: dict,
     top: str,
     nets: dict[str, str],
-    clock_sources: tuple[tuple[str, str], ...] = (),
+    clock_sources: tuple[tuple[str, str], ...],
 ) -> dict[str, tuple[ClockTrace | None, ...]]:
     """Per port and bit: the `ClockTrace` of the flip-flop driving it, or None.
 
     The clock pin is `C`. `names` are the names of the net on it. The net is then followed
     back through clock buffers (`CLOCK_BUFFERS`), recording the cells and the names further
-    back (`upstream`). The walk ends at a net with no driver, or at an output pin listed in
-    `clock_sources` as (cell type, pin), e.g. `("MMCME2_ADV", "CLKOUT0")` (`source`); any
-    other cell stops it (`stopped_at`): a clock gated by logic, or made by a source nobody
-    named, is not accepted. A bit not driven by a flip-flop, or a flip-flop with no `C`
+    back (`upstream`). The walk ends at an input port of the top (`source` is
+    `(PORT, name)`), or at an output pin listed in `clock_sources` as (cell type, pin), e.g.
+    `("MMCME2_ADV", "CLKOUT0")` (`source`); any other cell, a buffer with no input, or a net
+    nothing drives stops it (`stopped_at`): a clock gated by logic, or made by a source
+    nobody named, is not accepted. A bit not driven by a flip-flop, or a flip-flop with no `C`
     connection, gives None, as does a net that is not in the netlist; `None` is never
     acceptable to `clock_offenders`.
     """
@@ -440,6 +446,12 @@ def yosys_driver_clocks(
                 for bit in cell["connections"].get(port, []):
                     driver[bit] = (cell["type"], port, cell)
     names = _bit_names(module)
+    input_ports = {
+        bit: port_name
+        for port_name, port in module.get("ports", {}).items()
+        if port.get("direction") == "input"
+        for bit in port["bits"]
+    }
     out = {}
     for port, name in nets.items():
         net = module["netnames"].get(name)
@@ -461,6 +473,11 @@ def yosys_driver_clocks(
                     upstream += names.get(current, [])
                 buf = driver.get(current)
                 if buf is None:
+                    pad = input_ports.get(current)
+                    if pad is None:  # nothing drives it and it is not an input of the top
+                        stopped = "an undriven net"
+                    else:
+                        source = (PORT, pad)
                     break
                 if (buf[0], buf[1]) in clock_sources:
                     source = (buf[0], buf[1])
@@ -473,7 +490,8 @@ def yosys_driver_clocks(
                     break
                 cells.append(buf[0])
                 inputs = buf[2]["connections"].get("I", [])
-                if not inputs:
+                if len(inputs) != 1:
+                    stopped = f"{buf[0]} with no input"
                     break
                 current = inputs[0]
             else:  # not a plain buffer chain: too long (or a loop)
@@ -515,8 +533,8 @@ def clock_offenders(
     drivers: dict[str, tuple[str, ...]],
     clocks: dict[str, tuple[ClockTrace | None, ...]],
     expected: str,
-    allowed_trace: tuple[str, ...] | None = None,
-    allowed_source: tuple[str, str] | None = None,
+    allowed_trace: tuple[str, ...],
+    allowed_source: tuple[str, str] | None,
 ) -> list[str]:
     """One line per bit that cannot be shown to be a flip-flop on the `expected` clock net.
 
@@ -528,11 +546,13 @@ def clock_offenders(
     entry, a wrong net, a clock gated by logic, an inverted or unreadable clock polarity, or
     a driver that is neither constant nor flip-flop is an offender, named `port[bit]`.
 
-    `allowed_trace`, if given, is the exact tuple of clock buffer types the clock may pass
-    through, and `allowed_source` the (cell type, pin) the walk must have ended at (the later
-    build task pins both to the project clock's own chain: `("BUFGCE",)` from
-    `("MMCME2_ADV", "CLKOUT0")`); otherwise any chain of buffers from a port or a named source
-    is accepted. Both apply to the Yosys walk; a Vivado trace has neither.
+    `allowed_trace` and `allowed_source` are required and exact: the tuple of clock buffer
+    types the clock passes through, nearest the flip-flop first, and what the walk ended at:
+    a (cell type, pin) named in `clock_sources`, or `(PORT, name)` for an input port of the
+    top. For the project clock: `("BUFGCE",)` and `("MMCME2_ADV", "CLKOUT0")`. A Vivado
+    trace has no walk, so for a Vivado report they are `()` and `None` (the report's check
+    is the net on the clock pin and its polarity); `None` never matches a Yosys trace, whose
+    walk always ends at a source or stops.
     """
     out = []
     for port in sorted(drivers):
@@ -573,12 +593,13 @@ def clock_offenders(
                     out.append(f"{where}: no clock polarity data (IS_C_INVERTED)")
                 elif trace.inverted:
                     out.append(f"{where}: the clock pin is inverted (IS_C_INVERTED)")
-                elif allowed_trace is not None and trace.cells != tuple(allowed_trace):
+                elif trace.cells != tuple(allowed_trace):
                     out.append(
                         f"{where}: clock passes through {'/'.join(trace.cells) or 'nothing'}, "
                         f"not {'/'.join(allowed_trace) or 'nothing'}"
                     )
-                elif allowed_source is not None and trace.source != tuple(allowed_source):
-                    got = ".".join(trace.source) if trace.source else "a port"
-                    out.append(f"{where}: clock comes from {got}, not {'.'.join(allowed_source)}")
+                elif trace.source != (None if allowed_source is None else tuple(allowed_source)):
+                    got = ".".join(trace.source) if trace.source else "no walk"
+                    want = ".".join(allowed_source) if allowed_source else "no walk"
+                    out.append(f"{where}: clock comes from {got}, not {want}")
     return out

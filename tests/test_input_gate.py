@@ -383,6 +383,11 @@ CLOCK_NETS = {
 }
 CLOCK_TOP = "clock_domains_fixture"
 Trace = input_gate.ClockTrace
+# The exact chain and source every clock check must be given. A hand-made or Vivado trace has
+# no walk; the Yosys fixture's clocks come from an input port through IBUF and BUFG.
+NO_WALK = {"allowed_trace": (), "allowed_source": None}
+FIXTURE_PROJECT = {"allowed_trace": ("BUFG", "IBUF"), "allowed_source": ("port", "project_clk")}
+FIXTURE_SYS = {"allowed_trace": ("BUFG", "IBUF"), "allowed_source": ("port", "sys_clk")}
 
 
 def _clock_case() -> dict:
@@ -401,9 +406,9 @@ def _ok_inputs() -> tuple[dict, dict]:
 
 def test_clock_check_all_good_passes_and_constants_need_no_clock() -> None:
     drivers, clocks = _ok_inputs()
-    assert input_gate.clock_offenders(drivers, clocks, "project_clk") == []
+    assert input_gate.clock_offenders(drivers, clocks, "project_clk", **NO_WALK) == []
     drivers = drivers | {"rst_n": (input_gate.CONSTANT,)}
-    assert input_gate.clock_offenders(drivers, clocks, "project_clk") == []
+    assert input_gate.clock_offenders(drivers, clocks, "project_clk", **NO_WALK) == []
 
 
 @pytest.mark.parametrize(
@@ -426,7 +431,7 @@ def test_clock_check_all_good_passes_and_constants_need_no_clock() -> None:
 def test_clock_check_fails_closed(mutate, expect: str) -> None:
     drivers, clocks = _ok_inputs()
     mutate(drivers, clocks)
-    out = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    out = input_gate.clock_offenders(drivers, clocks, "project_clk", **NO_WALK)
     assert out, "the gate passed with missing or wrong clock data"
     assert any(expect in line for line in out), out
 
@@ -434,11 +439,37 @@ def test_clock_check_fails_closed(mutate, expect: str) -> None:
 def test_a_clock_trace_through_a_gate_is_reported_and_can_be_pinned() -> None:
     drivers = {"ena": ("FDRE",)}
     gated = {"ena": (Trace(("project_clk",), ("BUFGCE", "BUFG")),)}
-    assert input_gate.clock_offenders(drivers, gated, "project_clk") == []  # caller's choice
-    out = input_gate.clock_offenders(drivers, gated, "project_clk", allowed_trace=("BUFG",))
-    assert out and "BUFGCE/BUFG" in out[0]
+
+    def check(clocks: dict, chain: tuple, source=None) -> list[str]:
+        return input_gate.clock_offenders(
+            drivers, clocks, "project_clk", allowed_trace=chain, allowed_source=source
+        )
+
+    assert check(gated, ("BUFGCE", "BUFG")) == []  # the caller's choice, stated exactly
+    assert check(gated, ("BUFG",)) == ["ena[0]: clock passes through BUFGCE/BUFG, not BUFG"]
+    assert check(gated, ()) == ["ena[0]: clock passes through BUFGCE/BUFG, not nothing"]
     exact = {"ena": (Trace(("project_clk",), ("BUFG",)),)}
-    assert input_gate.clock_offenders(drivers, exact, "project_clk", allowed_trace=("BUFG",)) == []
+    assert check(exact, ("BUFG",)) == []
+    # The source is exact too: a trace with no source against a named one, and the reverse.
+    assert check(exact, ("BUFG",), ("MMCME2_ADV", "CLKOUT0")) == [
+        "ena[0]: clock comes from no walk, not MMCME2_ADV.CLKOUT0"
+    ]
+    sourced = {"ena": (Trace(("project_clk",), ("BUFG",), source=("port", "clk")),)}
+    assert check(sourced, ("BUFG",)) == ["ena[0]: clock comes from port.clk, not no walk"]
+    assert check(sourced, ("BUFG",), ("port", "clk")) == []
+
+
+def test_the_clock_chain_and_source_are_required_arguments() -> None:
+    """No default can leave the chain or the source unchecked."""
+    drivers, clocks = _ok_inputs()
+    with pytest.raises(TypeError):
+        input_gate.clock_offenders(drivers, clocks, "project_clk")
+    with pytest.raises(TypeError):
+        input_gate.clock_offenders(drivers, clocks, "project_clk", allowed_trace=())
+    with pytest.raises(TypeError):
+        input_gate.clock_offenders(drivers, clocks, "project_clk", allowed_source=None)
+    with pytest.raises(TypeError):
+        input_gate.yosys_driver_clocks(_clock_case(), CLOCK_TOP, CLOCK_NETS)
 
 
 def test_yosys_clock_domains() -> None:
@@ -446,7 +477,7 @@ def test_yosys_clock_domains() -> None:
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
     assert drivers["ena"] == ("FDRE",) and drivers["rst_n"] == ("FDRE",)
     assert input_gate.offenders(drivers) == []  # glitch-free drivers, but in which domain?
-    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS, ())
     # The clock buffer's output net (the net on the flip-flops' clock pins) is renamed by the
     # tool here; the port name is further back, in front of the buffers.
     (project_net,) = clocks["rst_n"][0].names
@@ -456,14 +487,16 @@ def test_yosys_clock_domains() -> None:
     assert "project_clk" in clocks["rst_n"][0].upstream
     assert "project_clk" in clocks["ui_in"][0].upstream and "sys_clk" in clocks["ena"][0].upstream
     assert clocks["rst_n"][0].cells == ("BUFG", "IBUF")
-    assert clocks["rst_n"][0].source is None and clocks["rst_n"][0].inverted is False
-    (bad,) = input_gate.clock_offenders(drivers, clocks, project_net)
+    assert clocks["rst_n"][0].source == ("port", "project_clk")
+    assert clocks["ena"][0].source == ("port", "sys_clk")
+    assert clocks["rst_n"][0].inverted is False
+    (bad,) = input_gate.clock_offenders(drivers, clocks, project_net, **FIXTURE_PROJECT)
     assert bad == f"ena[0]: clocked by {sys_net}, not {project_net}"
-    wrong = input_gate.clock_offenders(drivers, clocks, sys_net)
+    wrong = input_gate.clock_offenders(drivers, clocks, sys_net, **FIXTURE_SYS)
     assert {w.split("[")[0].split(":")[0] for w in wrong} == {"rst_n", "ui_in"}
     assert len(clocks["ui_in"]) == 8
     # The name of a net further back is refused for every bit: it is not the net on the pin.
-    upstream = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    upstream = input_gate.clock_offenders(drivers, clocks, "project_clk", **FIXTURE_PROJECT)
     assert len(upstream) == 1 + 1 + 8
     assert (
         f"rst_n[0]: clocked by {project_net}, not project_clk "
@@ -475,18 +508,18 @@ def test_yosys_missing_net_and_missing_clock_pin_are_offenders() -> None:
     case = _clock_case()
     nets = CLOCK_NETS | {"absent": "no_such_net"}
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, nets)
-    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, nets)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, nets, ())
     assert drivers["absent"] == (input_gate.MISSING,) and clocks["absent"] == (None,)
     assert any(
         line.startswith("absent[0]")
-        for line in input_gate.clock_offenders(drivers, clocks, "project_clk")
+        for line in input_gate.clock_offenders(drivers, clocks, "project_clk", **FIXTURE_PROJECT)
     )
     for cell in case["modules"][CLOCK_TOP]["cells"].values():
         if cell["type"] == "FDRE":
             cell["connections"].pop("C", None)
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
-    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
-    out = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS, ())
+    out = input_gate.clock_offenders(drivers, clocks, "project_clk", **FIXTURE_PROJECT)
     assert len(out) == 1 + 1 + 8 and all("no clock net" in line for line in out)
 
 
@@ -515,17 +548,17 @@ def _lut_gated(case: dict, kind: str) -> dict:
 def test_a_clock_gated_by_a_lut_stops_at_the_lut_and_fails() -> None:
     case = _lut_gated(_clock_case(), "LUT2")
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
-    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS, ())
     assert clocks["ena"][0].stopped_at == "LUT2"
     # Asked for the gated net itself or for the clock the gate is fed from: refused.
     for expected in ("gated_clk", "sys_clk"):
-        out = input_gate.clock_offenders(drivers, clocks, expected)
+        out = input_gate.clock_offenders(drivers, clocks, expected, **FIXTURE_SYS)
         assert "ena[0]: clock not a plain buffer chain: LUT2" in out
 
 
 def test_a_clock_gated_by_a_bufgce_is_reported_with_the_bufgce_in_the_trace() -> None:
     case = _lut_gated(_clock_case(), "BUFGCE")
-    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS, ())
     trace = clocks["ena"][0]
     assert trace.cells[0] == "BUFGCE" and trace.names == ("gated_clk",)
     assert "sys_clk" in trace.upstream
@@ -534,12 +567,23 @@ def test_a_clock_gated_by_a_bufgce_is_reported_with_the_bufgce_in_the_trace() ->
     def ena(out: list[str]) -> list[str]:
         return [line for line in out if line.startswith("ena[0]")]
 
-    assert ena(input_gate.clock_offenders(drivers, clocks, "gated_clk")) == []
+    sys_port = ("port", "sys_clk")
+    assert trace.cells == ("BUFGCE", "BUFG", "IBUF") and trace.source == sys_port
+
+    def check(expected: str, chain: tuple) -> list[str]:
+        return ena(
+            input_gate.clock_offenders(
+                drivers, clocks, expected, allowed_trace=chain, allowed_source=sys_port
+            )
+        )
+
+    assert check("gated_clk", trace.cells) == []
     # The caller decides: pinned to another buffer chain, the BUFGCE fails.
-    out = input_gate.clock_offenders(drivers, clocks, "gated_clk", allowed_trace=trace.cells[1:])
-    assert ena(out) == ["ena[0]: clock passes through BUFGCE/BUFG/IBUF, not BUFG/IBUF"]
+    assert check("gated_clk", trace.cells[1:]) == [
+        "ena[0]: clock passes through BUFGCE/BUFG/IBUF, not BUFG/IBUF"
+    ]
     # The clock in front of the BUFGCE is not the gated clock.
-    (line,) = ena(input_gate.clock_offenders(drivers, clocks, "sys_clk"))
+    (line,) = check("sys_clk", trace.cells)
     assert "not sys_clk (sys_clk is further back, in front of BUFGCE: another net)" in line
 
 
@@ -555,7 +599,7 @@ def test_gate_rejects_register_in_the_wrong_domain_vivado() -> None:
     assert clocks["uio_in"] == (None,)
     folded = input_gate.fold_constants(drivers, frozenset({"uio_in"}))
     assert input_gate.offenders(folded) == []
-    out = input_gate.clock_offenders(folded, clocks, "project_clk")
+    out = input_gate.clock_offenders(folded, clocks, "project_clk", **NO_WALK)
     assert out == ["ena[0]: clocked by sys_clk, not project_clk"]
 
 
@@ -567,7 +611,7 @@ def test_vivado_report_gaps_are_offenders() -> None:
     def run(report: str) -> list[str]:
         drivers = input_gate.fold_constants(input_gate.parse_vivado(report, nets), consts)
         clocks = input_gate.parse_vivado_clocks(report, nets)
-        return input_gate.clock_offenders(drivers, clocks, "project_clk")
+        return input_gate.clock_offenders(drivers, clocks, "project_clk", **NO_WALK)
 
     # a flip-flop line with no clock field
     assert run(text.replace(" clock project_clk", "", 1)) == [
@@ -587,7 +631,7 @@ def test_vivado_report_gaps_are_offenders() -> None:
     old_drivers = input_gate.fold_constants(input_gate.parse_vivado(old, NETS), CONSTANTS)
     old_clocks = input_gate.parse_vivado_clocks(old, NETS)
     assert old_clocks["rst_n"] == (None,)
-    assert input_gate.clock_offenders(old_drivers, old_clocks, "project_clk") == [
+    assert input_gate.clock_offenders(old_drivers, old_clocks, "project_clk", **NO_WALK) == [
         "rst_n[0]: no clock net"
     ]
 
@@ -620,7 +664,7 @@ def _chain(hops: int) -> tuple[dict, dict, dict]:
     if hops:
         module["netnames"]["chained_clk"] = {"bits": [previous]}
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
-    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
+    clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS, ())
     return case, drivers, clocks
 
 
@@ -630,16 +674,20 @@ def test_the_clock_hop_limit_boundary() -> None:
     # exactly `limit` buffers in all is a plain buffer chain; one more is not
     _, drivers, clocks = _chain(limit - base)
     assert len(clocks["ena"][0].cells) == limit and clocks["ena"][0].stopped_at is None
-    assert [
-        x for x in input_gate.clock_offenders(drivers, clocks, "chained_clk") if x.startswith("ena")
-    ] == []
+
+    def check(drivers: dict, clocks: dict) -> list[str]:
+        own = {"allowed_trace": ("BUFG",) * (limit - base) + ("BUFG", "IBUF")}
+        out = input_gate.clock_offenders(
+            drivers, clocks, "chained_clk", allowed_source=("port", "sys_clk"), **own
+        )
+        return [x for x in out if x.startswith("ena")]
+
+    assert check(drivers, clocks) == []
     _, drivers, clocks = _chain(limit - base + 1)
-    out = input_gate.clock_offenders(drivers, clocks, "chained_clk")
-    assert any(line.startswith("ena[0]") and "more than" in line for line in out), out
+    out = check(drivers, clocks)
+    assert out == [f"ena[0]: clock not a plain buffer chain: more than {limit} clock buffers"]
     _, drivers, clocks = _chain(limit - base + 4)
-    assert any(
-        "more than" in line for line in input_gate.clock_offenders(drivers, clocks, "chained_clk")
-    )
+    assert any("more than" in line for line in check(drivers, clocks))
 
 
 # The asynchronous clear, the report's completeness, the real clock chain (fix round 4) --------
@@ -697,23 +745,32 @@ def _demo_netlist(
         "clkout_raw": {"bits": [3]},
         "sys_clk": {"bits": [30]},
     }
-    return {"modules": {"top": {"cells": cells, "netnames": names}}}
+    ports = {"sys_clk": {"direction": "input", "bits": [30]}}
+    return {"modules": {"top": {"cells": cells, "netnames": names, "ports": ports}}}
 
 
-def _judge(netlist: dict, expected: str = "project_clk", sources=(MMCM_OUT,), **kw):
+def _judge(
+    netlist: dict,
+    expected: str = "project_clk",
+    sources=(MMCM_OUT,),
+    allowed_trace: tuple = ("BUFGCE",),
+    allowed_source: tuple | None = MMCM_OUT,
+):
+    """Judged, unless the test says otherwise, as the demo build is: the project clock's own
+    chain (`BUFGCE`) from its own source (`MMCME2_ADV.CLKOUT0`)."""
     drivers = input_gate.yosys_drivers(netlist, "top", P_NETS)
     clocks = input_gate.yosys_driver_clocks(netlist, "top", P_NETS, clock_sources=sources)
     return (
         input_gate.offenders(drivers),
-        input_gate.clock_offenders(drivers, clocks, expected, **kw),
+        input_gate.clock_offenders(
+            drivers, clocks, expected, allowed_trace=allowed_trace, allowed_source=allowed_source
+        ),
         clocks["rst_n"][0],
     )
 
 
 def test_the_demo_builds_reset_flop_and_clock_chain_are_accepted() -> None:
-    bad, clock_bad, trace = _judge(
-        _demo_netlist(), allowed_trace=("BUFGCE",), allowed_source=MMCM_OUT
-    )
+    bad, clock_bad, trace = _judge(_demo_netlist())
     assert bad == [] and clock_bad == []
     assert trace == Trace(("project_clk",), ("BUFGCE",), None, ("clkout_raw",), MMCM_OUT, False)
 
@@ -792,7 +849,9 @@ def _v_judge(text: str) -> tuple[list[str], list[str]]:
         input_gate.parse_vivado(text, V_NETS), frozenset({"uio_in"})
     )
     clocks = input_gate.parse_vivado_clocks(text, V_NETS)
-    return input_gate.offenders(drivers), input_gate.clock_offenders(drivers, clocks, "project_clk")
+    return input_gate.offenders(drivers), input_gate.clock_offenders(
+        drivers, clocks, "project_clk", **NO_WALK
+    )
 
 
 def test_vivado_the_demo_builds_report_is_accepted() -> None:
@@ -882,12 +941,38 @@ def test_the_real_project_clock_chain_needs_its_source_named() -> None:
     assert _judge(netlist, sources=(("PLLE2_ADV", "CLKOUT0"),))[1] == [
         "rst_n[0]: clock not a plain buffer chain: MMCME2_ADV"
     ]
-    # The caller can require the source: a clock from a port does not satisfy it.
-    port = {"bufg": _cell("BUFG", {"I": "input", "O": "output"}, {"I": [3], "O": [2]})}
-    assert _judge(_demo_netlist(clock_cells=port))[1] == []
-    assert _judge(_demo_netlist(clock_cells=port), allowed_source=MMCM_OUT)[1] == [
-        "rst_n[0]: clock comes from a port, not MMCME2_ADV.CLKOUT0"
+    # A clock from an input port of the top is its own source, and is not the MMCM's.
+    port = _demo_netlist(
+        clock_cells={"bufg": _cell("BUFG", {"I": "input", "O": "output"}, {"I": [3], "O": [2]})}
+    )
+    port["modules"]["top"]["ports"]["clk_pad"] = {"direction": "input", "bits": [3]}
+    pad = ("port", "clk_pad")
+    assert _judge(port, allowed_trace=("BUFG",), allowed_source=pad)[1] == []
+    assert _judge(port, allowed_trace=("BUFG",))[1] == [
+        "rst_n[0]: clock comes from port.clk_pad, not MMCME2_ADV.CLKOUT0"
     ]
+    assert _judge(port, allowed_trace=("BUFG",), allowed_source=None)[1] == [
+        "rst_n[0]: clock comes from port.clk_pad, not no walk"
+    ]
+    # A chain that ends at a net nothing drives (not an input port either): refused, whatever
+    # the caller allows. So is one that ends at an OUTPUT port's net.
+    del port["modules"]["top"]["ports"]["clk_pad"]
+    for source in (pad, MMCM_OUT, None):
+        _, clock_bad, trace = _judge(port, allowed_trace=("BUFG",), allowed_source=source)
+        assert clock_bad == ["rst_n[0]: clock not a plain buffer chain: an undriven net"]
+        assert trace.stopped_at == "an undriven net" and trace.source is None
+    port["modules"]["top"]["ports"]["clk_pad"] = {"direction": "output", "bits": [3]}
+    assert _judge(port, allowed_trace=("BUFG",), allowed_source=pad)[1] == [
+        "rst_n[0]: clock not a plain buffer chain: an undriven net"
+    ]
+    # A clock buffer with no input connection: refused.
+    for conns in ({"O": [2]}, {"I": [], "O": [2]}):
+        cut = _demo_netlist(
+            clock_cells={"bufgce": _cell("BUFGCE", _BUF_DIRS, conns | {"CE": [40]})}
+        )
+        _, clock_bad, trace = _judge(cut)
+        assert clock_bad == ["rst_n[0]: clock not a plain buffer chain: BUFGCE with no input"]
+        assert trace.stopped_at == "BUFGCE with no input"
     # A buffer output pin that is not O is not a buffer on the path.
     odd = _mmcm_chain()
     odd["bufgce"] = _cell("BUFGCE", {"I": "input", "X": "output"}, {"I": [3], "X": [2]})
@@ -900,7 +985,7 @@ def test_the_real_project_clock_chain_needs_its_source_named() -> None:
 def test_expected_must_be_the_net_on_the_clock_pin_not_one_further_back(buffer: str) -> None:
     """`clkout_raw` (the MMCM output, in front of the buffer) is not the project clock."""
     netlist = _demo_netlist(clock_cells=_mmcm_chain(buffer))
-    assert _judge(netlist)[1] == []
+    assert _judge(netlist, allowed_trace=(buffer,))[1] == []
     message = (
         "rst_n[0]: clocked by project_clk, not clkout_raw "
         f"(clkout_raw is further back, in front of {buffer}: another net)"
