@@ -19,6 +19,8 @@
 #include "demo_parse.h"
 #include "hal.h"
 #include "runner.h"
+#include "text.h"
+#include "vga_mode.h"
 
 #define MAX_INPUT (1 << 20)
 
@@ -119,8 +121,34 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "classify") == 0) {
+        // each input line: clocks_per_line lines_per_frame hsync_width vsync_lines clock_hz
+        // fb_width fb_height; each output line: "none", or the capture and the refresh text
+        unsigned long v[7];
+        while (scanf("%lu %lu %lu %lu %lu %lu %lu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                     &v[6]) == 7) {
+            struct vga_timing m = {(uint32_t)v[0], (uint32_t)v[1], (uint32_t)v[2],
+                                   (uint32_t)v[3]};
+            struct vga_capture c;
+            if (!vga_classify(&m, (uint32_t)v[5], (uint32_t)v[6], &c)) {
+                printf("none\n");
+                continue;
+            }
+            char buf[32];
+            struct text t;
+            text_init(&t, buf, sizeof buf);
+            vga_refresh_text(&t, (uint32_t)v[4], &m, &c);
+            text_char(&t, 0);
+            printf("%s %lu %lu %lu %lu %lu %lu %lu %s\n", c.name, (unsigned long)c.divider,
+                   (unsigned long)c.h_offset, (unsigned long)c.v_offset,
+                   (unsigned long)c.width, (unsigned long)c.height, (unsigned long)c.h_step,
+                   (unsigned long)c.v_step, buf);
+        }
+        return 0;
+    }
     fprintf(stderr,
             "usage: host parse SHUTTLE < demo.json\n"
-            "       host run SHUTTLE UNTIL_MS TICK_MS < demo.json\n");
+            "       host run SHUTTLE UNTIL_MS TICK_MS < demo.json\n"
+            "       host classify < measurements\n");
     return 2;
 }

@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 from test_demo_model import expected_events
 
+from tt_harness.core import vga
 from tt_harness.demo import model, validate
 from tt_harness.demo.model import Event
 
@@ -40,7 +41,7 @@ INVALID = sorted(
     p for p in (DATA / "invalid").glob("*.json") if not p.name.endswith(".errors.json")
 )
 TRACES = sorted((DATA / "traces").glob("*.json"))
-SOURCES = ("demo_parse.c", "pyrepr.c", "runner.c", "text.c")
+SOURCES = ("demo_parse.c", "pyrepr.c", "runner.c", "text.c", "vga_mode.c")
 CC = shutil.which("cc")
 CFLAGS = (
     "-std=c11",
@@ -74,6 +75,7 @@ def host(tmp_path_factory: pytest.TempPathFactory) -> Path:
         CC,
         *CFLAGS,
         f"-I{FIRMWARE}",
+        f"-I{REPO / 'tt_harness' / 'core'}",
         "-o",
         str(binary),
         str(HOST_MAIN),
@@ -554,3 +556,71 @@ def test_mutated_files_give_the_validators_messages(host: Path, seed: int) -> No
                 text,
                 messages,
             )
+
+
+def _python_capture(cpl, lpf, hsw, vsl, clock_hz, fb_w, fb_h):
+    """What the firmware should report: `vga.classify`, and the decimation that fits the
+    picture in the framebuffer (every n-th pixel and row, n = ceil(size / fb), 1 to 3)."""
+    mode = vga.classify(cpl, lpf, hsw, vsl, clock_hz)
+    if mode is None:
+        return None
+    h_step = min(3, max(1, -(-mode.width // fb_w)))
+    v_step = min(3, max(1, -(-mode.height // fb_h)))
+    return mode, h_step, v_step
+
+
+def test_vga_classify_matches_python_across_the_mode_table(host: Path) -> None:
+    """`vga_mode.c` is `vga.classify` in C: every row of the table, with the measured sync
+    widths varied, the edges where the picture no longer fits, totals one off, no sync
+    pulse, and clocks around each row's rate (the refresh text is Python's `:.1f`)."""
+    rng = random.Random(7)
+    cases = []
+    for spec in vga.MODES:
+        for divider in spec.dividers:
+            cpl, lpf = spec.h_total * divider, spec.v_total
+            h_room = cpl - spec.width * divider - spec.h_back * divider
+            v_room = lpf - spec.height - spec.v_back
+            for hsw in (0, 1, spec.h_sync * divider, h_room, h_room + 1):
+                for vsl in (0, 1, spec.v_sync, v_room, v_room + 1):
+                    cases.append((cpl, lpf, hsw, vsl, spec.pixel_clock_hz * divider))
+            for dc, dl in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                cases.append((cpl + dc, lpf + dl, spec.h_sync, spec.v_sync, 0))
+            for _ in range(40):
+                clock = rng.randrange(1, 2 * spec.pixel_clock_hz * divider)
+                cases.append((cpl, lpf, spec.h_sync * divider, spec.v_sync, clock))
+            cases.append((cpl, lpf, spec.h_sync * divider, spec.v_sync, 0))
+    fbs = [(320, 240), (640, 480), (100, 50)]
+    lines = [(*c, *fbs[i % len(fbs)]) for i, c in enumerate(cases)]
+    text = "".join(" ".join(map(str, ln)) + "\n" for ln in lines)
+    done = subprocess.run(
+        [str(host), "classify"], input=text.encode(), capture_output=True, check=False
+    )
+    assert done.returncode == 0, done.stderr.decode()
+    got = done.stdout.decode().splitlines()
+    assert len(got) == len(lines)
+    matched = 0
+    for ln, out in zip(lines, got, strict=True):
+        want = _python_capture(*ln)
+        if want is None:
+            assert out == "none", ln
+            continue
+        matched += 1
+        mode, h_step, v_step = want
+        name, divider, h_off, v_off, width, height, hs, vs, refresh = out.split(" ")
+        python_name = f"{mode.width}x{mode.height}@{refresh}Hz"
+        if mode.divider > 1:
+            python_name += f" (clock x{mode.divider})"
+        assert python_name == mode.name, ln
+        assert name.startswith(f"{mode.width}x{mode.height}@"), ln
+        assert tuple(map(int, (divider, h_off, v_off, width, height, hs, vs))) == (
+            mode.divider,
+            mode.h_offset,
+            mode.v_offset,
+            mode.width,
+            mode.height,
+            h_step,
+            v_step,
+        ), ln
+    rows = sum(len(spec.dividers) for spec in vga.MODES)
+    assert matched >= rows * 45, (matched, len(lines))  # the clock sweep and the fits
+    assert len(lines) - matched >= rows * 10  # and the refusals
