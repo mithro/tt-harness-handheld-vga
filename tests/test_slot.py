@@ -609,3 +609,9 @@ def test_clock_running_threshold_just_above_and_just_below() -> None:
         runs[name] = log[CLOCK_RUNNING_TIMEOUT * 2 :]  # after the clock has been seen
     assert set(runs["above"]) == {1}
     assert 0 in runs["below"] and 1 in runs["below"]
+
+
+@pytest.mark.parametrize("tick_period", [20_000, 25_000])
+def test_the_tick_must_stay_below_half_the_project_period(tick_period: int) -> None:
+    with pytest.raises(ValueError, match="is not below half of 40000 ps"):
+        run(make(), project=(40_000, 5_050), tick_period=tick_period)

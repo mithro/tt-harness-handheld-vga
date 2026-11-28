@@ -107,8 +107,13 @@ def run(
     project: tuple[int, int] | None = (39_700, 5_050),
     vcd: str | None = None,
     late: tuple = (),
+    tick_period: int = TICK_PERIOD,
 ) -> None:
     """Run `dut` (made with `gate`) until every non-passive generator has finished.
+
+    `tick_period`: the period of the asynchronous-clear model's `tick` domain, the most by
+    which a modelled reset release lags its project edge. A slower tick runs much faster; it
+    must stay below half the project period.
 
     `late`: signals whose `MultiReg` into `project` gets one extra stage (skew injection).
     `project` is the project clock's (period, offset): its first rising edge is at time
@@ -117,10 +122,12 @@ def run(
     not a multiple of 100 ps never coincide with a `sys` edge (periods are multiples of
     100 ps).
     """
-    clocks = {"sys": SYS_PERIOD, "tick": TICK_PERIOD}
+    clocks = {"sys": SYS_PERIOD, "tick": tick_period}
     gens = {"sys": list(sys_gens), "tick": list(tick_gens)}
     if project is not None:
         period, offset = project
+        if not tick_period < period / 2:
+            raise ValueError(f"tick_period {tick_period} ps is not below half of {period} ps")
         clocks["project"] = (period, period // 2 - offset)
         gens["project"] = list(project_gens)
     run_simulation(

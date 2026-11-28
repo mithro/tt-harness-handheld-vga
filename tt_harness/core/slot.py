@@ -223,6 +223,9 @@ class ProjectSlot(Module):
         self.override_rst = Signal()
         self.override_ui_in = Signal(8)
         self._attached = False
+        # Build facts, for the SoC's `info` registers.
+        self.clock_hz = clock_hz
+        self.sim_clock = sim_clock
         self.clock = None
         self.gamepad = None
 

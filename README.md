@@ -105,6 +105,7 @@ Both can also be given per command (`--videos-repo`, `--reference-dir`).
 | [`docs/test-designs.md`](docs/test-designs.md) | the test designs and reference data |
 | [`docs/toolchains.md`](docs/toolchains.md) | installing and using the FPGA toolchains |
 | [`docs/cdc-constraints.md`](docs/cdc-constraints.md) | the clock-domain crossing constraints the FPGA build must apply |
+| [`docs/registers.md`](docs/registers.md) | the demo build's CSR map and the rules for its firmware |
 | [`docs/superpowers/specs/2026-11-23-tt-harness-handheld-vga-design.md`](docs/superpowers/specs/2026-11-23-tt-harness-handheld-vga-design.md) | the design specification |
 | [`docs/superpowers/plans/2026-11-23-plan-1-spikes.md`](docs/superpowers/plans/2026-11-23-plan-1-spikes.md) | plan 1: the spikes |
 | [`docs/superpowers/plans/2026-11-25-plan-2-core-soc-arty-demo.md`](docs/superpowers/plans/2026-11-25-plan-2-core-soc-arty-demo.md) | plan 2: the core SoC and Arty demo |

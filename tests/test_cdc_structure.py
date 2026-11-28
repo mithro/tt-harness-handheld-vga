@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import cdc_structure
 import pytest
-from migen import ClockDomain, If, Instance, Module, Signal
+from migen import ClockDomain, If, Instance, Memory, Module, Signal
 from migen.fhdl import verilog
 from migen.genlib.cdc import MultiReg
 
@@ -46,7 +46,7 @@ class _Top(Module):
         sys_ports = (s.ena, s.rst_n, s.ui_in, s.gamepad_enable, s.gamepad_buttons, s.clock_enable)
         out = dict.fromkeys((*sys_ports, c.start, c.abort, c.clocks), "sys")
         out[self.clk_in] = "clock"
-        out[s.clock.reset] = "sys"  # the MMCM's reset: nothing drives it yet
+        out[s.clock.reset] = "sys"  # `ProjectClock.reset` (the MMCM's RST): a port of the slot
         return out
 
 
@@ -145,8 +145,10 @@ def test_every_input_of_the_clocking_primitives_is_one_of_the_allowed_wires(
     """The MMCM and the clock buffers take inputs too. Each one is named here with the domain
     it may depend on, so a new wire from `sys` (or anywhere) into a primitive fails:
 
-    - `MMCME2_ADV`: its input clock, its own feedback, and `RST` (asynchronous to it; a `sys`
-      signal, undriven so far); every other input is a constant;
+    - `MMCME2_ADV`: its input clock, its own feedback, and `RST` (asynchronous to it), which
+      `ProjectClock` wires to its `reset` input (`i_RST=self.reset`): a `sys` signal, declared
+      a `sys` port here because nothing in the slot drives `reset`; every other input is a
+      constant;
     - `BUFG`: the MMCM output;
     - `BUFGCE`: the MMCM output, and `CE` from the synchroniser in the free-running copy of
       the project clock (`project_free`), never straight from `sys`.
@@ -291,3 +293,62 @@ def test_the_analyser_reports_synchroniser_and_flop_sources() -> None:
     assert found == [(1, True), (2, False)]
     assert sorted(f.clear_is_plain_register for f in a.flops) == [False, True]
     assert [f.clear_domains for f in a.flops] == [{"sys"}, {"sys"}]
+
+
+def test_the_analyser_refuses_two_instances_with_one_name() -> None:
+    """Instance inputs are reported by name, so two instances of one name could hide each
+    other's inputs: the analyser reports it as an error instead."""
+
+    class M(Module):
+        def __init__(self) -> None:
+            self.clock_domains.cd_project = ClockDomain("project", reset_less=True)
+            a, b = Signal(), Signal()
+            self.sync.project += [a.eq(~a), b.eq(a)]
+            self.specials += [
+                Instance("thing", name="twin", i_x=a),
+                Instance("thing", name="twin", i_x=b),
+            ]
+
+    a = cdc_structure.analyse(M(), {}, {"twin": "project"})
+    assert a.errors == ["two instances are called twin: their inputs cannot be told apart"]
+
+
+def test_the_analyser_reports_the_domains_feeding_each_memory_port() -> None:
+    """A memory port's read data is in its clock domain, and the domains of its inputs are
+    reported: a write port in `project` addressed from `sys` shows up as fed from `sys`."""
+
+    class M(Module):
+        def __init__(self) -> None:
+            self.clock_domains.cd_sys = ClockDomain("sys")
+            self.clock_domains.cd_project = ClockDomain("project", reset_less=True)
+            mem = Memory(8, 4)
+            write = mem.get_port(write_capable=True, clock_domain="project")
+            read = mem.get_port(clock_domain="sys")
+            self.specials += mem, write, read
+            a = Signal(2)
+            self.sync += a.eq(a + 1)
+            self.comb += [write.adr.eq(a), write.we.eq(1), write.dat_w.eq(a)]
+            self.comb += read.adr.eq(read.dat_r[:2])
+
+    a = cdc_structure.analyse(M(), {}, {})
+    assert a.errors == []
+    ports = sorted((p.domain, sorted(p.input_domains)) for p in a.memory_ports)
+    assert ports == [("project", ["sys"]), ("sys", ["sys"])]
+
+
+def test_the_analyser_reports_an_asynchronous_memory_read_as_an_error() -> None:
+    """A port with `async_read` is distributed RAM, its read data combinational from the
+    address: the framebuffer must be block RAM."""
+
+    class M(Module):
+        def __init__(self) -> None:
+            self.clock_domains.cd_sys = ClockDomain("sys")
+            self.mem = mem = Memory(8, 4, name="buffer")
+            read = mem.get_port(async_read=True, clock_domain="sys")
+            self.specials += mem, read
+            a = Signal(2)
+            self.sync += a.eq(a + 1)
+            self.comb += read.adr.eq(a)
+
+    a = cdc_structure.analyse(M(), {}, {})
+    assert a.errors == ["a port of memory buffer reads asynchronously"]

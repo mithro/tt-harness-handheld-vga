@@ -287,6 +287,21 @@ wheels = [
 ]
 
 [[package]]
+name = "pythondata-cpu-vexriscv"
+version = "1.0.1.post407"
+source = { git = "https://github.com/litex-hub/pythondata-cpu-vexriscv?tag=2026.08#642ecfed1c84460555d6d803d660cc60cfc1ecb6" }
+
+[[package]]
+name = "pythondata-software-compiler-rt"
+version = "0.0.post6206"
+source = { git = "https://github.com/litex-hub/pythondata-software-compiler_rt?tag=2026.08#6eb76609c9627bf26635e57c63fb22cda7115887" }
+
+[[package]]
+name = "pythondata-software-picolibc"
+version = "1.8.11.post1"
+source = { git = "https://github.com/litex-hub/pythondata-software-picolibc?tag=2026.08#6a13ccce7c575b32c102dd9dc52178505b81fe39" }
+
+[[package]]
 name = "pyyaml"
 version = "6.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -407,6 +422,9 @@ dependencies = [
     { name = "litex" },
     { name = "litex-boards" },
     { name = "migen" },
+    { name = "pythondata-cpu-vexriscv" },
+    { name = "pythondata-software-compiler-rt" },
+    { name = "pythondata-software-picolibc" },
     { name = "pyyaml" },
 ]
 
@@ -422,6 +440,9 @@ requires-dist = [
     { name = "litex", git = "https://github.com/enjoy-digital/litex?tag=2026.08" },
     { name = "litex-boards", git = "https://github.com/litex-hub/litex-boards?tag=2026.08" },
     { name = "migen", git = "https://github.com/m-labs/migen?rev=e19524c963a8342952840983047557707fbe0b6a" },
+    { name = "pythondata-cpu-vexriscv", git = "https://github.com/litex-hub/pythondata-cpu-vexriscv?tag=2026.08" },
+    { name = "pythondata-software-compiler-rt", git = "https://github.com/litex-hub/pythondata-software-compiler_rt?tag=2026.08" },
+    { name = "pythondata-software-picolibc", git = "https://github.com/litex-hub/pythondata-software-picolibc?tag=2026.08" },
     { name = "pyyaml" },
 ]
 

@@ -9,6 +9,9 @@ dependencies = [
     "litex",
     "litex-boards",
     "migen",
+    "pythondata-cpu-vexriscv",
+    "pythondata-software-compiler-rt",
+    "pythondata-software-picolibc",
     "pyyaml",
 ]
 
@@ -33,6 +36,11 @@ packages = ["tt_harness"]
 migen = { git = "https://github.com/m-labs/migen", rev = "e19524c963a8342952840983047557707fbe0b6a" }
 litex = { git = "https://github.com/enjoy-digital/litex", tag = "2026.08" }
 litex-boards = { git = "https://github.com/litex-hub/litex-boards", tag = "2026.08" }
+# The VexRiscv Verilog and the BIOS's C libraries, at LiteX's own release tag (their PyPI
+# releases are from 2022 and do not match LiteX 2026.08).
+pythondata-cpu-vexriscv = { git = "https://github.com/litex-hub/pythondata-cpu-vexriscv", tag = "2026.08" }
+pythondata-software-compiler-rt = { git = "https://github.com/litex-hub/pythondata-software-compiler_rt", tag = "2026.08" }
+pythondata-software-picolibc = { git = "https://github.com/litex-hub/pythondata-software-picolibc", tag = "2026.08" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
