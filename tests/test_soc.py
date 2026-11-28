@@ -22,16 +22,18 @@ import json
 import zlib
 from pathlib import Path
 
+import cdc_structure
 import pytest
 from litex.soc.integration import export
 from litex.soc.interconnect import wishbone
-from migen import ClockDomain, Signal
+from migen import ClockDomain, Module, Signal
 from migen.sim import passive
 from slot_sim import gate, run
 
 from tt_harness import tools
 from tt_harness.core import vga
 from tt_harness.core.slot import ProjectSlot
+from tt_harness.demo.validate import DemoError
 from tt_harness.fetch import Sources
 from tt_harness.manifest import Project
 from tt_harness.soc import core, registers, sim
@@ -111,6 +113,104 @@ def test_registers_doc_states_the_firmware_rules() -> None:
         "With `clock_hz` 0 nothing waits on the project clock",
     ):
         assert phrase in rules, phrase
+
+
+# Construction: the build-time checks ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kw", "message"),
+    [
+        ({"demo_json": b'{"version": 1}'}, 'missing "shuttle"'),
+        ({"demo_json": b"not json"}, "not valid JSON"),
+        ({"demo_json": demo(shuttle="tt07")}, '"shuttle" is "tt07" but this chip is "tt00"'),
+        ({"demo_json": demo(projects=2)}, "exactly one project"),
+        ({"demo_json": b"\xff"}, "not UTF-8"),
+    ],
+)
+def test_an_invalid_demo_json_fails_the_build(kw: dict, message: str) -> None:
+    with pytest.raises(DemoError) as e:
+        soc_for_test(**kw)
+    assert any(message in m for m in e.value.errors), e.value.errors
+
+
+def test_the_slot_clock_must_be_the_demo_clock() -> None:
+    with pytest.raises(ValueError, match="clock_hz 25000000.*slot.*12000000"):
+        soc_for_test(slot=sim_slot(12_000_000))
+
+
+def test_an_unknown_pmod_fails_the_build() -> None:
+    with pytest.raises(ValueError, match="unknown Pmod 'laser'"):
+        soc_for_test(pmods=("tiny-vga", "laser"))
+
+
+def test_the_project_name_names_the_shuttle() -> None:
+    with pytest.raises(ValueError, match="<shuttle>/<macro>"):
+        soc_for_test(project_name="tt_um_test")
+
+
+def test_the_achieved_clock_is_the_exact_rational_of_the_mmcm_setting() -> None:
+    slot = ProjectSlot(None, Signal(), 100_000_000, 25_175_000)
+    assert core.achieved_clock(slot) == (3_600_000_000, 143)  # 100 MHz x 9 / 35.75
+    assert core.achieved_clock(sim_slot(25_175_000)) == (25_175_000, 1)
+    assert core.achieved_clock(ProjectSlot(None, Signal(), 100_000_000, 0)) == (0, 1)
+
+
+def test_the_demo_json_header_holds_the_exact_bytes() -> None:
+    raw = demo() + b"\n"
+    text = core.demo_json_header(raw)
+    body = text[text.index("{", text.index("demo_json[]")) + 1 : text.index("};")]
+    assert bytes(int(v, 0) for v in body.replace("\n", "").split(",") if v.strip()) == raw
+    assert f"#define DEMO_JSON_LEN {len(raw)}" in text
+
+
+# Crossings -----------------------------------------------------------------------------------
+
+PRIMITIVES = {"MMCME2_ADV": "mmcm", "BUFG": "clock", "BUFGCE": "clock"}
+
+
+class _CoreTop(Module):
+    def __init__(self, with_audio: bool) -> None:
+        self.clock_domains.cd_sys = ClockDomain("sys")
+        self.clk_in = Signal()
+        slot = ProjectSlot("tt_um_example", self.clk_in, 100_000_000, 25_175_000)
+        self.submodules.core = core.HarnessCore(
+            slot, (320, 240), reference_ui_in=0x5A, with_audio=with_audio, sevenseg_window_log2=19
+        )
+
+    def ports(self) -> dict:
+        out = dict.fromkeys(self.core.sys_inputs(), "sys")
+        out[self.clk_in] = "clock"
+        out[self.core.slot.clock.reset] = "sys"
+        return out
+
+
+@pytest.mark.parametrize("with_audio", [False, True])
+def test_the_only_crossings_of_the_core_are_the_held_buses_and_synchronisers(
+    with_audio: bool,
+) -> None:
+    top = _CoreTop(with_audio)
+    a = cdc_structure.analyse(top, top.ports(), {"project": "project", **PRIMITIVES})
+    assert a.errors == []
+    assert [cdc_structure.name(s) for s in a.mixed] == []
+    c = top.core
+    crossings = {
+        c.slot.ctl_x: "project",
+        c.slot.buttons_x: "project",
+        c.atspeed.cmd_x: "project",
+        c.atspeed.rep_x: "sys",
+        c.vga_settings_x: "project",
+        c.vga_timing_x: "sys",
+        c.sevenseg_x: "sys",
+    }
+    expected = {(domain, id(x.dst), id(x.hold)) for x, domain in crossings.items()}
+    found = {(d, id(next(iter(t))), id(s)) for d, t, s in a.reads if len(t) == 1}
+    assert found == expected and len(a.reads) == len(expected)
+    assert all(m.stages == 2 for m in a.multiregs)
+    assert len(a.multiregs) == 2 * len(crossings) + 3  # + LOCKED, clock enable, alive toggle
+    # The framebuffer: written in `project`, read in `sys`, each port fed from its own domain.
+    ports = {(p.domain, frozenset(p.input_domains)) for p in a.memory_ports}
+    assert ports == {("project", frozenset({"project"})), ("sys", frozenset({"sys"}))}
 
 
 # The registers on the bus --------------------------------------------------------------------
