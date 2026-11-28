@@ -17,9 +17,12 @@ include $(SOC_DIRECTORY)/software/common.mak
 OBJECTS = crt0.o main.o hal_litex.o console_fmt.o vga_mode.o runner.o demo_parse.o pyrepr.o \
           text.o
 
+# LiteX's headers (libbase, system.h, the generated csr.h) as system headers: their warnings
+# (unused parameters in system.h) are theirs; the firmware's own sources and its generated
+# headers get -Wall -Wextra -Werror in full.
+INCLUDES := $(patsubst -I%,-isystem %,$(INCLUDES))
 CFLAGS += -I$(FIRMWARE_DIR) -I$(BUILDINC_DIRECTORY)/generated -I$(VGA_MODES_DIR) \
-          -Wextra -Werror -Wno-missing-field-initializers -Wno-type-limits \
-          -Wno-unused-parameter  # LiteX's system.h has unused parameters
+          -Wextra -Werror -Wno-missing-field-initializers
 
 all: firmware.bin firmware.size
 

@@ -224,7 +224,10 @@ static void report_mode(uint32_t now) {
 static uint32_t probe_next;
 
 static void report_probes(uint32_t now) {
-    if (FB_PROBE_COUNT == 0 || (int32_t)(now - probe_next) < 0) return;
+#if FB_PROBE_COUNT == 0
+    (void)now;  // a build without probes prints no fb lines
+#else
+    if ((int32_t)(now - probe_next) < 0) return;
     probe_next = now + FB_PROBE_MS;
     struct text *t = line();
     text_str(t, "fb t_ms=");
@@ -240,6 +243,7 @@ static void report_probes(uint32_t now) {
         text_hex(t, vga_readback_data_read(), 2);
     }
     console_text(t);
+#endif
 }
 
 // ---- boot -------------------------------------------------------------------------------
