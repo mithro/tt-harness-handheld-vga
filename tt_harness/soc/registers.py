@@ -167,7 +167,12 @@ def render(soc) -> str:
                 lines.append("")
     memories = [(n, r) for n, r in soc.csr_regions.items() if isinstance(r.obj, Memory)]
     if memories:
-        lines += ["### CSR memories", "", "| Memory | Address | Address span (bytes) |", "|---|---|---|"]
+        lines += [
+            "### CSR memories",
+            "",
+            "| Memory | Address | Address span (bytes) |",
+            "|---|---|---|",
+        ]
         for name, region in memories:
             span = region.obj.depth * region.busword // 8  # one bus word per entry
             lines.append(f"| `{name}` | `0x{region.origin:08x}` | {span} |")
