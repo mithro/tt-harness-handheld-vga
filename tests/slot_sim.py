@@ -126,6 +126,8 @@ def run(
     gens = {"sys": list(sys_gens), "tick": list(tick_gens)}
     if project is not None:
         period, offset = project
+        if not tick_period < period / 2:
+            raise ValueError(f"tick_period {tick_period} ps is not below half of {period} ps")
         clocks["project"] = (period, period // 2 - offset)
         gens["project"] = list(project_gens)
     run_simulation(
