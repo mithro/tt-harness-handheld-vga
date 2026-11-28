@@ -69,6 +69,25 @@ def test_generated_top_connects_each_project_input_to_one_named_net(tmp_path: Pa
     assert input_gate.source_constants(text, NETS) == {"ena", "ui_in", "uio_in"}
 
 
+def test_litex_layout_comment_lines_and_aligned_ports_are_read(tmp_path: Path) -> None:
+    # LiteX's Verilog printer heads the connections with "// Inputs." and "// Outputs." and
+    # pads each port name to line up the parentheses: ".clk     (project_clk),".
+    text = _top_verilog(tmp_path)
+    commented = (
+        text.replace(f"{PROJECT_INSTANCE}(\n", f"{PROJECT_INSTANCE}(\n\t// Inputs.\n", 1)
+        .replace("\n);", "\n\n\t// Outputs.\n);", 1)
+        .replace(".rst_n(stimulus_rst_n)", ".rst_n   ( stimulus_rst_n )")
+    )
+    assert commented != text
+    assert input_gate.input_nets(commented, PROJECT_INSTANCE) == NETS
+    # A connection hidden behind a comment on the same line is still refused.
+    with pytest.raises(ValueError, match="cannot read the connection"):
+        input_gate.input_nets(
+            text.replace(".rst_n(stimulus_rst_n)", ".rst_n(stimulus_rst_n) // x"),
+            PROJECT_INSTANCE,
+        )
+
+
 def test_an_unknown_project_port_is_refused(tmp_path: Path) -> None:
     text = _top_verilog(tmp_path).replace(".ena(stimulus_ena),", ".ena(stimulus_ena),\n\t.pad(x),")
     with pytest.raises(ValueError, match=r"unknown port\(s\) \['pad'\]"):

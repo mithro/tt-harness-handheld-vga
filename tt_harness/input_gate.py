@@ -98,7 +98,7 @@ REPORT_NAME = "project-inputs.rpt"
 _LINE = "tt-harness project input: "
 _END = "tt-harness project inputs: end"
 
-_CONNECTION = re.compile(r"\.(\w+)\(\s*([^()\s]*)\s*\)")
+_CONNECTION = re.compile(r"\.(\w+)\s*\(\s*([^()\s]*)\s*\)")
 _MARK = "tt-harness project input"  # any report line with this in it must be readable
 _REPORT_LINE = re.compile(
     rf"{re.escape(_LINE)}(?P<port>\w+) net (?P<net>\S+) driver (?P<driver>\S+)"
@@ -125,8 +125,8 @@ def instance_connections(top_verilog: str, instance: str) -> dict[str, str]:
     out = {}
     for line in blocks[0].splitlines():
         line = line.strip().rstrip(",")
-        if not line:
-            continue
+        if not line or line.startswith("//"):
+            continue  # a whole-line comment (LiteX writes "// Inputs." and "// Outputs.")
         m = _CONNECTION.fullmatch(line)
         if not m or not re.fullmatch(r"[A-Za-z_]\w*", m.group(2)):
             raise ValueError(f"instance {instance!r}: cannot read the connection {line!r}")
