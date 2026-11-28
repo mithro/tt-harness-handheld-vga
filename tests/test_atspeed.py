@@ -191,8 +191,9 @@ from pathlib import Path
 
 from migen import ClockDomain
 from migen.fhdl import verilog
+from source_cache import load_or_skip
 
-from tt_harness import pool, tools, verdict, verilate
+from tt_harness import tools, verdict, verilate
 
 HARNESS = Path(__file__).resolve().parent.parent / "tt_harness" / "sim" / "slot_tb.cpp"
 TOP_NAME = "slot_tb_top"
@@ -297,15 +298,7 @@ def design(request, tmp_path_factory) -> _Sim:
     ref_file = verdict.reference_path(ref_dir, project_id)
     assert ref_file.is_file(), f"no shared reference for {project_id}: {ref_file} is missing"
     ref = verdict.load_reference(ref_dir, project_id)
-    try:
-        sources = pool.load_sources(project_id)
-    except (
-        OSError,
-        ValueError,
-        KeyError,
-        RuntimeError,
-    ) as e:  # no checkout, or a cold cache and no network
-        pytest.skip(f"cannot load sources of {project_id}: {e}")
+    sources = load_or_skip(project_id)  # skips only with no videos checkout or no network
     assert (ref.reset_clocks, ref.ui_in, ref.uio_in) == (RESET_CLOCKS, 0, 0)
     assert sources.project.ui_in == 0 and sources.project.uio_in == 0
     work = tmp_path_factory.mktemp(f"slot-{sources.project.top_module}")

@@ -23,8 +23,9 @@ import json
 from pathlib import Path
 
 import pytest
+from source_cache import load_or_skip
 
-from tt_harness import pool, tools
+from tt_harness import tools
 from tt_harness.core import vga
 from tt_harness.soc import firmware, sim
 
@@ -47,10 +48,7 @@ pytestmark = [
 
 
 def sources(project_id: str):
-    try:
-        return pool.load_sources(project_id)
-    except (OSError, ValueError, KeyError, RuntimeError) as e:  # no checkout or no network
-        pytest.skip(f"cannot load sources of {project_id}: {e}")
+    return load_or_skip(project_id)  # skips only with no videos checkout or no network
 
 
 def demo(project, **entry) -> bytes:
