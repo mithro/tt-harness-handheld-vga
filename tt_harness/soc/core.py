@@ -133,7 +133,8 @@ def achieved_clock(slot: ProjectSlot) -> tuple[int, int]:
     if slot.sim_clock:
         return slot.clock_hz, 1
     if slot.clock is None:
-        assert slot.clock_hz == 0
+        if slot.clock_hz != 0:
+            raise ValueError(f"the slot has no clock generator but clock_hz is {slot.clock_hz}")
         return 0, 1
     s = slot.clock.setting
     f = Fraction(s.clk_in_hz) * Fraction(s.mult) / (s.divclk * Fraction(s.div))

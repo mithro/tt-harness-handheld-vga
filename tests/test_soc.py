@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import types
 import zlib
 from pathlib import Path
 
@@ -414,6 +415,18 @@ def test_registers_read_back() -> None:
     assert seen.get("done")
 
 
+def test_achieved_clock_refuses_a_slot_with_no_generator_and_a_rate() -> None:
+    """A slot with no clock generator can only be a stopped clock: a ValueError, even
+    under `python -O`, rather than an assert."""
+    slot = types.SimpleNamespace(sim_clock=False, clock=None, clock_hz=25_175_000)
+    with pytest.raises(ValueError, match="no clock generator but clock_hz is 25175000"):
+        core.achieved_clock(slot)
+    assert core.achieved_clock(types.SimpleNamespace(sim_clock=False, clock=None, clock_hz=0)) == (
+        0,
+        1,
+    )
+
+
 def test_with_clock_hz_0_no_register_waits_on_the_project_clock() -> None:
     """`clock_hz` 0 (review focus 2): no project clock at all, from power-up. Every register
     access completes, the reset is pulsed, an at-speed check is started and aborted, and the
@@ -430,6 +443,9 @@ def test_with_clock_hz_0_no_register_waits_on_the_project_clock() -> None:
             yield from write(name, value)
             assert (yield from read(name)) == value, name
         yield from write("slot_rst_n", 0)
+        yield from _wait(5)
+        # with no project clock the reset is still asserted: the flops clear asynchronously
+        assert (yield bus.soc.core.slot.pin_rst_n) == 0
         yield from write("slot_rst_n", 1)
         assert (yield from read("slot_rst_n")) == 1
         yield from write("atspeed_clocks", 40)
