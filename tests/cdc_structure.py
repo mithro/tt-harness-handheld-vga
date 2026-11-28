@@ -26,7 +26,11 @@ What is reported:
 - `multiregs`: each `MultiReg` with its stage count and whether its input is a plain register
   (a signal assigned only in one synchronous block, not combinationally, not an expression);
 - `flops`: each `AsyncClearFlop` with the same for its clear, and the domains of its `d`;
-- `instance_inputs`: for each instance given in `instances`, input port -> domains.
+- `instance_inputs`: for each instance given in `instances`, input port -> domains;
+- `memory_ports`: each port of a `Memory`, with its clock domain (the domain of its read data)
+  and the domains of its inputs (address, write data and enables). A memory written in one
+  domain and read in another is a dual-clock block RAM: each port must be fed from its own
+  domain only.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from migen import Signal
-from migen.fhdl.specials import Instance
+from migen.fhdl.specials import Instance, Memory, _MemoryPort
 from migen.fhdl.structure import ClockSignal, Constant, ResetSignal
 from migen.fhdl.tools import list_signals, list_targets
 from migen.genlib.cdc import MultiReg
@@ -69,6 +73,13 @@ class Flop:
 
 
 @dataclass
+class MemoryPort:
+    special: _MemoryPort
+    domain: str
+    input_domains: frozenset[str]
+
+
+@dataclass
 class Analysis:
     domains: dict = field(default_factory=dict)  # Signal -> frozenset of domain names
     reads: list = field(default_factory=list)  # (domain, frozenset(targets), source signal)
@@ -76,6 +87,7 @@ class Analysis:
     multiregs: list = field(default_factory=list)
     flops: list = field(default_factory=list)
     instance_inputs: dict = field(default_factory=dict)
+    memory_ports: list = field(default_factory=list)
     errors: list = field(default_factory=list)
 
 
@@ -111,6 +123,10 @@ def analyse(module, ports: dict, instances: dict[str, str]) -> Analysis:
             special_output(special.o, special.odomain, "a MultiReg")
         elif isinstance(special, AsyncClearFlop):
             special_output(special.q, special.cd, "an AsyncClearFlop")
+        elif isinstance(special, _MemoryPort):
+            special_output(special.dat_r, special.clock.cd, "a memory port")
+        elif isinstance(special, Memory):
+            pass  # its ports are listed as specials of their own
         elif isinstance(special, Instance):
             label = special.name_override or special.of
             outputs = [i for i in special.items if isinstance(i, Instance.Output)]
@@ -204,6 +220,12 @@ def analyse(module, ports: dict, instances: dict[str, str]) -> Analysis:
                     of(special.d),
                 )
             )
+    for special in fragment.specials:
+        if isinstance(special, _MemoryPort):
+            inputs = [
+                x for x in (special.adr, special.dat_w, special.we, special.re) if x is not None
+            ]
+            out.memory_ports.append(MemoryPort(special, special.clock.cd, of(inputs)))
     for special, label in project_like:
         if label in out.instance_inputs:
             out.errors.append(
