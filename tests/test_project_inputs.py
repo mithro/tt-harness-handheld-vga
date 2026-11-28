@@ -196,3 +196,67 @@ def test_only_the_output_of_an_async_clear_flop_is_accepted_as_a_special() -> No
     assert (found["q"].kind, found["q"].domain) == ("register", "project")
     assert found["s"].kind == "undriven"  # a synchroniser output is not a project register
     assert found["w"].kind == "combinational"  # also assigned by logic: not accepted
+
+
+def _clear_case(make_clear):
+    from tt_harness.core.cdc import AsyncClearFlop
+
+    class M(Module):
+        def __init__(self) -> None:
+            self.a, self.b, self.port, pin = (Signal() for _ in range(4))
+            self.sync += [self.a.eq(~self.a), self.b.eq(self.a)]
+            self.specials += AsyncClearFlop("project", make_clear(self), 1, q=pin)
+            self.specials += Instance("thing", name="project", i_rst_n=pin)
+
+    return inputs.project_inputs(M(), "project")["rst_n"]
+
+
+def _wired_register(m) -> Signal:
+    w = Signal()
+    m.comb += w.eq(m.a)
+    return w
+
+
+def _synchronised(m) -> Signal:
+    from migen.genlib.cdc import MultiReg
+
+    o = Signal()
+    m.specials += MultiReg(m.a, o, odomain="project")
+    return o
+
+
+@pytest.mark.parametrize(
+    ("make_clear", "kind"),
+    [
+        (lambda m: m.a, "register"),
+        (_wired_register, "register"),
+        (lambda m: 0, "register"),
+        (lambda m: m.a & ~m.b, "combinational"),  # the plan-1 `rst_n` glitch, on the clear
+        (lambda m: ~m.a, "combinational"),
+        (lambda m: m.port, "combinational"),  # nothing drives it: not shown glitch-free
+        (_synchronised, "combinational"),
+    ],
+)
+def test_the_clear_of_an_async_clear_flop_must_be_a_register_or_a_constant(
+    make_clear, kind: str
+) -> None:
+    """`q` follows `clear` asynchronously, so a clear made by logic glitches the project input."""
+    found = _clear_case(make_clear)
+    assert found.kind == kind, found
+    if kind == "register":
+        assert found.domain == "project" and found.glitch_free
+    else:
+        assert "asynchronous clear" in found.detail and not found.glitch_free
+
+
+def test_an_async_clear_flop_cleared_by_itself_is_refused() -> None:
+    from tt_harness.core.cdc import AsyncClearFlop
+
+    class M(Module):
+        def __init__(self) -> None:
+            pin = Signal()
+            self.specials += AsyncClearFlop("project", pin, 1, q=pin)
+            self.specials += Instance("thing", name="project", i_rst_n=pin)
+
+    found = inputs.project_inputs(M(), "project")["rst_n"]
+    assert found.kind == "combinational" and "loop" in found.detail

@@ -24,7 +24,10 @@ domain is acceptable (`tt_harness.core.slot` requires `project` for every regist
 
 The one special accepted as a register (`AsyncClearFlop`, an FDCE: output 0 while its
 `clear` is high, else the value of `d` at the last clock edge of its domain) is accepted
-for exactly its `q` output, and only when nothing else in the fragment assigns that signal.
+for exactly its `q` output, only when nothing else in the fragment assigns that signal, and
+only when its `clear` is itself glitch-free by the same rules (a register output or a
+constant, directly or through plain wires): the output follows the clear asynchronously, so
+a clear made by logic (`a & ~b`) is a glitch on the project input and is `combinational`.
 No other special's output is accepted (a `MultiReg` output, for example, is `undriven` here,
 because a synchroniser output is not a project-clock register).
 
@@ -84,7 +87,7 @@ def project_inputs(module: Module, instance_name: str) -> dict[str, InputSource]
         sync_targets |= targets
         for signal in targets:
             domains_of.setdefault(signal, set()).add(domain)
-    flop_outputs = {s.q: s.cd for s in fragment.specials if isinstance(s, AsyncClearFlop)}
+    flops = {s.q: s for s in fragment.specials if isinstance(s, AsyncClearFlop)}
 
     def plain_source(signal: Signal):
         """The right-hand side if `signal` is one unconditional `signal.eq(x)`, else None."""
@@ -93,7 +96,7 @@ def project_inputs(module: Module, instance_name: str) -> dict[str, InputSource]
             return assigns[0].r
         return None
 
-    def classify(port: str, expr) -> InputSource:
+    def classify(port: str, expr, flops_seen: frozenset[int] = frozenset()) -> InputSource:
         seen: set[int] = set()
         while True:
             if isinstance(expr, Constant):
@@ -118,10 +121,19 @@ def project_inputs(module: Module, instance_name: str) -> dict[str, InputSource]
                         f"{_name(expr)} is assigned in clock domains {sorted(domains)}",
                     )
                 return InputSource(port, "register", _name(expr), next(iter(domains)))
-            if expr in flop_outputs and not in_comb:
-                return InputSource(
-                    port, "register", f"{_name(expr)} (AsyncClearFlop)", flop_outputs[expr]
-                )
+            if expr in flops and not in_comb:
+                flop = flops[expr]
+                if id(flop) in flops_seen:
+                    return InputSource(port, "combinational", f"a loop through {_name(expr)}")
+                clear = classify(port, flop.clear, flops_seen | {id(flop)})
+                if not clear.glitch_free:
+                    return InputSource(
+                        port,
+                        "combinational",
+                        f"{_name(expr)} (AsyncClearFlop): its asynchronous clear is not a "
+                        f"register output or a constant: {clear.detail}",
+                    )
+                return InputSource(port, "register", f"{_name(expr)} (AsyncClearFlop)", flop.cd)
             if not in_comb:
                 return InputSource(port, "undriven", f"nothing assigns {_name(expr)}")
             source = plain_source(expr)
