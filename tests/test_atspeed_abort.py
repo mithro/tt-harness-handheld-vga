@@ -25,7 +25,7 @@ import zlib
 
 import pytest
 from migen import ClockDomain, Module, Signal
-from pin_check import REF_UI, SW_UI, assert_clean
+from pin_check import NORMAL, REF_UI, SW_UI, assert_clean
 from slot_sim import gate, run
 from test_atspeed import _Toy, toy_bytes, waits
 
@@ -262,6 +262,53 @@ def test_abort_with_the_clock_stopped_then_started_never_reports_and_any_begin_i
     assert not rec.overridden(len(rec.pins) - 20), "the override was not released"
     assert rec.pins[-1] == (1, 0, SW_UI)
     assert rec.done_crcs == []
+
+
+def test_start_and_abort_with_the_clock_stopped_from_power_up_never_reports() -> None:
+    """The same from power-up: the project clock has never run, so the design is still held in
+    reset by the slot when the start word in flight begins its check, and stays so until the
+    control word with the release bit arrives. The pins are judged from sample 0: only the
+    slot's in-reset values, at most one contiguous override block with `rst_n` low throughout
+    (`ena` 1 and the reference `ui_in` together, never one without the other), then the
+    software's values for good; `rst_n` never high before them. No `done`."""
+    b = make(running=False)
+    rec, out = Recorder(b), {}
+
+    def sysgen():
+        yield from setup(b)
+        out["pins_before"] = ((yield b.slot.pin_rst_n), (yield b.slot.pin_ena))
+        yield from start(b, 40)
+        yield from waits(50)
+        out["busy_before"] = yield b.check.busy
+        yield from pulse(b.check.abort)
+        yield
+        out["flags"] = ((yield b.check.busy), (yield b.check.done))
+        yield b.ce_project.eq(1)  # the clock starts for the first time
+        yield from waits(600)
+        out["done"] = yield b.check.done
+
+    go2(b, sysgen(), rec, CLOCKS["normal"])
+    assert out["pins_before"] == (0, 0)
+    assert out["busy_before"] == 1 and out["flags"] == (0, 0) and out["done"] == 0
+    assert rec.done_crcs == []
+    pins = rec.pins
+    assert len(pins) > 100
+    first_normal = pins.index(NORMAL)
+    in_reset = {(0, 0, 0), (0, 0, SW_UI)}  # the slot's values before the release arrives
+    override = (0, 1, REF_UI)  # the check's block, the design held in reset throughout
+    kinds = []
+    for k, sample in enumerate(pins[:first_normal]):
+        assert sample in in_reset or sample == override, f"sample {k}: {sample} ({pins[: k + 2]})"
+        kind = "override" if sample == override else "reset"
+        if not kinds or kinds[-1] != kind:
+            kinds.append(kind)
+    # The start word in flight does begin (and is cut): one block, between in-reset samples.
+    assert kinds in (["reset", "override", "reset"], ["reset", "override"]), kinds
+    block = sum(sample == override for sample in pins[:first_normal])
+    assert 1 <= block <= 4 + -(-4 * 20_000 // CLOCKS["normal"][0]), block
+    # From the first normal sample on: normal for good, no further block.
+    assert assert_clean(pins, full_last=False) == []
+    assert set(pins[first_normal:]) == {NORMAL}
 
 
 def test_a_start_requested_and_not_aborted_runs_when_the_stopped_clock_resumes() -> None:
