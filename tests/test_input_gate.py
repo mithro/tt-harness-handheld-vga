@@ -136,6 +136,14 @@ def test_yosys_every_flip_flop_type_passes(kind: str) -> None:
     case = _yosys("registered")
     (cell,) = case["modules"]["arty_compare"]["cells"].values()
     cell["type"] = kind
+    pin = input_gate.ASYNC_PINS.get(kind)
+    if pin is None:
+        assert _only_rst_n(case) == []
+        return
+    # A flip-flop with an asynchronous pin passes only with that pin glitch-free: the
+    # excerpt has no connection for it, which is refused; tied to a constant it passes.
+    assert _only_rst_n(case) == [f"rst_n is driven by {kind} driver0: {pin} is unconnected"]
+    cell["connections"][pin] = ["0"]
     assert _only_rst_n(case) == []
 
 
@@ -229,11 +237,13 @@ def test_vivado_incomplete_or_foreign_report_is_refused() -> None:
         input_gate.parse_vivado("tt-harness project input: pad net x driver FDRE\n" + text, NETS)
 
 
-def test_vivado_port_without_a_line_is_missing_and_fails() -> None:
-    text = "\n".join(ln for ln in _vivado("registered").splitlines() if " rst_n " not in ln)
-    drivers = input_gate.fold_constants(input_gate.parse_vivado(text + "\n", NETS), CONSTANTS)
-    assert drivers["rst_n"] == ("missing",)
-    assert input_gate.offenders(drivers) == ["rst_n is driven by missing"]
+def test_vivado_port_without_a_line_is_refused() -> None:
+    """The Tcl writes a line for every port (`driver missing` when the net is gone), so a
+    port with no line at all is a broken report, whether or not the port is a source constant."""
+    for port in ("rst_n", "ui_in"):
+        text = "\n".join(ln for ln in _vivado("registered").splitlines() if f" {port} " not in ln)
+        with pytest.raises(ValueError, match=f"0 line.s. for {port}"):
+            input_gate.parse_vivado(text + "\n", NETS)
 
 
 @pytest.mark.parametrize("driver", ["LUT2", "LUT1", "CARRY4", "FDRE.QN", "undriven", "missing"])
@@ -437,17 +447,28 @@ def test_yosys_clock_domains() -> None:
     assert drivers["ena"] == ("FDRE",) and drivers["rst_n"] == ("FDRE",)
     assert input_gate.offenders(drivers) == []  # glitch-free drivers, but in which domain?
     clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
-    # The clock buffer's output net is renamed by the tool; the chain reaches the port name.
-    assert "project_clk" in clocks["rst_n"][0].names and "project_clk" in clocks["ui_in"][0].names
-    assert "sys_clk" in clocks["ena"][0].names
-    assert clocks["rst_n"][0].cells and set(clocks["rst_n"][0].cells) <= set(
-        input_gate.CLOCK_BUFFERS
-    )
-    (bad,) = input_gate.clock_offenders(drivers, clocks, "project_clk")
-    assert bad.startswith("ena[0]: clocked by ") and "sys_clk" in bad
-    wrong = input_gate.clock_offenders(drivers, clocks, "sys_clk")
+    # The clock buffer's output net (the net on the flip-flops' clock pins) is renamed by the
+    # tool here; the port name is further back, in front of the buffers.
+    (project_net,) = clocks["rst_n"][0].names
+    (sys_net,) = clocks["ena"][0].names
+    assert project_net != sys_net and "project_clk" not in (project_net, sys_net)
+    assert clocks["ui_in"][0].names == (project_net,)
+    assert "project_clk" in clocks["rst_n"][0].upstream
+    assert "project_clk" in clocks["ui_in"][0].upstream and "sys_clk" in clocks["ena"][0].upstream
+    assert clocks["rst_n"][0].cells == ("BUFG", "IBUF")
+    assert clocks["rst_n"][0].source is None and clocks["rst_n"][0].inverted is False
+    (bad,) = input_gate.clock_offenders(drivers, clocks, project_net)
+    assert bad == f"ena[0]: clocked by {sys_net}, not {project_net}"
+    wrong = input_gate.clock_offenders(drivers, clocks, sys_net)
     assert {w.split("[")[0].split(":")[0] for w in wrong} == {"rst_n", "ui_in"}
     assert len(clocks["ui_in"]) == 8
+    # The name of a net further back is refused for every bit: it is not the net on the pin.
+    upstream = input_gate.clock_offenders(drivers, clocks, "project_clk")
+    assert len(upstream) == 1 + 1 + 8
+    assert (
+        f"rst_n[0]: clocked by {project_net}, not project_clk "
+        "(project_clk is further back, in front of BUFG: another net)"
+    ) in upstream
 
 
 def test_yosys_missing_net_and_missing_clock_pin_are_offenders() -> None:
@@ -480,6 +501,7 @@ def _lut_gated(case: dict, kind: str) -> dict:
     source = flop["connections"]["C"][0]
     gated = 99999
     flop["connections"]["C"] = [gated]
+    module["netnames"]["gated_clk"] = {"bits": [gated]}
     if kind.startswith("LUT"):
         pins = {"I0": "input", "I1": "input", "O": "output"}
         conns = {"I0": [source], "I1": [source]}
@@ -495,29 +517,41 @@ def test_a_clock_gated_by_a_lut_stops_at_the_lut_and_fails() -> None:
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
     clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
     assert clocks["ena"][0].stopped_at == "LUT2"
-    # Even asked for the clock the gate is fed from, a gated clock is not that clock.
-    out = input_gate.clock_offenders(drivers, clocks, "sys_clk")
-    assert any(line.startswith("ena[0]") and "LUT2" in line for line in out)
+    # Asked for the gated net itself or for the clock the gate is fed from: refused.
+    for expected in ("gated_clk", "sys_clk"):
+        out = input_gate.clock_offenders(drivers, clocks, expected)
+        assert "ena[0]: clock not a plain buffer chain: LUT2" in out
 
 
 def test_a_clock_gated_by_a_bufgce_is_reported_with_the_bufgce_in_the_trace() -> None:
     case = _lut_gated(_clock_case(), "BUFGCE")
     clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
     trace = clocks["ena"][0]
-    assert trace.cells[0] == "BUFGCE" and "sys_clk" in trace.names
+    assert trace.cells[0] == "BUFGCE" and trace.names == ("gated_clk",)
+    assert "sys_clk" in trace.upstream
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
-    # The caller decides: pinned to the buffer chain of the project clock, a BUFGCE fails.
-    out = input_gate.clock_offenders(drivers, clocks, "sys_clk", allowed_trace=trace.cells[1:])
-    assert any(line.startswith("ena[0]") and "BUFGCE" in line for line in out)
+
+    def ena(out: list[str]) -> list[str]:
+        return [line for line in out if line.startswith("ena[0]")]
+
+    assert ena(input_gate.clock_offenders(drivers, clocks, "gated_clk")) == []
+    # The caller decides: pinned to another buffer chain, the BUFGCE fails.
+    out = input_gate.clock_offenders(drivers, clocks, "gated_clk", allowed_trace=trace.cells[1:])
+    assert ena(out) == ["ena[0]: clock passes through BUFGCE/BUFG/IBUF, not BUFG/IBUF"]
+    # The clock in front of the BUFGCE is not the gated clock.
+    (line,) = ena(input_gate.clock_offenders(drivers, clocks, "sys_clk"))
+    assert "not sys_clk (sys_clk is further back, in front of BUFGCE: another net)" in line
 
 
 def test_gate_rejects_register_in_the_wrong_domain_vivado() -> None:
     text = (DATA / "vivado-clock-domains.rpt").read_text()
     nets = CLOCK_NETS | {"uio_in": "stimulus_uio_in"}
     drivers = input_gate.parse_vivado(text, nets)
-    assert drivers["rst_n"] == ("FDCE",) and drivers["ui_in"] == ("FDRE", "FDRE")
+    assert drivers["rst_n"] == ("FDCE",) and drivers["ui_in"] == ("FDRE",) * 8
     clocks = input_gate.parse_vivado_clocks(text, nets)
     assert clocks["rst_n"] == (Trace(("project_clk",), ()),)
+    assert clocks["rst_n"][0].inverted is False
+    assert clocks["ui_in"] == (Trace(("project_clk",)),) * 8
     assert clocks["uio_in"] == (None,)
     folded = input_gate.fold_constants(drivers, frozenset({"uio_in"}))
     assert input_gate.offenders(folded) == []
@@ -536,10 +570,18 @@ def test_vivado_report_gaps_are_offenders() -> None:
         return input_gate.clock_offenders(drivers, clocks, "project_clk")
 
     # a flip-flop line with no clock field
-    assert any("no clock net" in x for x in run(text.replace(" clock project_clk\n", "\n", 1)))
-    # a port the report does not mention at all
+    assert run(text.replace(" clock project_clk", "", 1)) == [
+        "ena[0]: clocked by sys_clk, not project_clk",
+        "ui_in[0]: no clock net",
+    ]
+    # a clock field without the polarity field
+    assert "ui_in[0]: no clock polarity data (IS_C_INVERTED)" in run(
+        text.replace(" inverted 0", "", 1)
+    )
+    # a port the report does not mention at all: the report is refused
     lines = [ln for ln in text.splitlines() if " rst_n " not in ln]
-    assert any(x.startswith("rst_n[0]") for x in run("\n".join(lines) + "\n"))
+    with pytest.raises(ValueError, match="0 line.s. for rst_n"):
+        run("\n".join(lines) + "\n")
     # the old report format still parses; its flip-flop has no clock, so the check fails
     old = _vivado("registered")
     old_drivers = input_gate.fold_constants(input_gate.parse_vivado(old, NETS), CONSTANTS)
@@ -553,7 +595,7 @@ def test_vivado_report_gaps_are_offenders() -> None:
 def test_vivado_tcl_reports_the_clock_net_of_a_flip_flop_driver() -> None:
     tcl = input_gate.vivado_tcl(NETS, "/out/project-inputs.rpt")
     assert "REF_PIN_NAME == C" in tcl and "get_nets -quiet -of_objects $cpin" in tcl
-    assert 'driver $kind$clock"' in tcl
+    assert 'append extra " clock $cnet"' in tcl and 'driver $kind$extra"' in tcl
 
 
 def _chain(hops: int) -> tuple[dict, dict, dict]:
@@ -575,6 +617,8 @@ def _chain(hops: int) -> tuple[dict, dict, dict]:
         }
         previous = out_bit
     flop["connections"]["C"] = [previous]
+    if hops:
+        module["netnames"]["chained_clk"] = {"bits": [previous]}
     drivers = input_gate.yosys_drivers(case, CLOCK_TOP, CLOCK_NETS)
     clocks = input_gate.yosys_driver_clocks(case, CLOCK_TOP, CLOCK_NETS)
     return case, drivers, clocks
@@ -587,12 +631,306 @@ def test_the_clock_hop_limit_boundary() -> None:
     _, drivers, clocks = _chain(limit - base)
     assert len(clocks["ena"][0].cells) == limit and clocks["ena"][0].stopped_at is None
     assert [
-        x for x in input_gate.clock_offenders(drivers, clocks, "sys_clk") if x.startswith("ena")
+        x for x in input_gate.clock_offenders(drivers, clocks, "chained_clk") if x.startswith("ena")
     ] == []
     _, drivers, clocks = _chain(limit - base + 1)
-    out = input_gate.clock_offenders(drivers, clocks, "sys_clk")
+    out = input_gate.clock_offenders(drivers, clocks, "chained_clk")
     assert any(line.startswith("ena[0]") and "more than" in line for line in out), out
     _, drivers, clocks = _chain(limit - base + 4)
     assert any(
-        "more than" in line for line in input_gate.clock_offenders(drivers, clocks, "sys_clk")
+        "more than" in line for line in input_gate.clock_offenders(drivers, clocks, "chained_clk")
     )
+
+
+# The asynchronous clear, the report's completeness, the real clock chain (fix round 4) --------
+#
+# Hand-made netlists in the shape of the demo build: `pin_rst_n` is the Q of an FDCE (the
+# second reset flop) whose CLR is the Q of an FDSE (`rst_req`, a `sys` register) and whose
+# clock is MMCME2_ADV.CLKOUT0 -> BUFGCE -> C (`tt_harness/core/clocking.py`).
+
+MMCM_OUT = ("MMCME2_ADV", "CLKOUT0")
+P_NETS = {"rst_n": "pin_rst_n"}
+_FF_DIRS = {"C": "input", "CE": "input", "CLR": "input", "D": "input", "Q": "output"}
+_BUF_DIRS = {"I": "input", "CE": "input", "O": "output"}
+
+
+def _cell(kind: str, dirs: dict, conns: dict, params: dict | None = None) -> dict:
+    return {"type": kind, "port_directions": dirs, "connections": conns, "parameters": params or {}}
+
+
+def _mmcm_chain(buffer: str = "BUFGCE", pin: str = "CLKOUT0") -> dict:
+    return {
+        "bufgce": _cell(buffer, _BUF_DIRS, {"I": [3], "CE": [40], "O": [2]}),
+        "mmcm": _cell("MMCME2_ADV", {"CLKIN1": "input", pin: "output"}, {"CLKIN1": [50], pin: [3]}),
+    }
+
+
+def _demo_netlist(
+    clock_cells: dict | None = None,
+    clr: list | None = None,
+    extra: dict | None = None,
+    ff_params: dict | None = None,
+    ff_type: str = "FDCE",
+) -> dict:
+    async_pin = input_gate.ASYNC_PINS[ff_type]
+    dirs = (
+        {("PRE" if k == "CLR" else k): v for k, v in _FF_DIRS.items()}
+        if async_pin == "PRE"
+        else _FF_DIRS
+    )
+    conns = {"C": [2], "CE": ["1"], "D": [11], "Q": [10]}
+    if clr != []:
+        conns[async_pin] = [20] if clr is None else clr
+    cells = {
+        "reset_ff2": _cell(ff_type, dirs, conns, ff_params),
+        "rst_req": _cell(
+            "FDSE",
+            {"C": "input", "CE": "input", "S": "input", "D": "input", "Q": "output"},
+            {"C": [30], "CE": ["1"], "S": [31], "D": [32], "Q": [20]},
+        ),
+    }
+    cells.update(_mmcm_chain() if clock_cells is None else clock_cells)
+    cells.update(extra or {})
+    names = {
+        "pin_rst_n": {"bits": [10]},
+        "project_clk": {"bits": [2]},
+        "clkout_raw": {"bits": [3]},
+        "sys_clk": {"bits": [30]},
+    }
+    return {"modules": {"top": {"cells": cells, "netnames": names}}}
+
+
+def _judge(netlist: dict, expected: str = "project_clk", sources=(MMCM_OUT,), **kw):
+    drivers = input_gate.yosys_drivers(netlist, "top", P_NETS)
+    clocks = input_gate.yosys_driver_clocks(netlist, "top", P_NETS, clock_sources=sources)
+    return (
+        input_gate.offenders(drivers),
+        input_gate.clock_offenders(drivers, clocks, expected, **kw),
+        clocks["rst_n"][0],
+    )
+
+
+def test_the_demo_builds_reset_flop_and_clock_chain_are_accepted() -> None:
+    bad, clock_bad, trace = _judge(
+        _demo_netlist(), allowed_trace=("BUFGCE",), allowed_source=MMCM_OUT
+    )
+    assert bad == [] and clock_bad == []
+    assert trace == Trace(("project_clk",), ("BUFGCE",), None, ("clkout_raw",), MMCM_OUT, False)
+
+
+_LUT2 = {"I0": "input", "I1": "input", "O": "output"}
+
+
+@pytest.mark.parametrize(
+    ("clr", "extra", "ff_type", "problem"),
+    [
+        (
+            [21],
+            {"lut": _cell("LUT2", _LUT2, {"I0": [20], "I1": [60], "O": [21]})},
+            "FDCE",
+            "CLR is driven by LUT2",
+        ),
+        (
+            [21],
+            {"lut": _cell("LUT2", _LUT2, {"I0": [20], "I1": [60], "O": [21]})},
+            "FDPE",
+            "PRE is driven by LUT2",
+        ),
+        (
+            [21],
+            {"inv": _cell("INV", {"I": "input", "O": "output"}, {"I": [20], "O": [21]})},
+            "FDCE",
+            "CLR is driven by INV",
+        ),
+        (
+            [21],
+            {"ff": _cell("FDRE", {"D": "input", "QN": "output"}, {"D": [60], "QN": [21]})},
+            "FDCE",
+            "CLR is driven by FDRE.QN",
+        ),
+        ([77], None, "FDCE", "CLR is undriven"),
+        ([], None, "FDCE", "CLR is unconnected"),
+        (["x"], None, "FDCE", "CLR is undriven"),
+    ],
+)
+def test_yosys_a_reset_flop_whose_clear_is_not_a_flip_flop_or_constant_is_refused(
+    clr, extra, ff_type: str, problem: str
+) -> None:
+    """A glitch on the asynchronous clear is a glitch on `rst_n`. The offender names the cell."""
+    bad, clock_bad, _ = _judge(_demo_netlist(clr=clr, extra=extra, ff_type=ff_type))
+    assert bad == [f"rst_n is driven by {ff_type} reset_ff2: {problem}"]
+    assert clock_bad == [f"rst_n[0]: driven by {ff_type} reset_ff2: {problem}, not a flip-flop"]
+
+
+@pytest.mark.parametrize("clr", [None, ["0"], ["1"]])
+def test_yosys_a_clear_from_a_flip_flop_q_or_a_constant_is_accepted(clr) -> None:
+    assert _judge(_demo_netlist(clr=clr))[:2] == ([], [])
+
+
+def _line(port: str, net: str, driver: str, rest: str = "") -> str:
+    return f"tt-harness project input: {port} net {net} driver {driver}{rest}\n"
+
+
+V_NETS = {"ui_in": "pin_ui_in", "uio_in": "pin_uio_in", "ena": "pin_ena", "rst_n": "pin_rst_n"}
+V_END = "tt-harness project inputs: end\n"
+_FDRE = " cell c clock project_clk inverted 0 clear none"
+
+
+def _v_report(ui_bits=range(8), rst: str | None = None, ena: str | None = None) -> str:
+    text = "".join(_line("ui_in", f"pin_ui_in[{i}]", "FDRE", _FDRE) for i in ui_bits)
+    text += _line("uio_in", "pin_uio_in", "missing")
+    text += ena if ena is not None else _line("ena", "pin_ena", "FDRE", _FDRE)
+    if rst is None:
+        rst = _line(
+            "rst_n", "pin_rst_n", "FDCE", " cell slot/ff2 clock project_clk inverted 0 clear FDSE"
+        )
+    return text + rst + V_END
+
+
+def _v_judge(text: str) -> tuple[list[str], list[str]]:
+    drivers = input_gate.fold_constants(
+        input_gate.parse_vivado(text, V_NETS), frozenset({"uio_in"})
+    )
+    clocks = input_gate.parse_vivado_clocks(text, V_NETS)
+    return input_gate.offenders(drivers), input_gate.clock_offenders(drivers, clocks, "project_clk")
+
+
+def test_vivado_the_demo_builds_report_is_accepted() -> None:
+    assert _v_judge(_v_report()) == ([], [])
+    drivers = input_gate.parse_vivado(_v_report(), V_NETS)
+    assert {port: len(kinds) for port, kinds in drivers.items()} == {
+        "ui_in": 8, "uio_in": 1, "ena": 1, "rst_n": 1,
+    }  # fmt: skip
+    # Lines in any order are put in bit order.
+    shuffled = _v_report(ui_bits=[3, 7, 0, 1, 2, 6, 5, 4])
+    assert input_gate.parse_vivado(shuffled, V_NETS) == drivers
+
+
+@pytest.mark.parametrize(
+    ("fields", "problem"),
+    [
+        (" cell slot/ff2 clock project_clk inverted 0 clear LUT2.O", "CLR is driven by LUT2.O"),
+        (" cell slot/ff2 clock project_clk inverted 0 clear FDRE.QN", "CLR is driven by FDRE.QN"),
+        (" cell slot/ff2 clock project_clk inverted 0 clear undriven", "CLR is undriven"),
+        (" cell slot/ff2 clock project_clk inverted 0 clear unconnected", "CLR is unconnected"),
+        (" cell slot/ff2 clock project_clk inverted 0 clear none", "CLR is driven by none"),
+        (" cell slot/ff2 clock project_clk inverted 0", "no CLR data"),
+    ],
+)
+def test_vivado_a_reset_flop_whose_clear_is_not_a_flip_flop_or_constant_is_refused(
+    fields: str, problem: str
+) -> None:
+    bad, clock_bad = _v_judge(_v_report(rst=_line("rst_n", "pin_rst_n", "FDCE", fields)))
+    assert bad == [f"rst_n is driven by FDCE slot/ff2: {problem}"]
+    assert clock_bad == [f"rst_n[0]: driven by FDCE slot/ff2: {problem}, not a flip-flop"]
+
+
+def test_vivado_a_clear_from_a_constant_is_accepted_and_the_tcl_reports_the_clear() -> None:
+    fields = " cell slot/ff2 clock project_clk inverted 0 clear constant"
+    assert _v_judge(_v_report(rst=_line("rst_n", "pin_rst_n", "FDCE", fields))) == ([], [])
+    tcl = input_gate.vivado_tcl(V_NETS, "r.rpt")
+    assert "REF_PIN_NAME == CLR || REF_PIN_NAME == PRE" in tcl
+    assert 'append extra " clear $clear"' in tcl and 'append extra " cell $cell"' in tcl
+    assert "IS_C_INVERTED" in tcl and 'append extra " inverted 1"' in tcl
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (_v_report(ui_bits=range(7)), "7 line.s. for ui_in"),
+        (_v_report(ui_bits=[0, 1, 2, 3, 4, 5, 6, 6]), "8 line.s. for ui_in"),
+        (_v_report(ui_bits=range(9)), "9 line.s. for ui_in"),
+        (
+            _v_report(ui_bits=range(7)) + _line("ui_in", "pin_ui_in[7]", "LUT2 O extra"),
+            "cannot be read",
+        ),
+        (_v_report() + "tt-harness project input: garbage\n", "cannot be read"),
+        (_v_report() + " " + _line("ena", "pin_ena", "FDRE", _FDRE), "cannot be read"),
+        (_v_report(ena=""), "0 line.s. for ena"),
+        (_v_report(ena=_line("ena", "pin_ena", "FDRE", _FDRE) * 2), "2 line.s. for ena"),
+        (_v_report(ena=_line("ena", "other_net", "FDRE", _FDRE)), "1 line.s. for ena"),
+        (_v_report(ui_bits=[]) + _line("ui_in", "pin_ui_in", "FDRE", _FDRE), "1 line.s. for ui_in"),
+        (_v_report().replace("inverted 0", "inverted 2", 1), "cannot be read"),
+    ],
+)
+def test_vivado_report_parsing_fails_closed(text: str, message: str) -> None:
+    """A line that cannot be read, or a port without exactly its bits, is an error, never a
+    line silently dropped (a report with 7 of the 8 `ui_in` lines used to pass)."""
+    with pytest.raises(ValueError, match=message):
+        input_gate.parse_vivado(text, V_NETS)
+    with pytest.raises(ValueError, match=message):
+        input_gate.parse_vivado_clocks(text, V_NETS)
+
+
+def test_vivado_a_bus_that_is_not_in_the_design_is_one_missing_line() -> None:
+    text = _v_report(ui_bits=[]) + _line("ui_in", "pin_ui_in", "missing")
+    assert input_gate.parse_vivado(text, V_NETS)["ui_in"] == (input_gate.MISSING,)
+    # Accepted only when the source assigns it a literal; `ui_in` here is not one.
+    assert _v_judge(text)[0] == ["ui_in is driven by missing"]
+
+
+def test_the_real_project_clock_chain_needs_its_source_named() -> None:
+    netlist = _demo_netlist()
+    # Not named: the walk stops at the MMCM and the clock is refused, as before.
+    _, clock_bad, trace = _judge(netlist, sources=())
+    assert trace.stopped_at == "MMCME2_ADV" and trace.source is None
+    assert clock_bad == ["rst_n[0]: clock not a plain buffer chain: MMCME2_ADV"]
+    # Another output of the MMCM than the one named: refused.
+    other = _demo_netlist(clock_cells=_mmcm_chain(pin="CLKOUT1"))
+    assert _judge(other)[1] == ["rst_n[0]: clock not a plain buffer chain: MMCME2_ADV"]
+    # Another source cell: refused.
+    assert _judge(netlist, sources=(("PLLE2_ADV", "CLKOUT0"),))[1] == [
+        "rst_n[0]: clock not a plain buffer chain: MMCME2_ADV"
+    ]
+    # The caller can require the source: a clock from a port does not satisfy it.
+    port = {"bufg": _cell("BUFG", {"I": "input", "O": "output"}, {"I": [3], "O": [2]})}
+    assert _judge(_demo_netlist(clock_cells=port))[1] == []
+    assert _judge(_demo_netlist(clock_cells=port), allowed_source=MMCM_OUT)[1] == [
+        "rst_n[0]: clock comes from a port, not MMCME2_ADV.CLKOUT0"
+    ]
+    # A buffer output pin that is not O is not a buffer on the path.
+    odd = _mmcm_chain()
+    odd["bufgce"] = _cell("BUFGCE", {"I": "input", "X": "output"}, {"I": [3], "X": [2]})
+    assert _judge(_demo_netlist(clock_cells=odd))[1] == [
+        "rst_n[0]: clock not a plain buffer chain: BUFGCE.X"
+    ]
+
+
+@pytest.mark.parametrize("buffer", ["BUFGCE", "BUFG"])
+def test_expected_must_be_the_net_on_the_clock_pin_not_one_further_back(buffer: str) -> None:
+    """`clkout_raw` (the MMCM output, in front of the buffer) is not the project clock."""
+    netlist = _demo_netlist(clock_cells=_mmcm_chain(buffer))
+    assert _judge(netlist)[1] == []
+    message = (
+        "rst_n[0]: clocked by project_clk, not clkout_raw "
+        f"(clkout_raw is further back, in front of {buffer}: another net)"
+    )
+    assert _judge(netlist, expected="clkout_raw")[1] == [message]
+
+
+@pytest.mark.parametrize(
+    ("value", "line"),
+    [
+        (None, None),
+        ("0", None),
+        (0, None),
+        ("00000000000000000000000000000000", None),
+        ("1", "the clock pin is inverted (IS_C_INVERTED)"),
+        (1, "the clock pin is inverted (IS_C_INVERTED)"),
+        ("00000000000000000000000000000001", "the clock pin is inverted (IS_C_INVERTED)"),
+        ("x", "no clock polarity data (IS_C_INVERTED)"),
+        ("", "no clock polarity data (IS_C_INVERTED)"),
+    ],
+)
+def test_yosys_an_inverted_clock_pin_is_an_offender(value, line: str | None) -> None:
+    params = {} if value is None else {"IS_C_INVERTED": value}
+    bad, clock_bad, _ = _judge(_demo_netlist(ff_params=params))
+    assert bad == []
+    assert clock_bad == ([] if line is None else [f"rst_n[0]: {line}"])
+
+
+def test_vivado_an_inverted_clock_pin_is_an_offender() -> None:
+    fields = " cell slot/ff2 clock project_clk inverted 1 clear FDSE"
+    bad, clock_bad = _v_judge(_v_report(rst=_line("rst_n", "pin_rst_n", "FDCE", fields)))
+    assert bad == []
+    assert clock_bad == ["rst_n[0]: the clock pin is inverted (IS_C_INVERTED)"]

@@ -1,6 +1,12 @@
-tt-harness project input: ui_in net pin_ui_in[0] driver FDRE clock project_clk
-tt-harness project input: ui_in net pin_ui_in[1] driver FDRE clock project_clk
+tt-harness project input: ui_in net pin_ui_in[0] driver FDRE cell slot/pin_ui_in_reg[0] clock project_clk inverted 0 clear none
+tt-harness project input: ui_in net pin_ui_in[1] driver FDRE cell slot/pin_ui_in_reg[1] clock project_clk inverted 0 clear none
+tt-harness project input: ui_in net pin_ui_in[2] driver FDRE cell slot/pin_ui_in_reg[2] clock project_clk inverted 0 clear none
+tt-harness project input: ui_in net pin_ui_in[3] driver FDRE cell slot/pin_ui_in_reg[3] clock project_clk inverted 0 clear none
+tt-harness project input: ui_in net pin_ui_in[4] driver FDRE cell slot/pin_ui_in_reg[4] clock project_clk inverted 0 clear none
+tt-harness project input: ui_in net pin_ui_in[5] driver FDRE cell slot/pin_ui_in_reg[5] clock project_clk inverted 0 clear none
+tt-harness project input: ui_in net pin_ui_in[6] driver FDRE cell slot/pin_ui_in_reg[6] clock project_clk inverted 0 clear none
+tt-harness project input: ui_in net pin_ui_in[7] driver FDRE cell slot/pin_ui_in_reg[7] clock project_clk inverted 0 clear none
 tt-harness project input: uio_in net stimulus_uio_in driver missing
-tt-harness project input: ena net pin_ena driver FDRE clock sys_clk
-tt-harness project input: rst_n net pin_rst_n driver FDCE clock project_clk
+tt-harness project input: ena net pin_ena driver FDRE cell slot/pin_ena_reg clock sys_clk inverted 0 clear none
+tt-harness project input: rst_n net pin_rst_n driver FDCE cell slot/FDCE_1 clock project_clk inverted 0 clear FDSE
 tt-harness project inputs: end
