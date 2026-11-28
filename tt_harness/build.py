@@ -96,7 +96,8 @@ names a symbol that no project source declares. The copies are listed in
 `BuildResult.source_rewrites`; `vivado_nettype_rewrite=False` forbids the retry.
 
 Files under `out_dir`: `build.log` (every tool's output), the generated top, constraints and
-scripts, reports, and `<top>.bit` on success.
+scripts, reports, and on success `<top>.bit` and its record `<top>.build.json`
+(`build_record`: what it was built from and with, its timing, and the bitstream's SHA-256).
 """
 
 from __future__ import annotations
@@ -107,11 +108,11 @@ import re
 import shutil
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from tt_harness import input_gate, prescreen, tools, verilate
+from tt_harness import __version__, input_gate, prescreen, tools, verilate
 from tt_harness import project_clocks as pc
 from tt_harness.boards import arty
 from tt_harness.compare.recorder import DEFAULT_SETTLE
@@ -1695,6 +1696,71 @@ def _remove_stale(out_dir: Path, names: tuple[str, ...]) -> None:
     shutil.rmtree(out_dir / "src-nettype-wire", ignore_errors=True)
 
 
+RECORD_SUFFIX = ".build.json"
+
+
+def record_path(out_dir: Path, board: str) -> Path:
+    """The build record beside the bitstream: `out_dir/<top>.build.json`."""
+    return Path(out_dir) / f"{BOARDS[board].MODULE_NAME}{RECORD_SUFFIX}"
+
+
+def source_hashes(sources: Sources) -> dict[str, str]:
+    """Every fetched project file, as a path relative to the source root, -> its SHA-256."""
+    return {f.relative_to(sources.root).as_posix(): _sha256(f) for f in sources.files}
+
+
+def build_identity(project: Project, board: str, toolchain: str, clocks: int, baud: int) -> dict:
+    """What decides a compare bitstream besides the source files and the harness code.
+
+    `build_compare` records it; `run-compare` reuses a bitstream only when it is equal.
+    """
+    patch = project.patch
+    return {
+        "project": project.id,
+        "repo": project.repo,
+        "commit": project.commit,
+        "patch_sha256": None if patch is None else _sha256(Path(patch)),
+        "board": board,
+        "toolchain": toolchain,
+        "part": BOARDS[board].PARTS[toolchain],
+        "clocks": clocks,
+        "baud": baud,
+        "settle": SETTLE,
+        "tt_harness_version": __version__,
+    }
+
+
+def build_record(
+    project: Project,
+    sources: Sources,
+    board: str,
+    toolchain: str,
+    clocks: int,
+    baud: int,
+    result: BuildResult,
+) -> dict:
+    """The record `build_compare` writes beside a bitstream that passed the gate."""
+    return {
+        **build_identity(project, board, toolchain, clocks, baud),
+        "inputs": source_hashes(sources),
+        "source_rewrites": [list(r) for r in result.source_rewrites],
+        "warnings": list(sources.warnings),
+        "timing": {k: asdict(d) for k, d in sorted(result.timing.items())},
+        "limitations": list(result.limitations),
+        "input_drivers": [list(d) for d in result.input_drivers],
+        "bitstream_sha256": _sha256(result.bitstream),
+    }
+
+
+def write_record(out_dir: Path, board: str, record: dict) -> Path:
+    """Write `record` to `record_path`, whole or not at all."""
+    path = record_path(out_dir, board)
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    partial.rename(path)
+    return path
+
+
 def _warn(log: Path, message: str) -> None:
     print(f"tt-harness build-compare: warning: {message}", file=sys.stderr)
     with log.open("a") as f:
@@ -1732,7 +1798,11 @@ def build_compare(
     log = out_dir / LOG_NAME
     bitstream = out_dir / f"{board_mod.MODULE_NAME}.bit"
     unchecked = out_dir / f"{board_mod.MODULE_NAME}.unchecked.bit"
-    _remove_stale(out_dir, (LOG_NAME, bitstream.name, unchecked.name))
+    record = record_path(out_dir, board)
+    _remove_stale(
+        out_dir,
+        (LOG_NAME, bitstream.name, unchecked.name, record.name, record.name + ".partial"),
+    )
     log.write_text(f"tt-harness build-compare {project.id} {board} {toolchain} clocks={clocks}\n")
 
     # The language rule of the pre-screen (and so of the reference): Verilog-2005 unless a
@@ -1833,7 +1903,7 @@ def build_compare(
             f"{toolchain} read copies with `default_nettype none` as `wire` "
             f"(Synth 8-6735 on the unmodified sources): {files}",
         )
-    return BuildResult(
+    result = BuildResult(
         bitstream,
         toolchain,
         job.part,
@@ -1847,3 +1917,7 @@ def build_compare(
         input_drivers=tuple(job.input_drivers),
         limitations=tuple(limitations),
     )
+    write_record(
+        out_dir, board, build_record(project, sources, board, toolchain, clocks, baud, result)
+    )
+    return result

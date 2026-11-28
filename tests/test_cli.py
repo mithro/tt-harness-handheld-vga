@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import tt_harness
-from tt_harness import cli, fetch, prescreen, tools
+from tt_harness import cli, fetch, manifest, pool, prescreen, tools
 from tt_harness.compare.recorder import header
 
 
@@ -61,6 +61,12 @@ def _frame(payload: bytes) -> bytes:
     return header(len(payload)) + payload + struct.pack("<I", zlib.crc32(payload))
 
 
+def _key(project_id: str) -> dict:
+    """The `key` of a reference made from the test manifest's repository and commit."""
+    project = manifest.get(manifest.load(MANIFEST), project_id)
+    return {"repo": project.repo, "commit": project.commit, "sources_sha256": "0" * 64}
+
+
 @pytest.fixture
 def verdict_env(tmp_path, monkeypatch):
     """A reference dir, and fetch/pre-screen replaced so no Git or Yosys runs."""
@@ -81,6 +87,7 @@ def verdict_env(tmp_path, monkeypatch):
         "clocks": len(VERDICT_REF),
         "dump": "uo_out.bin.gz",
         "dump_sha256": hashlib.sha256(VERDICT_REF).hexdigest(),
+        "key": _key(VERDICT_ID),
     }
     (d / "reference.json").write_text(json.dumps(doc))
     monkeypatch.setenv("TT_REFERENCE_DIR", str(ref_dir))
@@ -223,6 +230,14 @@ def test_verdict_stimulus_divergence_is_an_error_not_a_mismatch(verdict_env, cap
         assert name in err
 
 
+def test_verdict_reference_of_another_commit_is_an_error(verdict_env, capsys):
+    _edit_reference(verdict_env, key={**_key(VERDICT_ID), "commit": "f" * 40})
+    code, doc, err = _verdict(verdict_env, _frame(VERDICT_REF), capsys)
+    _assert_error(code, doc, err)
+    assert "commit" in err and "f" * 40 in err
+    assert verdict_env["state"]["calls"] == []  # refused before fetch and Yosys
+
+
 def test_verdict_prescreen_failure_is_an_error(verdict_env, capsys):
     verdict_env["state"]["prescreen_error"] = "tt07/x: pre-screen: yosys failed"
     code, doc, err = _verdict(verdict_env, _frame(VERDICT_REF), capsys)
@@ -241,3 +256,72 @@ def test_verdict_unknown_project_is_an_error(verdict_env, capsys):
 def test_verdict_missing_recording_is_an_error(verdict_env, capsys):
     absent = str(verdict_env["tmp"] / "absent.bin")
     _assert_error(*_run_verdict(["verdict", VERDICT_ID, absent], capsys))
+
+
+# --videos-repo and fetch warnings, in every sub-command that fetches ------------------------
+
+
+@pytest.fixture
+def warning_fetch(tmp_path, monkeypatch):
+    """`fetch.fetch` replaced: it records the videos repository and returns one warning.
+
+    `$TT_VIDEOS_REPO` points nowhere, so only an explicit `--videos-repo` reaches it.
+    """
+    monkeypatch.setenv("TT_VIDEOS_REPO", str(tmp_path / "not-the-videos-repo"))
+    seen = []
+
+    def fake_fetch(project, cache, videos_repo=None):
+        seen.append(videos_repo)
+        return fetch.Sources(
+            project=project, root=tmp_path, files=(), needs_sv=False, warnings=("odd submodule",)
+        )
+
+    monkeypatch.setattr(cli.fetch, "fetch", fake_fetch)
+    return seen
+
+
+@pytest.mark.parametrize("command", ["fetch", "reference", "build-compare"])
+def test_videos_repo_reaches_fetch_and_warnings_are_printed(
+    warning_fetch, monkeypatch, capsys, tmp_path, command
+):
+    monkeypatch.setattr(cli.reference, "simulate", lambda s, c, o: tmp_path / "uo_out.bin")
+
+    def failed_build(*args, **kwargs):
+        raise cli.build.BuildError("stopped here", tmp_path / "build.log")
+
+    monkeypatch.setattr(cli.build, "build_compare", failed_build)
+    extra = {
+        "fetch": [],
+        "reference": ["--clocks", "10", "--out-dir", str(tmp_path / "ref")],
+        "build-compare": ["--board", "arty", "--toolchain", "openxc7"],
+    }[command]
+    cli.main([command, VERDICT_ID, "--videos-repo", str(MANIFEST), *extra])
+    err = capsys.readouterr().err
+    assert warning_fetch == [MANIFEST]
+    assert f"tt-harness {command}: warning: odd submodule" in err
+
+
+def test_verdict_passes_videos_repo_and_prints_warnings(verdict_env, warning_fetch, capsys):
+    rec = verdict_env["tmp"] / "recording.bin"
+    rec.write_bytes(_frame(VERDICT_REF))
+    code, doc, err = _run_verdict(
+        ["verdict", VERDICT_ID, str(rec), "--videos-repo", str(MANIFEST)], capsys
+    )
+    assert code == 0 and doc["verdict"] == "exact"
+    assert warning_fetch == [MANIFEST]
+    assert "tt-harness verdict: warning: odd submodule" in err
+
+
+def test_pool_sim_passes_videos_repo_and_prints_warnings(
+    warning_fetch, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setenv("TT_VIDEOS_REPO", str(MANIFEST))
+
+    def stop(sources, out_dir=None):
+        raise prescreen.PrescreenError("stopped here")
+
+    monkeypatch.setattr(pool.prescreen, "check", stop)
+    with pytest.raises(prescreen.PrescreenError):
+        pool.run_sim(VERDICT_ID, 10, tmp_path / "pool")
+    assert warning_fetch == [MANIFEST]
+    assert f"tt-harness pool-sim: {VERDICT_ID}: warning: odd submodule" in capsys.readouterr().err

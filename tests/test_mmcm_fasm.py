@@ -110,7 +110,7 @@ def _job(tmp_path: Path, toolchain: str) -> cb.Build:
 def _decode_as(monkeypatch, fixture: Path) -> list:
     calls = []
 
-    def fake(bit: Path, part: str, out: Path) -> Path:
+    def fake(bit: Path, part: str, out: Path, log: Path) -> Path:
         calls.append((bit, part, out))
         shutil.copy(fixture, out)
         return out

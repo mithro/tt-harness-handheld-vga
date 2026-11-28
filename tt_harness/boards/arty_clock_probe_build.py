@@ -91,7 +91,7 @@ def programmed_mmcm(bitstream: Path) -> dict[str, int]:
     """Every MMCME2_ADV feature the bitstream programs, decoded with `bit2fasm`, as integers."""
     out = bitstream.with_suffix(".decoded.fasm")
     # The Vivado part (-1L) is not in the prjxray database; it is the same die as the open part.
-    cb.decode_bitstream(bitstream, cb.ARTY.parts["openxc7"], out)
+    cb.decode_bitstream(bitstream, cb.ARTY.parts["openxc7"], out, out.with_suffix(".log"))
     return cb.mmcm_values(out.read_text())
 
 

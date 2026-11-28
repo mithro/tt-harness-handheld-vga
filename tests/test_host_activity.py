@@ -72,7 +72,7 @@ def test_a_clock_that_runs_backwards_is_treated_as_activity():
 
 
 @pytest.mark.parametrize(
-    "output", [b"", b"ship7ohT\n", b"TTHR probe {not json\n", b"TTHR probe []\n"]
+    "output", [b"", b"fake-login-banner\n", b"TTHR probe {not json\n", b"TTHR probe []\n"]
 )
 def test_an_unreadable_probe_is_busy_not_idle(output):
     class Broken(FakeHost):

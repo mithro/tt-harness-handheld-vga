@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -28,7 +29,17 @@ from pathlib import Path
 
 import pytest
 
-from tt_harness import build, cli, fetch, input_gate, manifest, prescreen, tools, verilate
+from tt_harness import (
+    __version__,
+    build,
+    cli,
+    fetch,
+    input_gate,
+    manifest,
+    prescreen,
+    tools,
+    verilate,
+)
 from tt_harness import project_clocks as pc
 from tt_harness.boards import arty
 from tt_harness.build import ClockPlan, TimingError
@@ -471,6 +482,51 @@ def test_build_compare_removes_a_stale_bitstream(
     with pytest.raises(TimingError):
         build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
     assert not (tmp_path / "arty_compare.bit").exists()
+
+
+def test_build_compare_writes_its_record_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_flow(monkeypatch, "openxc7", NEXTPNR_PASS)
+    s = dataclasses.replace(_counter(), warnings=("a fetch warning",))
+    result = build.build_compare(
+        s.project, s, "arty", "openxc7", tmp_path, clocks=100, baud=500_000
+    )
+    path = build.record_path(tmp_path, "arty")
+    assert path == tmp_path / "arty_compare.build.json"
+    record = json.loads(path.read_text())
+    source = s.files[0]
+    assert record == {
+        "project": s.project.id,
+        "repo": s.project.repo,
+        "commit": s.project.commit,
+        "patch_sha256": None,
+        "board": "arty",
+        "toolchain": "openxc7",
+        "part": arty.PARTS["openxc7"],
+        "clocks": 100,
+        "baud": 500_000,
+        "settle": build.SETTLE,
+        "tt_harness_version": __version__,
+        "inputs": {"src/tt_um_test_counter.v": hashlib.sha256(source.read_bytes()).hexdigest()},
+        "source_rewrites": [],
+        "warnings": ["a fetch warning"],
+        "timing": {k: dataclasses.asdict(d) for k, d in result.timing.items()},
+        "limitations": list(result.limitations),
+        "input_drivers": [list(d) for d in result.input_drivers],
+        "bitstream_sha256": hashlib.sha256(result.bitstream.read_bytes()).hexdigest(),
+    }
+
+
+def test_build_compare_leaves_no_record_after_a_timing_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    build.record_path(tmp_path, "arty").write_text("{}")  # from an earlier build
+    _fake_flow(monkeypatch, "openxc7", NEXTPNR_FAIL)
+    s = _counter()
+    with pytest.raises(TimingError):
+        build.build_compare(s.project, s, "arty", "openxc7", tmp_path, clocks=100)
+    assert not build.record_path(tmp_path, "arty").exists()
 
 
 def test_build_compare_rejects_sources_of_another_project(tmp_path: Path) -> None:

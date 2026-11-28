@@ -2,7 +2,6 @@
 """Probe: how do Vivado and the open flow encode MMCM dividers? One tiny MMCM design per setting."""
 
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +12,10 @@ ROOT = Path("build/fracprobe").resolve()
 DB = cb.PRJXRAY_DB / "artix7"
 PART = "xc7a100tcsg324-1"
 
+# COMPENSATION("INTERNAL") is deliberate here: this probe compares how the two flows encode
+# the dividers, as the design was first specified. It does not lock in the open flow
+# (nextpnr-xilinx 0.8.2 ties CLKFBIN to a constant for it); the harness's own clock uses
+# ZHOLD and the feedback gate (docs/results/2026-11-spike-b-project-clock.md).
 V = """\
 module top(input clk50, output led);
   wire fb, o, g, locked;
@@ -43,23 +46,9 @@ def run(cmd, log, cwd, **kw):
         raise SystemExit(f"failed {cmd[0]} rc={rc} log={log}")
 
 
-def decode(bit: Path, out: Path):
-    with out.open("w") as f:
-        subprocess.run(
-            [
-                str(tools.TOOLCHAINS / "openxc7/bin/bit2fasm"),
-                "--db-root",
-                str(DB),
-                "--part",
-                PART,
-                "--bitread",
-                str(tools.TOOLCHAINS / "openxc7/bin/bitread"),
-                str(bit),
-            ],
-            stdout=f,
-            stderr=out.with_suffix(".err").open("w"),
-            check=True,
-        )
+def decode(bit: Path, out: Path, log: Path):
+    """The harness's own decode (`clock_build.decode_bitstream`): logged, TMPDIR in the repo."""
+    cb.decode_bitstream(bit, PART, out, log)
 
 
 def mmcm_lines(fasm: Path):
@@ -134,7 +123,7 @@ def one(mult: str, div: str, flows, divclk: str = "1"):
             log,
             d,
         )
-        decode(d / "open.bit", d / "open.decoded.fasm")
+        decode(d / "open.bit", d / "open.decoded.fasm", log)
     if "vivado" in flows:
         (d / "viv.tcl").write_text(
             f"read_verilog {{{d / 'top.v'}}}\nread_xdc {{{d / 'top.xdc'}}}\nsynth_design -top top -part {PART}\n"
@@ -142,7 +131,7 @@ def one(mult: str, div: str, flows, divclk: str = "1"):
         )
         shell = f'source "{tools.vivado_settings()}" && exec vivado -mode batch -nojournal -log "{d / "vivado.log"}" -source "{d / "viv.tcl"}"'
         run(["bash", "-c", shell], log, d)
-        decode(d / "viv.bit", d / "viv.decoded.fasm")
+        decode(d / "viv.bit", d / "viv.decoded.fasm", log)
 
 
 if __name__ == "__main__":

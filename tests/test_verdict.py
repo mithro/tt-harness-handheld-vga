@@ -13,10 +13,13 @@ import pytest
 
 from tt_harness import verdict
 from tt_harness.host.frame import Recording
+from tt_harness.manifest import Project
 from tt_harness.verdict import ReferenceInvalid, Verdict
 
 PROJECT = "tt08/tt_um_example"
 REF = bytes((i * 13 + i // 7) & 0xFF for i in range(20_000))
+REPO = "https://github.com/example/tt08-example"
+COMMIT = "a" * 40
 
 
 def ok(samples: bytes) -> Recording:
@@ -51,6 +54,7 @@ def write_reference(ref_dir: Path, data: bytes, **overrides) -> Path:
         "uio_dump_sha256": "0" * 64,
         "mode": "640x480@60",
         "frames": [],
+        "key": {"repo": REPO, "commit": COMMIT, "sources_sha256": "b" * 64},
     }
     doc.update(overrides)
     doc = {k: v for k, v in doc.items() if v is not None}
@@ -159,6 +163,69 @@ def test_load_reference_reads_fields(tmp_path):
     assert ref.samples == REF
     assert ref.path == tmp_path / "tt08" / "tt_um_example" / "ideal" / "reference.json"
     assert ref.sha256 == hashlib.sha256(REF).hexdigest()
+    assert (ref.repo, ref.commit) == (REPO, COMMIT)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        None,  # no key at all
+        {"repo": REPO},
+        {"commit": COMMIT},
+        {"repo": "", "commit": COMMIT},
+        {"repo": REPO, "commit": "a" * 39},
+        {"repo": REPO, "commit": 7},
+        "not an object",
+    ],
+)
+def test_a_reference_without_repo_and_commit_is_refused(tmp_path, key):
+    write_reference(tmp_path, REF, key=key)
+    with pytest.raises(ReferenceInvalid, match="key"):
+        verdict.load_reference(tmp_path, PROJECT)
+
+
+def _project(**changes) -> Project:
+    fields = {
+        "shuttle": "tt08",
+        "macro": "tt_um_example",
+        "repo": REPO,
+        "commit": COMMIT,
+        "top_module": "tt_um_example",
+        "source_files": ("project.v",),
+        "clock_hz": 25_175_000,
+        "clock_declared": 25_175_000,
+        "pmods": (),
+        "address": None,
+        "ui_in": 0x30,
+        "uio_in": 0x01,
+        "patch": None,
+    }
+    return Project(**{**fields, **changes})
+
+
+def test_check_matches_accepts_the_reference_of_this_build(tmp_path):
+    write_reference(tmp_path, REF)
+    verdict.check_matches(verdict.load_reference(tmp_path, PROJECT), _project(), 10)
+
+
+@pytest.mark.parametrize(
+    "change, reset_clocks, named",
+    [
+        ({"commit": "c" * 40}, 10, "commit"),
+        ({"repo": "https://github.com/example/other"}, 10, "repo"),
+        ({"ui_in": 0x31}, 10, "ui_in"),
+        ({"uio_in": 0x00}, 10, "uio_in"),
+        ({}, 11, "reset_clocks"),
+    ],
+)
+def test_check_matches_refuses_a_reference_made_for_something_else(
+    tmp_path, change, reset_clocks, named
+):
+    write_reference(tmp_path, REF)
+    ref = verdict.load_reference(tmp_path, PROJECT)
+    with pytest.raises(verdict.ReferenceMismatch, match=named) as e:
+        verdict.check_matches(ref, _project(**change), reset_clocks)
+    assert str(ref.path) in str(e.value)
 
 
 @pytest.mark.parametrize("schema", [1, 2])

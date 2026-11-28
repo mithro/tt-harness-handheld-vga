@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Game Bub rev 4.1: 50 MHz oscillator on P17. The board has no FPGA-driven
 # LED, so the blink goes to PMOD[0] on V14 (see docs/gamebub-hardware.md).
 set_property LOC P17 [get_ports clk]

@@ -41,7 +41,7 @@ def terminal(idle_s: float, name: str = "/dev/pts/2") -> dict:
 
 
 IDLE = probe(terminals=[terminal(70_000)])
-BANNER = b"ship7ohT\n\x00\x00"  # what a login may print before the command's own output
+BANNER = b"fake-login-banner\n\x00\x00"  # what a login may print before the command's own output
 
 
 def line(kind: str, doc: dict) -> bytes:

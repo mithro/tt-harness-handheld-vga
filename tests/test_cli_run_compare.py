@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import hashlib
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +21,7 @@ ID = "tt07/tt_um_tinytapeout_dvd_screensaver"
 REF = bytes((i * 5 + 1) & 0xFF for i in range(3000))
 MANIFEST = Path(__file__).resolve().parent / "data" / "manifest"
 BOARD_ARGS = ["--host", "ps1.fpgas.online", "--port", "10722", "--uart", UART]
+PROJECT = manifest.get(manifest.load(MANIFEST), ID)
 
 
 @pytest.fixture
@@ -42,6 +43,7 @@ def env(tmp_path, monkeypatch):
         "clocks": len(REF),
         "dump": "uo_out.bin.gz",
         "dump_sha256": hashlib.sha256(REF).hexdigest(),
+        "key": {"repo": PROJECT.repo, "commit": PROJECT.commit, "sources_sha256": "0" * 64},
     }
     (d / "reference.json").write_text(json.dumps(doc))
     monkeypatch.setenv("TT_REFERENCE_DIR", str(tmp_path / "reference"))
@@ -59,7 +61,7 @@ def env(tmp_path, monkeypatch):
         out_dir.mkdir(parents=True, exist_ok=True)
         bit = out_dir / "arty_compare.bit"
         bit.write_bytes(b"bits")
-        return SimpleNamespace(bitstream=bit)
+        return SimpleNamespace(bitstream=bit, source_rewrites=(("src/built.v", 2),))
 
     def fake_record(board, bitstream, clocks, baud, out, timeout_s, runner=None):
         state.records.append((board, bitstream, clocks, baud, timeout_s))
@@ -134,7 +136,7 @@ def test_toolchain_and_baud_reach_the_build_and_the_board(env, capsys):
 def test_an_existing_build_is_reused_unless_rebuild_is_asked(env, capsys):
     bit = env.tmp / "arty_compare.bit"
     bit.write_bytes(b"old bits")
-    env.existing = bit
+    env.existing = (bit, {"source_rewrites": []})
     code, doc, _ = _run(env, capsys)
     assert code == 0 and env.builds == []
     assert doc["run"]["bitstream_reused"] is True and env.records[0][1] == bit
@@ -205,23 +207,111 @@ def test_fewer_clocks_than_the_reference_span_is_refused(env, capsys):
 # reusing a build ------------------------------------------------------------------------
 
 
-def test_existing_build_matches_only_the_same_settings(tmp_path):
-    project = manifest.get(manifest.load(MANIFEST), ID)
+def _built(tmp_path, project, toolchain="vivado", clocks=5000, baud=1_000_000):
+    """A build directory as `build_compare` leaves it, with sources of one file."""
+    root = tmp_path / "src-root"
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    source = root / "src" / "project.v"
+    source.write_text("module tt_um_x; endmodule\n")
+    sources = fetch.Sources(project=project, root=root, files=(source,), needs_sv=False)
     out_dir = tmp_path / "b"
     board_mod = build.BOARDS["arty"]
-    top = board_mod.Top(project, 1_000_000, 5000, settle=build.SETTLE)
-    top_v = board_mod.to_verilog(top, out_dir / "arty_compare.v")
-    assert cli._existing_build(project, "arty", 5000, 1_000_000, out_dir) is None  # no bitstream
+    top = board_mod.Top(project, baud, clocks, settle=build.SETTLE)
+    board_mod.to_verilog(top, out_dir / "arty_compare.v")
     bit = out_dir / "arty_compare.bit"
     bit.write_bytes(b"bits")
-    assert cli._existing_build(project, "arty", 5000, 1_000_000, out_dir) == bit
-    assert cli._existing_build(project, "arty", 5001, 1_000_000, out_dir) is None
-    assert cli._existing_build(project, "arty", 5000, 500_000, out_dir) is None
-    assert sorted(p.name for p in out_dir.iterdir()) == ["arty_compare.bit", "arty_compare.v"]
-    # A bitstream older than the top it sits beside is not that top's.
-    older = top_v.stat().st_mtime - 100
-    os.utime(bit, (older, older))
-    assert cli._existing_build(project, "arty", 5000, 1_000_000, out_dir) is None
+    result = build.BuildResult(
+        bit,
+        toolchain,
+        board_mod.PARTS[toolchain],
+        {},
+        out_dir / "build.log",
+        source_rewrites=(("src/project.v", 1),),
+    )
+    record = build.build_record(project, sources, "arty", toolchain, clocks, baud, result)
+    build.write_record(out_dir, "arty", record)
+    return sources, out_dir, bit
+
+
+def test_existing_build_matches_only_the_same_settings(tmp_path):
+    project = manifest.get(manifest.load(MANIFEST), ID)
+    sources, out_dir, bit = _built(tmp_path, project)
+
+    def existing(project=project, sources=sources, toolchain="vivado", clocks=5000, baud=10**6):
+        return cli._existing_build(project, sources, "arty", toolchain, clocks, baud, out_dir)
+
+    reused = existing()
+    assert reused is not None
+    assert reused[0] == bit and reused[1]["source_rewrites"] == [["src/project.v", 1]]
+    assert existing(clocks=5001) is None
+    assert existing(baud=500_000) is None
+    assert existing(toolchain="openxc7") is None  # a Vivado build in the same directory
+    other = dataclasses.replace(project, commit="f" * 40)
+    assert existing(project=other, sources=dataclasses.replace(sources, project=other)) is None
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "arty_compare.bit",
+        "arty_compare.build.json",
+        "arty_compare.v",
+    ]
+
+
+def test_existing_build_refuses_an_edited_source(tmp_path):
+    project = manifest.get(manifest.load(MANIFEST), ID)
+    sources, out_dir, _ = _built(tmp_path, project)
+    sources.files[0].write_text("module tt_um_x; wire w; endmodule\n")
+    assert cli._existing_build(project, sources, "arty", "vivado", 5000, 10**6, out_dir) is None
+
+
+def test_existing_build_refuses_another_source_list(tmp_path):
+    project = manifest.get(manifest.load(MANIFEST), ID)
+    sources, out_dir, _ = _built(tmp_path, project)
+    extra = sources.root / "src" / "more.v"
+    extra.write_text("module more; endmodule\n")
+    more = dataclasses.replace(sources, files=(*sources.files, extra))
+    assert cli._existing_build(project, more, "arty", "vivado", 5000, 10**6, out_dir) is None
+
+
+def test_existing_build_refuses_an_edited_bitstream(tmp_path):
+    project = manifest.get(manifest.load(MANIFEST), ID)
+    sources, out_dir, bit = _built(tmp_path, project)
+    bit.write_bytes(b"other bits")
+    assert cli._existing_build(project, sources, "arty", "vivado", 5000, 10**6, out_dir) is None
+
+
+def test_existing_build_without_a_record_is_rebuilt(tmp_path):
+    project = manifest.get(manifest.load(MANIFEST), ID)
+    sources, out_dir, _ = _built(tmp_path, project)
+    build.record_path(out_dir, "arty").unlink()
+    assert cli._existing_build(project, sources, "arty", "vivado", 5000, 10**6, out_dir) is None
+
+
+def test_the_run_names_the_commit_and_the_source_rewrites(env, capsys):
+    code, doc, _ = _run(env, capsys)
+    assert code == 0
+    project = manifest.get(manifest.load(MANIFEST), ID)
+    assert doc["run"]["commit"] == project.commit
+    assert doc["run"]["source_rewrites"] == [["src/built.v", 2]]
+    bit = env.tmp / "arty_compare.bit"
+    bit.write_bytes(b"old bits")
+    env.existing = (bit, {"source_rewrites": [["src/reused.v", 1]]})
+    code, doc, _ = _run(env, capsys)
+    assert code == 0 and doc["run"]["source_rewrites"] == [["src/reused.v", 1]]
+
+
+def test_videos_repo_reaches_fetch_and_warnings_are_printed(env, capsys, monkeypatch):
+    seen = []
+
+    def fake_fetch(project, cache, videos_repo=None):
+        seen.append(videos_repo)
+        return fetch.Sources(
+            project=project, root=env.tmp, files=(), needs_sv=False, warnings=("odd submodule",)
+        )
+
+    monkeypatch.setattr(cli.fetch, "fetch", fake_fetch)
+    code, _, err = _run(env, capsys, "--videos-repo", str(MANIFEST))
+    assert code == 0
+    assert seen == [MANIFEST]
+    assert "tt-harness run-compare: warning: odd submodule" in err
 
 
 def test_bytes_before_the_header_are_counted_printed_and_do_not_change_the_verdict(env, capsys):

@@ -153,9 +153,11 @@ def build_one(project_id: str, toolchain: str, clocks: int, jobs: int) -> dict:
     began = time.monotonic()
     out_dir = None
     try:
-        projects = manifest.load(manifest.default_videos_repo())
+        videos = manifest.default_videos_repo()
+        projects = manifest.load(videos)
         project = manifest.get(projects, project_id)
-        sources = fetch.fetch(project, REPO / "work" / "sources")
+        sources = fetch.fetch(project, REPO / "work" / "sources", videos)
+        doc["warnings"] = list(sources.warnings)
         out_dir = _build_dir(project, toolchain)
         doc["build_dir"] = str(out_dir)
         doc["log"] = str(out_dir / build.LOG_NAME)

@@ -84,8 +84,9 @@ class PoolResult:
 
 def load_sources(project_id: str) -> Sources:
     """The fetched sources of a manifest project (`$TT_VIDEOS_REPO`, cache `work/sources`)."""
-    projects = manifest.load(manifest.default_videos_repo())
-    return fetch.fetch(manifest.get(projects, project_id), REPO / "work" / "sources")
+    videos = manifest.default_videos_repo()
+    projects = manifest.load(videos)
+    return fetch.fetch(manifest.get(projects, project_id), REPO / "work" / "sources", videos)
 
 
 def _write(path: Path, doc: dict) -> None:
@@ -100,16 +101,7 @@ def _shared_reference(sources: Sources, clocks: int) -> tuple[bytes, Path] | Non
     if not path.is_file() and not path.with_name("reference-fail.json").exists():
         return None  # a failed reference is not "none": load_reference says why
     ref = verdict.load_reference(verdict.default_reference_dir(), project.id)
-    for name, theirs, ours in (
-        ("ui_in", ref.ui_in, project.ui_in),
-        ("uio_in", ref.uio_in, project.uio_in),
-        ("reset_clocks", ref.reset_clocks, RESET_CLOCKS),
-    ):
-        if theirs != ours:
-            raise PoolError(
-                f"{project.id}: shared reference {name} {theirs} differs from the compare "
-                f"build's {ours} ({ref.path})"
-            )
+    verdict.check_matches(ref, project, RESET_CLOCKS)
     if ref.clocks < clocks:
         raise PoolError(
             f"{project.id}: shared reference spans {ref.clocks} clocks, fewer than the "
@@ -126,6 +118,8 @@ def run_sim(project_id: str, clocks: int, work: Path) -> PoolResult:
     """
     began = time.monotonic()
     sources = load_sources(project_id)
+    for warning in sources.warnings:
+        print(f"tt-harness pool-sim: {project_id}: warning: {warning}", file=sys.stderr, flush=True)
     out = Path(work) / sources.project.shuttle / sources.project.macro
     out.mkdir(parents=True, exist_ok=True)
     (out / RESULT_NAME).unlink(missing_ok=True)

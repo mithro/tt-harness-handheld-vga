@@ -96,8 +96,12 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
   native-resolution RGB888, row-major, each channel being the 2-bit value times 85. The
   function is at `ttvga/harness/tb.cpp:237`.
 - The per-frame hash lists are published since 2026-11-23 (commit 3505405 of
-  `tinytapeout-vga-videos`): `data/results/<shuttle>/<macro>/frame_hashes.txt`, for all
-  408 projects with frames. The file has `#` comment lines, then `key: value` lines (id,
+  `tinytapeout-vga-videos`), for all 408 projects with frames, now at
+  `data/results/<shuttle>/<macro>/frames/tb-v1/frame_hashes.fnv1a64-tb2026-rgb888.txt`.
+  They were first at `data/results/<shuttle>/<macro>/frame_hashes.txt` and moved in commit
+  `e112cdb`; "The hash lines did not change, and neither did `hash_offset_basis`"
+  ([`docs/consumers.md` at 26b1004](https://github.com/mithro/tinytapeout-vga-videos/blob/26b1004/docs/consumers.md)).
+  The file has `#` comment lines, then `key: value` lines (id,
   mode, width, height, clock_hz, clocks_per_pixel, capture_after_clock, frames), then one
   hash per line, frame 0 first. Frame 0 starts at the first vsync-pulse end after
   `capture_after_clock`; clock 0 is the first clock of the reset sequence.
@@ -107,7 +111,7 @@ Lessons from capturing real boards (from the `tt-vga-capture` project):
   mismatches every line. Reported by the `tt-harness-fpga-vga` project on 2026-11-23,
   which reproduced the published hashes exactly using the mistyped basis, so the pixels
   agree. Resolved on 2026-11-24: the videos project kept the
-  hashes and documented the constant. Each `frame_hashes.txt` now carries a
+  hashes and documented the constant. Each `frame_hashes.fnv1a64-tb2026-rgb888.txt` carries a
   `hash_offset_basis` line (0x14650fb0739d0383); pass that value to the FNV routine when
   comparing. Pushed to `mithro/tinytapeout-vga-videos` main (148ccf5..87cea85). The videos testbench's clock counter is the
   per-clock sample index plus 1.

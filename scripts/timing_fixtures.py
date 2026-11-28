@@ -73,13 +73,16 @@ def main() -> int:
     parser.add_argument("--work", type=Path, default=REPO / "tmp" / "timing-fixtures")
     parser.add_argument("--reuse", action="store_true", help="extract only; build nothing")
     args = parser.parse_args()
-    projects = manifest.load(manifest.default_videos_repo())
+    videos = manifest.default_videos_repo()
+    projects = manifest.load(videos)
     for toolchain in build.TOOLCHAINS:
         for name, project_id in DESIGNS.items():
             project = manifest.get(projects, project_id)
             out_dir = args.work.resolve() / f"arty-{toolchain}" / name
             if not args.reuse:
-                sources = fetch.fetch(project, REPO / "work" / "sources")
+                sources = fetch.fetch(project, REPO / "work" / "sources", videos)
+                for warning in sources.warnings:
+                    print(f"{project_id}: warning: {warning}", flush=True)
                 print(f"building {project_id} with {toolchain} in {out_dir}", flush=True)
                 build.build_compare(project, sources, "arty", toolchain, out_dir, CLOCKS)
             if toolchain == "openxc7":

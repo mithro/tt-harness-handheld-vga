@@ -118,6 +118,40 @@ def test_vivado_gate_expects_the_feedback_clock_at_the_phase_detector_period(tmp
         cb.parse_vivado(with_paths, cb.ARTY, divclk2, log)
 
 
+# Decoding a bitstream ----------------------------------------------------------------------
+
+
+def _fake_tools(tmp_path: Path, monkeypatch, status: int) -> Path:
+    """`bit2fasm` and `bitread` replaced by a script that records its environment."""
+    env_file = tmp_path / "bit2fasm.env"
+    script = tmp_path / "fake-bit2fasm"
+    script.write_text(
+        f'#!/bin/sh\nenv > "{env_file}"\necho "FAKE.FASM.LINE"\necho "fake error" >&2\nexit {status}\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(cb, "tool", lambda name: script)
+    return env_file
+
+
+def test_decode_bitstream_runs_logged_with_tmpdir_in_the_repository(tmp_path, monkeypatch):
+    env_file = _fake_tools(tmp_path, monkeypatch, 0)
+    log = tmp_path / "build.log"
+    out = cb.decode_bitstream(tmp_path / "top.bit", "xc7a35tcsg324-1", tmp_path / "x.fasm", log)
+    assert out.read_text() == "FAKE.FASM.LINE\n"
+    env = dict(line.split("=", 1) for line in env_file.read_text().splitlines() if "=" in line)
+    assert Path(env["TMPDIR"]) == REPO / "tmp"
+    text = log.read_text()
+    assert "fake-bit2fasm" in text and "fake error" in text  # the command and its stderr
+
+
+def test_decode_bitstream_failure_is_a_build_error(tmp_path, monkeypatch):
+    _fake_tools(tmp_path, monkeypatch, 1)
+    log = tmp_path / "build.log"
+    with pytest.raises(cb.BuildError, match="bit2fasm failed \\(exit 1\\)") as e:
+        cb.decode_bitstream(tmp_path / "top.bit", "xc7a35tcsg324-1", tmp_path / "x.fasm", log)
+    assert e.value.log == log
+
+
 # Open flow ---------------------------------------------------------------------------------
 
 

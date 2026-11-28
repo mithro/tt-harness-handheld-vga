@@ -22,6 +22,27 @@ def pool_run():
     return module
 
 
+def test_build_document_keeps_the_fetch_warnings(pool_run, monkeypatch, tmp_path) -> None:
+    manifest_dir = Path(__file__).resolve().parent / "data" / "manifest"
+    monkeypatch.setenv("TT_VIDEOS_REPO", str(manifest_dir))
+    seen = []
+
+    def fake_fetch(project, cache, videos_repo=None):
+        seen.append(videos_repo)
+        return pool_run.fetch.Sources(project, tmp_path, (), False, warnings=("odd submodule",))
+
+    def stop(*args, **kwargs):
+        raise OSError("stopped here")
+
+    monkeypatch.setattr(pool_run.fetch, "fetch", fake_fetch)
+    monkeypatch.setattr(pool_run.prescreen, "check", stop)
+    monkeypatch.setattr(pool_run, "_build_dir", lambda project, toolchain: tmp_path / "b")
+    monkeypatch.setattr(pool_run, "USE", {"openxc7": lambda out_dir: {}})
+    doc = pool_run.build_one("tt07/tt_um_tinytapeout_dvd_screensaver", "openxc7", 100, 1)
+    assert seen == [manifest_dir]
+    assert doc["warnings"] == ["odd submodule"] and doc["ok"] is False
+
+
 def _last(capsys) -> str:
     return capsys.readouterr().out.strip().splitlines()[-1]
 
