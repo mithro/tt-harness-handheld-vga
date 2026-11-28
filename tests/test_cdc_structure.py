@@ -46,7 +46,7 @@ class _Top(Module):
         sys_ports = (s.ena, s.rst_n, s.ui_in, s.gamepad_enable, s.gamepad_buttons, s.clock_enable)
         out = dict.fromkeys((*sys_ports, c.start, c.abort, c.clocks), "sys")
         out[self.clk_in] = "clock"
-        out[s.clock.reset] = "sys"  # the MMCM's reset: nothing drives it yet
+        out[s.clock.reset] = "sys"  # `ProjectClock.reset` (the MMCM's RST): a port of the slot
         return out
 
 
@@ -145,8 +145,10 @@ def test_every_input_of_the_clocking_primitives_is_one_of_the_allowed_wires(
     """The MMCM and the clock buffers take inputs too. Each one is named here with the domain
     it may depend on, so a new wire from `sys` (or anywhere) into a primitive fails:
 
-    - `MMCME2_ADV`: its input clock, its own feedback, and `RST` (asynchronous to it; a `sys`
-      signal, undriven so far); every other input is a constant;
+    - `MMCME2_ADV`: its input clock, its own feedback, and `RST` (asynchronous to it), which
+      `ProjectClock` wires to its `reset` input (`i_RST=self.reset`): a `sys` signal, declared
+      a `sys` port here because nothing in the slot drives `reset`; every other input is a
+      constant;
     - `BUFG`: the MMCM output;
     - `BUFGCE`: the MMCM output, and `CE` from the synchroniser in the free-running copy of
       the project clock (`project_free`), never straight from `sys`.
@@ -291,3 +293,21 @@ def test_the_analyser_reports_synchroniser_and_flop_sources() -> None:
     assert found == [(1, True), (2, False)]
     assert sorted(f.clear_is_plain_register for f in a.flops) == [False, True]
     assert [f.clear_domains for f in a.flops] == [{"sys"}, {"sys"}]
+
+
+def test_the_analyser_refuses_two_instances_with_one_name() -> None:
+    """Instance inputs are reported by name, so two instances of one name could hide each
+    other's inputs: the analyser reports it as an error instead."""
+
+    class M(Module):
+        def __init__(self) -> None:
+            self.clock_domains.cd_project = ClockDomain("project", reset_less=True)
+            a, b = Signal(), Signal()
+            self.sync.project += [a.eq(~a), b.eq(a)]
+            self.specials += [
+                Instance("thing", name="twin", i_x=a),
+                Instance("thing", name="twin", i_x=b),
+            ]
+
+    a = cdc_structure.analyse(M(), {}, {"twin": "project"})
+    assert a.errors == ["two instances are called twin: their inputs cannot be told apart"]
