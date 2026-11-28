@@ -39,12 +39,15 @@ registers of each `MultiBitCrossing`, `rst_req` and the reset flops are in `slot
 is `tt_harness/input_gate.py`:
 
 - `set_max_delay -datapath_only` from each `hold` register to its `dst` register:
-  - the sys -> project buses (`ctl_x`, `buttons_x`, `cmd_x`): at most the project period
-    (15.15 ns at 66 MHz);
-  - `rep_x` (project -> sys): at most 20 ns.
+  - the sys -> project buses (`ctl_x`, `buttons_x`, `cmd_x`, `vga_settings_x`): at most the
+    project period (15.15 ns at 66 MHz);
+  - the project -> sys buses (`rep_x`, `vga_timing_x`, `sevenseg_x`): at most 20 ns.
 - The same bound from each `req`, `ack_o`, single-bit synchroniser source and `LOCKED` to its
   first synchroniser flop.
 - `rst_req` to the `FDCE` `CLR` pins: max-delay, or a false path on those pins only.
+- The framebuffer (`Framebuffer` in `vga.py`, written in `project`, read in `sys`) must be
+  block RAM, whose two ports are clocked separately: in distributed RAM the read would be
+  an unsynchronised path from `project`. Check the utilisation report.
 - Never `set_clock_groups` or a blanket false path: they override max-delay.
 - `ASYNC_REG` on every synchroniser pair and on both reset flops.
 - No `SRL16` / `SRLC32` on any crossing, in either flow.

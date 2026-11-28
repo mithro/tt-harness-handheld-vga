@@ -62,20 +62,20 @@ def sim_slot(clock_hz: int = CLOCK_HZ) -> ProjectSlot:
 
 
 def soc_for_test(**kw) -> core.HarnessSoC:
-    args = dict(
-        platform=sim.platform(),
-        sys_clk_freq=SYS_HZ,
-        slot=sim_slot(),
-        fb_size=(4, 2),
-        demo_json=demo(),
-        project_name="tt00/tt_um_test",
-        with_audio=False,
-        with_readback=True,
-        pmods=("tiny-vga", "gamepad"),
-        reference_ui_in=0x5A,
-        cpu_type=None,
-        sevenseg_window_log2=3,
-    )
+    args = {
+        "platform": sim.platform(),
+        "sys_clk_freq": SYS_HZ,
+        "slot": sim_slot(),
+        "fb_size": (4, 2),
+        "demo_json": demo(),
+        "project_name": "tt00/tt_um_test",
+        "with_audio": False,
+        "with_readback": True,
+        "pmods": ("tiny-vga", "gamepad"),
+        "reference_ui_in": 0x5A,
+        "cpu_type": None,
+        "sevenseg_window_log2": 3,
+    }
     args.update(kw)
     return core.HarnessSoC(**args)
 
@@ -96,7 +96,9 @@ def test_csr_map_is_documented_and_current() -> None:
         for field in reg.fields:
             assert field.description, f"{reg.name}.{field.name} has no description"
     # The addresses are LiteX's own, as its csr.csv export gives them.
-    text = export.get_csr_csv(soc.csr_regions, soc.constants, soc.bus.regions)
+    text = export.get_csr_csv(
+        csr_regions=soc.csr_regions, constants=soc.constants, mem_regions=soc.bus.regions
+    )
     rows = [r for r in csv.reader(io.StringIO(text)) if r and r[0] == "csr_register"]
     litex = {r[1]: (int(r[2], 0), int(r[3])) for r in rows}
     ours = {r.name: (r.address, r.words) for r in registers.registers(soc)}
@@ -330,10 +332,11 @@ def test_registers_read_back() -> None:
         assert (yield from read("vga_vsync_lines")) == 1
         assert (yield from read("vga_status")) == 0b0100, "locked; negative syncs; a signal"
         assert (yield from read("vga_frames")) >= 6
-        for y in range(2):
-            for x in range(4):
-                yield from write("vga_readback_addr", y * 4 + x)
-                assert (yield from read("vga_readback_data")) == vga.pack(*_colour(x, y))
+        pixels = []
+        for addr in range(8):
+            yield from write("vga_readback_addr", addr)
+            pixels.append((yield from read("vga_readback_data")))
+        assert pixels == [vga.pack(*_colour(x, y)) for y in range(2) for x in range(4)]
         # A constant on uo_out: the seven-segment duty and an at-speed CRC of it.
         state["constant"] = True
         yield from wait(100)
@@ -360,11 +363,19 @@ def test_registers_read_back() -> None:
             clock += 1
             yield
 
-    run(gate(soc), sys_gens=[bus()], project_gens=[picture()], project=(40_000, 5_050))
+    # A 10 ns tick: the reset release's exact timing is not under test here (`test_slot.py`).
+    run(
+        gate(soc),
+        sys_gens=[bus()],
+        project_gens=[picture()],
+        project=(40_000, 5_050),
+        tick_period=10_000,
+    )
     assert seen.get("done")
 
 
 # The BIOS in Verilator ------------------------------------------------------------------------
+
 
 def _counter() -> Sources:
     files = ("tt_um_test_counter.v",)
