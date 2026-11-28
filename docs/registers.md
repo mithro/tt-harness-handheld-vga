@@ -49,6 +49,111 @@ uv run python -m tt_harness.soc.registers
 - `clock_running` reads 1 for a project clock of 1 MHz and up, and flickers below about
   0.39 MHz.
 
+## The firmware
+
+The demo build runs [`firmware/`](../firmware) from the ROM, in place of LiteX's BIOS:
+[`tt_harness/soc/firmware.py`](../tt_harness/soc/firmware.py) (`FirmwareBuilder`) builds it
+as a LiteX software package with the [RISC-V GCC](toolchains.md) and loads the image into
+the ROM. The simulation ([`tt_harness/soc/sim.py`](../tt_harness/soc/sim.py)) and the board
+builds use it the same way. At boot it
+
+1. puts the slot in its power-up state: `ena` 0, `rst_n` 0, clock stopped, no gamepad, capture
+   blanked;
+2. checks the embedded `demo.json` ([`demo_parse.c`](../firmware/demo_parse.c), the messages of
+   [`tt_harness/demo/validate.py`](../tt_harness/demo/validate.py) byte for byte) and the
+   build's own conditions (one project; its `clock_hz` is the slot's);
+3. runs it with the demo board's runner ([`runner.c`](../firmware/runner.c),
+   [`docs/demo-runner.md`](demo-runner.md)): the selection writes `ena`, the clock and `ui_in`
+   (and the first steps), then `rst_n` is released once;
+4. reports the clock, classifies the VGA mode from the measured counters once `locked`
+   ([`vga_mode.c`](../firmware/vga_mode.c), the C form of `vga.classify`) and programs the
+   capture with it.
+
+| Memory | Holds |
+| --- | --- |
+| `rom` (32 KiB) | code, read-only data, the initial values of data |
+| `main_ram` (64 KiB) | data, bss: the parsed demo, the parser's tokens, the console ring |
+| `sram` (8 KiB) | the stack |
+
+### Console
+
+The UART (115200 baud) carries one line per event: a word, then `key=value` fields separated
+by spaces. Lines are queued in a 4 KiB ring and sent from the main loop, so logging does not
+delay the slot writes; a full ring waits, and no line is dropped. `t_ms` is milliseconds since
+boot.
+
+| Line | Field | Value |
+| --- | --- | --- |
+| `boot` | `project` | `<shuttle>/<macro>` |
+| `boot` | `sys_hz` | system clock in Hz |
+| `boot` | `clock_hz` | `info_clock_hz` |
+| `boot` | `fb_width` | `info_fb_width` |
+| `boot` | `fb_height` | `info_fb_height` |
+| `boot` | `demo_json_bytes` | size of the embedded file |
+| `demo ok` | `projects` | number of projects |
+| `demo ok` | `steps` | number of steps, all projects |
+| `demo error` | `count` | number of `error msg=` lines after it |
+| `error msg=` | rest of the line | one message, `\` and control characters escaped as `\\`, `\n`, `\r`, `\xNN` |
+| `error display` | `t_ms` | time of the blink |
+| `error display` | `ena` | `slot_ena` read back |
+| `error display` | `rst_n` | `slot_rst_n` read back |
+| `error display` | `clock_enable` | `slot_clock_enable` read back |
+| `error display` | `ui_in` | `slot_ui_in` read back, decimal |
+| `state` | `t_ms` | time of the runner's event |
+| `state` | `entry` | index of the selected project |
+| `state` | `address` | its address |
+| `state` | `subtile` | its subtile |
+| `state` | `ena` | `1` |
+| `state` | `clock_hz` | the requested clock |
+| `state` | `ui_in` | the written value, decimal |
+| `state` | `gamepad` | the report word, `0x` and six hex digits |
+| `state` | `rst_n` | the written level |
+| `state` | `source` | `enable`, on the one release after the selection |
+| `clock` | `t_ms` | time of the change |
+| `clock` | `hz` | `info_clock_hz` |
+| `clock` | `achieved_num` | `info_clock_hz_num` |
+| `clock` | `achieved_den` | `info_clock_hz_den` |
+| `clock` | `locked` | `slot_status.locked` |
+| `clock` | `running` | `slot_status.clock_running` |
+| `mode` | `t_ms` | time of the change |
+| `mode` | `status` | `ok`, `unknown` or `no_signal` |
+| `mode` | `name` | the table's row, such as `640x480@60` (`ok` only) |
+| `mode` | `refresh_hz` | `clock_hz / (clocks_per_line * lines_per_frame)`, one decimal (`ok` only) |
+| `mode` | `divider` | `vga_divider` written (`ok` only) |
+| `mode` | `h_offset` | `vga_h_offset` written (`ok` only) |
+| `mode` | `v_offset` | `vga_v_offset` written (`ok` only) |
+| `mode` | `h_step` | `vga_h_step` written (`ok` only) |
+| `mode` | `v_step` | `vga_v_step` written (`ok` only) |
+| `mode` | `clocks_per_line` | measured (not `no_signal`) |
+| `mode` | `lines_per_frame` | measured (not `no_signal`) |
+| `mode` | `hsync_width` | measured (not `no_signal`) |
+| `mode` | `vsync_lines` | measured (not `no_signal`) |
+| `mode` | `hsync_positive` | `vga_status.hsync_positive` (not `no_signal`) |
+| `mode` | `vsync_positive` | `vga_status.vsync_positive` (not `no_signal`) |
+| `fb` | `t_ms` | time of the readout |
+| `fb` | `frames` | `vga_frames` |
+| `fb` | `pixels` | `addr:RR` pairs joined by `,`, two hex digits each (`vga_readback_data`) |
+
+- A `clock` line is printed for the first status and then for each change that has held 50 ms
+  (`clock_running` flickers for a slow clock).
+- A `mode` line is printed for each change of the measurement once it is `locked`, or when the
+  signal is lost. `unknown` blanks the capture (`vga_blank` 1).
+- `fb` lines are printed every 20 ms, and only in builds given framebuffer probes
+  (`sim.run(fb_probes=...)`).
+- The `state` lines are the runner's writes in its order; the `gamepad` word is player 1 in
+  bits 23..12 and player 2 in bits 11..0 (`0xfff` absent), as `gamepad_buttons`.
+
+### The error pattern
+
+On an invalid `demo.json`, or one this build cannot run, the firmware prints `demo error` and
+every message, never enables the project, and from then on holds it with `ena` 0, `rst_n` 0
+and the clock stopped, writing `SEVENSEG_ERROR_PATTERN` to `slot_ui_in` and 0 in turn every
+250 ms (one `error display` line each).
+
+| Constant | Value | Shows |
+| --- | --- | --- |
+| `SEVENSEG_ERROR_PATTERN` ([`main.c`](../firmware/main.c)) | `0x79` | `E`: segments a, d, e, f, g |
+
 <!-- BEGIN GENERATED CSR MAP (uv run python -m tt_harness.soc.registers) -->
 
 ## CSR map

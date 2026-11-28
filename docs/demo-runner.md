@@ -195,6 +195,29 @@ configurator's `demoFile.ts` differs as follows; its own header names the first.
 
 No other difference of logic or wording was found in the checks themselves.
 
+## The harness firmware
+
+[`firmware/runner.c`](../firmware/runner.c) is this runner in C and
+[`firmware/demo_parse.c`](../firmware/demo_parse.c) is `validate.validate`, with the same
+messages; [`tests/test_firmware_host.py`](../tests/test_firmware_host.py) holds both to the
+model and to the vectors in [`tests/data/demo/`](../tests/data/demo). Where they differ:
+
+1. Enabling (open question 1): the slot powers up in reset, and the firmware releases `rst_n`
+   once, after the selection's writes (`state ... rst_n=1 source=enable`).
+2. A reset cut by the duration timer (open question 3) is still released, at its own time, unless
+   the next entry asserts reset first: a design is never left held in reset. The model does
+   not show that release.
+3. Firmware limits: a file that would pass the validator can still be refused at boot, with a
+   `firmware limit: ...` message naming the limit (`DEMO_MAX_TOKENS`, `DEMO_MAX_PROJECTS`,
+   `DEMO_MAX_STEPS`, `DEMO_MAX_DEPTH`, `DEMO_ERRORS_TEXT`, in
+   [`demo_parse.h`](../firmware/demo_parse.h)), or a value beyond 32 bits.
+4. Unprintable characters in a printed string: `str.isprintable` comes from a table of the
+   Unicode ranges Python treats as unprintable ([`pyrepr.c`](../firmware/pyrepr.c)); a code
+   point that a later Unicode version assigns may print differently.
+5. The error display: the board enables its factory-test design to show the pattern on the
+   7-segment display; the harness holds the chosen project disabled and in reset and writes
+   the pattern to `ui_in` ([`docs/registers.md`](registers.md), "The error pattern").
+
 ## Not covered here
 
 The harness firmware does not need any of these (demo.py 395-425 and nearby):
