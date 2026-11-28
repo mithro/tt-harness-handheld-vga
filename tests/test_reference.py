@@ -148,6 +148,7 @@ def _sibling_dirs() -> tuple[Path, Path]:
     not all(d.is_dir() for d in _sibling_dirs()),
     reason="TT_REFERENCE_DIR or TT_VIDEOS_REPO checkout absent",
 )
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_agrees_with_sibling_reference(tmp_path):
     ref_dir, videos_repo = _sibling_dirs()
     sibling = ref_dir / AGREEMENT_ID / "ideal" / "uo_out.bin.gz"

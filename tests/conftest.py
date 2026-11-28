@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests marked `board` touch a real FPGA board over SSH and run only with `--board`.
 
+Tests marked `slow` (exhaustive simulation sweeps) are skipped, with the reason
+"slow: run with --run-slow", unless `--run-slow` is given or the `-m` expression names `slow`.
+
 A test session must not write into the default build tree `build/compare/`, which holds
 the bitstreams the CLI and the pool script built and ran: `_default_build_tree_untouched`
 fails the session if a file there was created, removed or modified while it ran. (So do
@@ -9,19 +12,46 @@ not run the tests while a build into that tree is in progress.)
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import build_tree
 import pytest
+from _pytest.mark.expression import Expression
+
+SLOW_REASON = "slow: run with --run-slow"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--board", action="store_true", default=False, help="run tests that use a real board"
     )
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="also run tests marked slow (exhaustive simulation sweeps)",
+    )
+
+
+def slow_selected(config: pytest.Config) -> bool:
+    """`slow` tests run when asked for: `--run-slow`, or a `-m` expression that names `slow`
+    and is true for a test whose only marker is `slow` (so `slow` and `toolchain or slow`
+    select them; `not slow` and the standard fast command, which does not mention it, do not)."""
+    if config.getoption("--run-slow"):
+        return True
+    expr = config.getoption("-m") or ""
+    if not re.search(r"\bslow\b", expr):
+        return False
+    return Expression.compile(expr).evaluate(lambda name: name == "slow")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if not slow_selected(config):
+        skip_slow = pytest.mark.skip(reason=SLOW_REASON)
+        for item in items:
+            if item.get_closest_marker("slow"):
+                item.add_marker(skip_slow)
     if config.getoption("--board"):
         return
     chosen, dropped = [], []

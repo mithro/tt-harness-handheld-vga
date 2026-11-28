@@ -16,7 +16,11 @@ dependencies = [
 tt-harness = "tt_harness.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff"]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3.8.0",
+    "ruff",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -37,6 +41,7 @@ markers = [
     "toolchain: needs the open-source toolchains installed under .toolchains/",
     "vivado: needs a Vivado installation",
     "board: uses a real FPGA board over SSH; deselected unless --board is given",
+    "slow: exhaustive simulation sweeps; not needed for every run; run them before merging changes to the code they cover (skipped unless --run-slow or -m mentions slow)",
 ]
 
 [tool.ruff]

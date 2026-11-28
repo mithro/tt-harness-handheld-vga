@@ -1,0 +1,744 @@
+{
+ "comment": "Yosys netlist of clock_domains_fixture (scripts/input_gate_clock_fixtures.py)",
+ "modules": {
+  "clock_domains_fixture": {
+   "cells": {
+    "$abc$20175$lut$not$aiger20174$15": {
+     "connections": {
+      "I": [
+       13
+      ],
+      "O": [
+       14
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "INV"
+    },
+    "$abc$20175$lut$not$aiger20174$17": {
+     "connections": {
+      "I": [
+       15
+      ],
+      "O": [
+       16
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "INV"
+    },
+    "$abc$20175$lut$not$aiger20174$20": {
+     "connections": {
+      "I": [
+       17
+      ],
+      "O": [
+       18
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "INV"
+    },
+    "$abc$20175$lut$not$aiger20174$32": {
+     "connections": {
+      "I": [
+       19
+      ],
+      "O": [
+       20
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "INV"
+    },
+    "$auto$clkbufmap.cc:268:execute$20180": {
+     "connections": {
+      "I": [
+       21
+      ],
+      "O": [
+       22
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "BUFG"
+    },
+    "$auto$clkbufmap.cc:268:execute$20182": {
+     "connections": {
+      "I": [
+       23
+      ],
+      "O": [
+       24
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "BUFG"
+    },
+    "$auto$ff.cc:337:slice$1108": {
+     "connections": {
+      "C": [
+       24
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       25
+      ],
+      "Q": [
+       26
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1109": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       25
+      ],
+      "Q": [
+       27
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1110": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       14
+      ],
+      "Q": [
+       13
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1111": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       28
+      ],
+      "Q": [
+       28
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1112": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       16
+      ],
+      "Q": [
+       15
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1113": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       29
+      ],
+      "Q": [
+       29
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1114": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       30
+      ],
+      "Q": [
+       30
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1115": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       18
+      ],
+      "Q": [
+       17
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1116": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       31
+      ],
+      "Q": [
+       31
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$auto$ff.cc:337:slice$1117": {
+     "connections": {
+      "C": [
+       22
+      ],
+      "CE": [
+       "1"
+      ],
+      "D": [
+       20
+      ],
+      "Q": [
+       19
+      ],
+      "R": [
+       "0"
+      ]
+     },
+     "port_directions": {
+      "C": "input",
+      "CE": "input",
+      "D": "input",
+      "Q": "output",
+      "R": "input"
+     },
+     "type": "FDRE"
+    },
+    "$iopadmap$clock_domains_fixture.d": {
+     "connections": {
+      "I": [
+       4
+      ],
+      "O": [
+       25
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "IBUF"
+    },
+    "$iopadmap$clock_domains_fixture.project_clk": {
+     "connections": {
+      "I": [
+       2
+      ],
+      "O": [
+       21
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "IBUF"
+    },
+    "$iopadmap$clock_domains_fixture.sys_clk": {
+     "connections": {
+      "I": [
+       3
+      ],
+      "O": [
+       23
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "IBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo": {
+     "connections": {
+      "I": [
+       32
+      ],
+      "O": [
+       5
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo_1": {
+     "connections": {
+      "I": [
+       33
+      ],
+      "O": [
+       6
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo_2": {
+     "connections": {
+      "I": [
+       34
+      ],
+      "O": [
+       7
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo_3": {
+     "connections": {
+      "I": [
+       35
+      ],
+      "O": [
+       8
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo_4": {
+     "connections": {
+      "I": [
+       36
+      ],
+      "O": [
+       9
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo_5": {
+     "connections": {
+      "I": [
+       37
+      ],
+      "O": [
+       10
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo_6": {
+     "connections": {
+      "I": [
+       38
+      ],
+      "O": [
+       11
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "$iopadmap$clock_domains_fixture.uo_7": {
+     "connections": {
+      "I": [
+       39
+      ],
+      "O": [
+       12
+      ]
+     },
+     "port_directions": {
+      "I": "input",
+      "O": "output"
+     },
+     "type": "OBUF"
+    },
+    "project": {
+     "connections": {
+      "clk": [
+       22
+      ],
+      "ena": [
+       26
+      ],
+      "rst_n": [
+       27
+      ],
+      "ui_in": [
+       13,
+       28,
+       15,
+       29,
+       30,
+       17,
+       31,
+       19
+      ],
+      "uo_out": [
+       32,
+       33,
+       34,
+       35,
+       36,
+       37,
+       38,
+       39
+      ]
+     },
+     "port_directions": {
+      "clk": "input",
+      "ena": "input",
+      "rst_n": "input",
+      "ui_in": "input",
+      "uo_out": "output"
+     },
+     "type": "tt_project"
+    }
+   },
+   "netnames": {
+    "$abc$20175$aiger$o0": {
+     "bits": [
+      22
+     ]
+    },
+    "$abc$20175$aiger$o11": {
+     "bits": [
+      24
+     ]
+    },
+    "$abc$20175$aiger$o12": {
+     "bits": [
+      25
+     ]
+    },
+    "$abc$20175$aiger$o18": {
+     "bits": [
+      14
+     ]
+    },
+    "$abc$20175$aiger$o22": {
+     "bits": [
+      16
+     ]
+    },
+    "$abc$20175$aiger$o28": {
+     "bits": [
+      18
+     ]
+    },
+    "$abc$20175$aiger$o29": {
+     "bits": [
+      39
+     ]
+    },
+    "$abc$20175$aiger$o33": {
+     "bits": [
+      32
+     ]
+    },
+    "$abc$20175$aiger$o34": {
+     "bits": [
+      33
+     ]
+    },
+    "$abc$20175$aiger$o35": {
+     "bits": [
+      34
+     ]
+    },
+    "$abc$20175$aiger$o36": {
+     "bits": [
+      35
+     ]
+    },
+    "$abc$20175$aiger$o37": {
+     "bits": [
+      36
+     ]
+    },
+    "$abc$20175$aiger$o38": {
+     "bits": [
+      37
+     ]
+    },
+    "$abc$20175$aiger$o39": {
+     "bits": [
+      38
+     ]
+    },
+    "$abc$20175$aiger$o41": {
+     "bits": [
+      20
+     ]
+    },
+    "$auto$clkbufmap.cc:269:execute$20181": {
+     "bits": [
+      21
+     ]
+    },
+    "$auto$clkbufmap.cc:269:execute$20183": {
+     "bits": [
+      23
+     ]
+    },
+    "d": {
+     "bits": [
+      4
+     ]
+    },
+    "pin_ena": {
+     "bits": [
+      26
+     ]
+    },
+    "pin_rst_n": {
+     "bits": [
+      27
+     ]
+    },
+    "pin_ui_in": {
+     "bits": [
+      13,
+      28,
+      15,
+      29,
+      30,
+      17,
+      31,
+      19
+     ]
+    },
+    "project_clk": {
+     "bits": [
+      2
+     ]
+    },
+    "sys_clk": {
+     "bits": [
+      3
+     ]
+    },
+    "uo": {
+     "bits": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+     ]
+    }
+   },
+   "ports": {
+    "d": {
+     "bits": [
+      4
+     ],
+     "direction": "input"
+    },
+    "project_clk": {
+     "bits": [
+      2
+     ],
+     "direction": "input"
+    },
+    "sys_clk": {
+     "bits": [
+      3
+     ],
+     "direction": "input"
+    },
+    "uo": {
+     "bits": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+     ],
+     "direction": "output"
+    }
+   }
+  }
+ }
+}

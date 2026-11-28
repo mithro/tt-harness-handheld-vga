@@ -165,11 +165,13 @@ class TestSimulation:
     def test_both_edge_design_matches_reference(self, tmp_path: Path) -> None:
         _check_against_reference(_local("edges", "tt_um_test_edges"), 300, tmp_path)
 
+    @pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
     def test_logo_screensaver_matches_reference(self, tmp_path: Path) -> None:
         _check_against_reference(
             _real("tt08/tt_um_tinytapeout_logo_screensaver"), 450_000, tmp_path, shared=True
         )
 
+    @pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
     def test_dottee_matches_reference(self, tmp_path: Path) -> None:
         # SystemVerilog syntax, and a second clock derived from vsync inside the project.
         _check_against_reference(

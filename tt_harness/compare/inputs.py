@@ -11,11 +11,25 @@ constant or come straight from a register.
 
 - `constant`: a constant, directly or through plain `a.eq(b)` wires;
 - `register`: a signal assigned only in a synchronous block, directly or through plain
-  wires;
+  wires, or the output of an `AsyncClearFlop` (below);
 - `combinational`: anything else that is driven: an operator, a slice, a concatenation, a
   conditional or repeated combinational assignment, a signal assigned both combinationally
   and synchronously;
 - `undriven`: a signal nothing in the fragment assigns (a port of the top, or a mistake).
+
+A `register` also reports its clock `domain`: the synchronous block (clock domain) that
+assigns it, or the domain of the `AsyncClearFlop`. A register assigned in more than one
+domain is reported as `combinational` (it has no one clock). The caller decides which
+domain is acceptable (`tt_harness.core.slot` requires `project` for every register input).
+
+The one special accepted as a register (`AsyncClearFlop`, an FDCE: output 0 while its
+`clear` is high, else the value of `d` at the last clock edge of its domain) is accepted
+for exactly its `q` output, only when nothing else in the fragment assigns that signal, and
+only when its `clear` is itself glitch-free by the same rules (a register output or a
+constant, directly or through plain wires): the output follows the clear asynchronously, so
+a clear made by logic (`a & ~b`) is a glitch on the project input and is `combinational`.
+No other special's output is accepted (a `MultiReg` output, for example, is `undriven` here,
+because a synchroniser output is not a project-clock register).
 
 Only `constant` and `register` are glitch-free (`GLITCH_FREE`); what is not recognised is
 `combinational`, so a new input fails by default. This reads the source description: it
@@ -32,6 +46,8 @@ from migen.fhdl.specials import Instance
 from migen.fhdl.structure import Constant, _Assign
 from migen.fhdl.tools import list_targets
 
+from tt_harness.core.cdc import AsyncClearFlop
+
 GLITCH_FREE = ("constant", "register")
 CLOCK_PORT = "clk"
 
@@ -41,6 +57,7 @@ class InputSource:
     port: str
     kind: str  # "constant", "register", "combinational" or "undriven"
     detail: str  # the signal or constant found, or why it is not glitch-free
+    domain: str | None = None  # clock domain of a `register`; None for anything else
 
     @property
     def glitch_free(self) -> bool:
@@ -64,8 +81,13 @@ def project_inputs(module: Module, instance_name: str) -> dict[str, InputSource]
         raise ValueError(f"expected one instance named {instance_name!r}, found {len(instances)}")
     comb_targets = list_targets(fragment.comb)
     sync_targets = set()
-    for statements in fragment.sync.values():
-        sync_targets |= list_targets(statements)
+    domains_of: dict[Signal, set[str]] = {}
+    for domain, statements in fragment.sync.items():
+        targets = list_targets(statements)
+        sync_targets |= targets
+        for signal in targets:
+            domains_of.setdefault(signal, set()).add(domain)
+    flops = {s.q: s for s in fragment.specials if isinstance(s, AsyncClearFlop)}
 
     def plain_source(signal: Signal):
         """The right-hand side if `signal` is one unconditional `signal.eq(x)`, else None."""
@@ -74,7 +96,7 @@ def project_inputs(module: Module, instance_name: str) -> dict[str, InputSource]
             return assigns[0].r
         return None
 
-    def classify(port: str, expr) -> InputSource:
+    def classify(port: str, expr, flops_seen: frozenset[int] = frozenset()) -> InputSource:
         seen: set[int] = set()
         while True:
             if isinstance(expr, Constant):
@@ -91,7 +113,27 @@ def project_inputs(module: Module, instance_name: str) -> dict[str, InputSource]
                     port, "combinational", f"{_name(expr)} is assigned in comb and in sync"
                 )
             if in_sync:
-                return InputSource(port, "register", _name(expr))
+                domains = domains_of[expr]
+                if len(domains) != 1:
+                    return InputSource(
+                        port,
+                        "combinational",
+                        f"{_name(expr)} is assigned in clock domains {sorted(domains)}",
+                    )
+                return InputSource(port, "register", _name(expr), next(iter(domains)))
+            if expr in flops and not in_comb:
+                flop = flops[expr]
+                if id(flop) in flops_seen:
+                    return InputSource(port, "combinational", f"a loop through {_name(expr)}")
+                clear = classify(port, flop.clear, flops_seen | {id(flop)})
+                if not clear.glitch_free:
+                    return InputSource(
+                        port,
+                        "combinational",
+                        f"{_name(expr)} (AsyncClearFlop): its asynchronous clear is not a "
+                        f"register output or a constant: {clear.detail}",
+                    )
+                return InputSource(port, "register", f"{_name(expr)} (AsyncClearFlop)", flop.cd)
             if not in_comb:
                 return InputSource(port, "undriven", f"nothing assigns {_name(expr)}")
             source = plain_source(expr)

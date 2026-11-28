@@ -171,6 +171,7 @@ def _real(project_id: str, tmp_path: Path) -> prescreen.Prescreen:
 
 @pytest.mark.toolchain
 @needs_yosys
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_real_dottee_has_derived_clock_and_needs_sv(tmp_path):
     result = _real("ttsky26a/tt_um_algofoogle_dottee", tmp_path)
     assert result.derived_clocks >= 1
@@ -180,6 +181,7 @@ def test_real_dottee_has_derived_clock_and_needs_sv(tmp_path):
 
 @pytest.mark.toolchain
 @needs_yosys
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_real_logo_screensaver_is_not_flagged(tmp_path):
     result = _real("tt08/tt_um_tinytapeout_logo_screensaver", tmp_path)
     assert (result.latches, result.comb_loops, result.derived_clocks) == (0, 0, 0)

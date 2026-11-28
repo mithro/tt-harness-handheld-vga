@@ -653,6 +653,7 @@ def _out(root: Path, toolchain: str, sources: Sources) -> Path:
 @pytest.mark.toolchain
 @pytest.mark.skipif(not _openxc7_installed(), reason="openXC7 toolchain not installed")
 @pytest.mark.parametrize("project_id", [REAL_ID, DOTTEE_ID])
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_real_build_openxc7(project_id: str, build_root: Path) -> None:
     sources = _real_sources(project_id)
     result = build.build_compare(
@@ -705,6 +706,7 @@ def _assert_only_directives_differ(original: Path, copy: Path) -> int:
 
 @pytest.mark.vivado
 @pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_real_build_vivado_retry_can_be_forbidden(tmp_path: Path) -> None:
     sources = _real_sources()
     before = _source_hashes(sources)
@@ -727,6 +729,7 @@ def test_real_build_vivado_retry_can_be_forbidden(tmp_path: Path) -> None:
 @pytest.mark.vivado
 @pytest.mark.skipif(tools.vivado_settings() is None, reason="Vivado not installed")
 @pytest.mark.parametrize("project_id", [REAL_ID, DOTTEE_ID])
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_real_build_vivado(project_id: str, build_root: Path) -> None:
     # The default: unmodified first, then the `default_nettype wire` retry on Synth 8-6735.
     sources = _real_sources(project_id)

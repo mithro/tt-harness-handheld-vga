@@ -1347,6 +1347,7 @@ def pool_dump(clocks: int) -> tuple[bytes, str]:
 
 
 @pytest.mark.toolchain
+@pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_pool_design_frame_matches_reference(vga_bench, tmp_path) -> None:
     clocks = 2_600_000  # six frames of 420,000 clocks
     samples, origin = pool_dump(clocks)

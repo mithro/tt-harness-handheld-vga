@@ -104,6 +104,7 @@ Both can also be given per command (`--videos-repo`, `--reference-dir`).
 | [`docs/gamebub-mcu-protocol.md`](docs/gamebub-mcu-protocol.md) | the Game Bub MCU-to-core protocol |
 | [`docs/test-designs.md`](docs/test-designs.md) | the test designs and reference data |
 | [`docs/toolchains.md`](docs/toolchains.md) | installing and using the FPGA toolchains |
+| [`docs/cdc-constraints.md`](docs/cdc-constraints.md) | the clock-domain crossing constraints the FPGA build must apply |
 | [`docs/superpowers/specs/2026-11-23-tt-harness-handheld-vga-design.md`](docs/superpowers/specs/2026-11-23-tt-harness-handheld-vga-design.md) | the design specification |
 | [`docs/superpowers/plans/2026-11-23-plan-1-spikes.md`](docs/superpowers/plans/2026-11-23-plan-1-spikes.md) | plan 1: the spikes |
 | [`docs/superpowers/plans/2026-11-25-plan-2-core-soc-arty-demo.md`](docs/superpowers/plans/2026-11-25-plan-2-core-soc-arty-demo.md) | plan 2: the core SoC and Arty demo |
@@ -127,3 +128,19 @@ uv run pytest -m "not toolchain and not vivado"
 ```
 
 Tests marked `toolchain` need `.toolchains/`; tests marked `vivado` need Vivado.
+Tests marked `slow` (exhaustive simulation sweeps) are skipped unless `--run-slow` is given or
+`-m` names `slow`; run them before merging changes to the code they cover:
+
+```sh
+uv run pytest -m "not toolchain and not vivado"   # fast
+uv run pytest tests/test_slot.py tests/test_atspeed.py tests/test_atspeed_abort.py --run-slow -m "not vivado" -q -W error   # everything for the slot / at-speed check
+```
+
+Parallel (pytest-xdist; `-n` is not a default because FPGA-build tests must run one at a time,
+so use it only with the markers that leave those out):
+
+```sh
+uv run pytest -m "not toolchain and not vivado" -n 16 --dist loadgroup -q -W error   # fast, parallel
+uv run pytest tests/test_slot.py tests/test_atspeed.py tests/test_atspeed_abort.py tests/test_atspeed_pins.py \
+    tests/test_atspeed_random.py tests/test_crossing.py tests/test_slot_order.py tests/test_cdc_structure.py --run-slow -m "not vivado" -n 16 --dist loadgroup -q -W error
+```
