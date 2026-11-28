@@ -18,7 +18,7 @@ Source commit: not recorded. The files were added on 2026-11-23 in commit `2c580
 repository ("Add manifest loader reading the shared videos checkout") without naming the
 commit of the videos repository they came from, and it could not be established
 afterwards. The override file is byte for byte the one in that repository's checkout on
-2026-11-26.
+2026-11-28.
 
 Licence: Apache-2.0, the licence of tinytapeout-vga-videos (its `LICENSE` and
 `pyproject.toml`). The entries describe third-party Tiny Tapeout projects (repository,
