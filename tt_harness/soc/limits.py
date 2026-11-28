@@ -23,7 +23,8 @@ from typing import Any
 
 PREFIX = "firmware limit: "
 
-MAX_TOKENS = 2048  # JSON tokens (jsmn's), 16 bytes each
+MAX_TOKENS = 2048  # JSON tokens (jsmn's), 8 bytes each (firmware/third_party/README.md)
+MAX_TEXT = 65536  # bytes of demo.json: the ROM's size; a token position is a 20-bit field
 MAX_PROJECTS = 32  # entries of "projects"
 MAX_STEPS = 512  # steps of all projects together
 MAX_DEPTH = 32  # nesting of arrays and objects (the top value is depth 0)
@@ -34,6 +35,7 @@ MAX_MS = 2**31 - 1  # duration_ms and wait_ms: the runner's clock is 32 bits, co
 MAX_U32 = 2**32 - 1  # address, subtile, clock_hz
 
 TOKENS = f"{PREFIX}more than {MAX_TOKENS} JSON tokens (DEMO_MAX_TOKENS)"
+TEXT = f"{PREFIX}more than {MAX_TEXT} bytes of JSON (DEMO_MAX_TEXT)"
 DEPTH = f"{PREFIX}JSON nested deeper than {MAX_DEPTH} (DEMO_MAX_DEPTH)"
 DIGITS = f"{PREFIX}a number with more than {MAX_DIGITS} significant digits (PY_MAX_DIGITS)"
 SHUTTLE = f"{PREFIX}a shuttle name longer than {SHUTTLE_MAX - 1} bytes (DEMO_SHUTTLE_MAX)"
@@ -77,6 +79,7 @@ def header() -> str:
     """`firmware_limits.h`."""
     numbers = [
         ("DEMO_MAX_TOKENS", MAX_TOKENS),
+        ("DEMO_MAX_TEXT", MAX_TEXT),
         ("DEMO_MAX_PROJECTS", MAX_PROJECTS),
         ("DEMO_MAX_STEPS", MAX_STEPS),
         ("DEMO_MAX_DEPTH", MAX_DEPTH),
@@ -89,6 +92,7 @@ def header() -> str:
     strings = [
         ("DEMO_LIMIT_PREFIX", PREFIX),
         ("DEMO_MSG_TOKENS", TOKENS),
+        ("DEMO_MSG_TEXT", TEXT),
         ("DEMO_MSG_DEPTH", DEPTH),
         ("DEMO_MSG_DIGITS", DIGITS),
         ("DEMO_MSG_SHUTTLE", SHUTTLE),
@@ -127,7 +131,10 @@ def _significant_digits(literal: str) -> int:
 
 
 def _json_limit(text: str) -> str | None:
-    """The firmware's first limit on the JSON itself: tokens, then depth, then digits."""
+    """The firmware's first limit on the JSON itself: its length, then tokens, then depth,
+    then digits."""
+    if len(text.encode("utf-8", errors="surrogatepass")) > MAX_TEXT:
+        return TEXT
     longest = [0]
 
     def number(literal: str, convert: Any) -> Any:

@@ -66,14 +66,12 @@ enum jsmnerr {
  * start	start position in JSON data string
  * end		end position in JSON data string
  */
+/* tt-harness: 8-byte token (third_party/README.md). */
 typedef struct jsmntok {
-  jsmntype_t type;
-  int start;
-  int end;
-  int size;
-#ifdef JSMN_PARENT_LINKS
-  int parent;
-#endif
+  int start : 20;
+  unsigned int type : 4;
+  int end : 20;
+  int size : 12;
 } jsmntok_t;
 
 /**

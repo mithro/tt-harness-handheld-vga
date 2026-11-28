@@ -446,6 +446,23 @@ def test_a_limit_fails_at_build_and_at_boot_with_the_same_text(host: Path, entry
     assert parse(host, text.encode()) == ("errors", raised.value.errors)
 
 
+def test_a_text_longer_than_the_firmware_holds_fails_at_build_and_at_boot(host: Path) -> None:
+    """Token positions are 20-bit fields (`firmware/third_party/README.md`), so the text is
+    limited to `limits.MAX_TEXT` bytes, the ROM's size; trailing whitespace makes a valid
+    file of any length."""
+    short = json.dumps(demo_of(ONE))
+    at_limit = short + " " * (limits.MAX_TEXT - len(short))
+    assert len(at_limit) == limits.MAX_TEXT
+    assert limits.check(at_limit, SHUTTLE) == []
+    assert parse(host, at_limit.encode())[0] != "errors"
+    longer = at_limit + " "
+    assert validate.validate(json.loads(longer), SHUTTLE) == []
+    with pytest.raises(validate.DemoError) as raised:
+        core.demo_entry(longer.encode(), SHUTTLE)
+    assert raised.value.errors == [limits.TEXT]
+    assert parse(host, longer.encode()) == ("errors", [limits.TEXT])
+
+
 def test_the_build_check_of_deep_json_leaves_the_recursion_limit_alone() -> None:
     """`limits.check` walks the JSON without recursion, so it neither needs nor changes
     Python's recursion limit (a process-wide setting)."""

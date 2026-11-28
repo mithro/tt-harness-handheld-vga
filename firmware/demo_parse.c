@@ -22,6 +22,10 @@
 #define LIMIT DEMO_LIMIT_PREFIX
 
 static jsmntok_t tok[DEMO_MAX_TOKENS];
+// The 8-byte token (third_party/README.md): positions are 20-bit and sizes 12-bit, signed.
+_Static_assert(sizeof(jsmntok_t) == 8, "jsmntok_t is 8 bytes");
+_Static_assert(DEMO_MAX_TEXT < (1 << 19), "a position up to DEMO_MAX_TEXT fits jsmntok_t.end");
+_Static_assert(DEMO_MAX_TOKENS - 1 < (1 << 11), "a container's size fits jsmntok_t.size");
 static const char *js;      // the text
 static size_t js_len;
 static int ntok;
@@ -490,6 +494,10 @@ static void not_json(const char *what, int at) {
 
 // Tokenise and check; 1 if the text is one valid JSON value (token 0).
 static int json_ok(void) {
+    if (js_len > DEMO_MAX_TEXT) {
+        add_error(DEMO_MSG_TEXT);
+        return 0;
+    }
     for (size_t p = 0; p < js_len; p++) {
         if (js[p] == '\0') return not_json("a NUL byte", (int)p), 0;
     }

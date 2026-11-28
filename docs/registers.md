@@ -76,10 +76,10 @@ builds use it the same way. At boot it
 | `rom` | 64 KiB | `demo.json` |
 | `rom` | 64 KiB | the `str.isprintable` table (`py_printable.h`) |
 | `rom` | 64 KiB | the initial values of data |
-| `main_ram` | 64 KiB | data |
-| `main_ram` | 64 KiB | the parsed demo |
-| `main_ram` | 64 KiB | the parser's JSON tokens |
-| `main_ram` | 64 KiB | the console ring |
+| `main_ram` | 32 KiB | data |
+| `main_ram` | 32 KiB | the parsed demo |
+| `main_ram` | 32 KiB | the parser's JSON tokens |
+| `main_ram` | 32 KiB | the console ring |
 | `sram` | 8 KiB | the stack |
 
 ### Console
