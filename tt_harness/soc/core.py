@@ -292,3 +292,370 @@ class HarnessCore(Module):
             *self.settings.values(),
             self.fb.rd_addr,
         ]
+
+
+# CSR modules ---------------------------------------------------------------------------------
+
+
+class SlotCSR(LiteXModule, AutoCSR):
+    def __init__(self, slot: ProjectSlot) -> None:
+        self._ena = CSRStorage(description="The project's `ena` (1: enabled). A level.")
+        self._rst_n = CSRStorage(
+            description=(
+                "The project's `rst_n` (0: in reset; 1: released). A level. Reset is asserted"
+                " at once, with or without a project clock, and released on a project clock"
+                " edge 6 to 9 project clocks after the write, carrying the `ena`, `ui_in` and"
+                " `gamepad_enable` written before it."
+            )
+        )
+        self._ui_in = CSRStorage(
+            8,
+            description=(
+                "The project's `ui_in`. A level. Bits 6:4 come from the gamepad emulator"
+                " instead while `gamepad_enable` is set."
+            ),
+        )
+        self._clock_enable = CSRStorage(
+            description="1: the project clock runs (the BUFGCE enable); 0: it is stopped."
+        )
+        self._status = CSRStatus(
+            fields=[
+                CSRField("locked", description="The MMCM is locked."),
+                CSRField(
+                    "clock_running",
+                    description=(
+                        "The project clock has been seen running in the last 512 system"
+                        " clocks (reads 1 for a clock of 1 MHz and up; flickers below about"
+                        " 0.39 MHz)."
+                    ),
+                ),
+            ],
+            description="Project clock status.",
+        )
+        self.comb += [
+            slot.ena.eq(self._ena.storage),
+            slot.rst_n.eq(self._rst_n.storage),
+            slot.ui_in.eq(self._ui_in.storage),
+            slot.clock_enable.eq(self._clock_enable.storage),
+            self._status.fields.locked.eq(slot.locked),
+            self._status.fields.clock_running.eq(slot.clock_running),
+        ]
+
+
+class GamepadCSR(LiteXModule, AutoCSR):
+    def __init__(self, slot: ProjectSlot) -> None:
+        self._enable = CSRStorage(
+            description=(
+                "1: the gamepad emulator drives `ui_in[6:4]` (latch, clock, data). A level,"
+                " delivered with the slot's control word, so it is in place at the release."
+            )
+        )
+        self._buttons = CSRStorage(
+            24,
+            reset=0xFFFFFF,
+            description=(
+                "The 24 bits each gamepad frame sends, bit n sent n-th"
+                " (`tt_harness.demo.validate.gamepad_bits`): bits 23:12 the first controller,"
+                " 11:0 the second, a held button 1, an empty socket all ones. A level, not"
+                " ordered against the release; the reset value is no controller."
+            ),
+        )
+        self.comb += [
+            slot.gamepad_enable.eq(self._enable.storage),
+            slot.gamepad_buttons.eq(self._buttons.storage),
+        ]
+
+
+class VgaCSR(LiteXModule, AutoCSR):
+    def __init__(self, core: HarnessCore, with_readback: bool) -> None:
+        t = core.timing
+        self._clocks_per_line = CSRStatus(
+            12, description="Measured project clocks from one hsync leading edge to the next."
+        )
+        self._lines_per_frame = CSRStatus(11, description="Measured lines per frame.")
+        self._hsync_width = CSRStatus(12, description="Measured project clocks hsync is active.")
+        self._vsync_lines = CSRStatus(11, description="Measured lines vsync is active.")
+        self._status = CSRStatus(
+            fields=[
+                CSRField("hsync_positive", description="hsync is active high."),
+                CSRField("vsync_positive", description="vsync is active high."),
+                CSRField("locked", description="The last two publications were the same timing."),
+                CSRField(
+                    "no_signal",
+                    description=(
+                        "No vsync within 2**23 project clocks, or none yet: the measurements"
+                        " are stale and the capture is blanked."
+                    ),
+                ),
+            ],
+            description="Sync polarity and lock of the measured timing.",
+        )
+        self._frames = CSRStatus(
+            16,
+            description=(
+                "Publications of the timing so far, wrapping. Every timing register holds"
+                " the same publication: read `frames` before and after the others."
+            ),
+        )
+        self.comb += [
+            self._clocks_per_line.status.eq(t["clocks_per_line"]),
+            self._lines_per_frame.status.eq(t["lines_per_frame"]),
+            self._hsync_width.status.eq(t["hsync_width"]),
+            self._vsync_lines.status.eq(t["vsync_lines"]),
+            self._status.fields.hsync_positive.eq(t["hsync_positive"]),
+            self._status.fields.vsync_positive.eq(t["vsync_positive"]),
+            self._status.fields.locked.eq(t["locked"]),
+            self._status.fields.no_signal.eq(t["no_signal"]),
+            self._frames.status.eq(t["frames"]),
+        ]
+        s = core.settings
+        self._divider = CSRStorage(3, description="Capture: project clocks per pixel (0 is 1).")
+        self._h_offset = CSRStorage(
+            12,
+            description=(
+                "Capture: project clocks from the hsync leading edge to the first pixel (0 is 1)."
+            ),
+        )
+        self._v_offset = CSRStorage(
+            11, description="Capture: lines from the vsync leading edge to the first row (0 is 1)."
+        )
+        self._h_step = CSRStorage(
+            2, description="Capture: store every n-th pixel of a row (0 is 1)."
+        )
+        self._v_step = CSRStorage(2, description="Capture: store every n-th row (0 is 1).")
+        self._blank = CSRStorage(
+            description="Capture: write the picture as black; setting it clears the buffer."
+        )
+        self.comb += [
+            s["divider"].eq(self._divider.storage),
+            s["h_offset"].eq(self._h_offset.storage),
+            s["v_offset"].eq(self._v_offset.storage),
+            s["h_step"].eq(self._h_step.storage),
+            s["v_step"].eq(self._v_step.storage),
+            s["blank"].eq(self._blank.storage),
+        ]
+        if with_readback:
+            n = core.fb.width * core.fb.height
+            self._readback_addr = CSRStorage(
+                len(core.fb.rd_addr),
+                description=(f"Framebuffer pixel to read: y * {core.fb.width} + x, 0 to {n - 1}."),
+            )
+            self._readback_data = CSRStatus(
+                fields=[
+                    CSRField("b", size=2, description="Blue, 0 to 3."),
+                    CSRField("g", size=2, description="Green, 0 to 3."),
+                    CSRField("r", size=2, description="Red, 0 to 3."),
+                ],
+                description=(
+                    "The pixel at `readback_addr`, valid one system clock after the address"
+                    " is written. No tearing protection: a pixel being captured may be new."
+                ),
+            )
+            assert PIXEL_BITS == 6
+            self.comb += [
+                core.fb.rd_addr.eq(self._readback_addr.storage),
+                # A CSRStatus with fields is driven through its fields.
+                self._readback_data.fields.b.eq(core.fb.rd_data[0:2]),
+                self._readback_data.fields.g.eq(core.fb.rd_data[2:4]),
+                self._readback_data.fields.r.eq(core.fb.rd_data[4:6]),
+            ]
+
+
+class SevenSegCSR(LiteXModule, AutoCSR):
+    def __init__(self, core: HarnessCore, window_log2: int) -> None:
+        self._duty = CSRStatus(
+            fields=[
+                CSRField(
+                    seg,
+                    size=8,
+                    description=(
+                        f"Duty of `uo_out[{i}]` (segment {seg}) over the last window of"
+                        f" 2**{window_log2} project clocks: 0 never lit to 255 always lit."
+                    ),
+                )
+                for i, seg in enumerate(SEGMENTS)
+            ],
+            description="The virtual seven-segment display's brightness, one byte a segment.",
+        )
+        self.comb += [
+            getattr(self._duty.fields, seg).eq(core.duty[8 * i : 8 * i + 8])
+            for i, seg in enumerate(SEGMENTS)
+        ]
+
+
+class AtSpeedCSR(LiteXModule, AutoCSR):
+    def __init__(self, check: AtSpeedCheck) -> None:
+        self._clocks = CSRStorage(
+            32, description="N: the number of project clocks the check CRCs, from reset."
+        )
+        self._control = CSRStorage(
+            fields=[
+                CSRField(
+                    "start",
+                    pulse=True,
+                    description="Start a check of `clocks`; cancels any earlier one.",
+                ),
+                CSRField(
+                    "abort",
+                    pulse=True,
+                    description="Abort the check; wins over a start in the same write.",
+                ),
+            ],
+            description="At-speed check commands.",
+        )
+        self._status = CSRStatus(
+            fields=[
+                CSRField("busy", description="A start was given and has not finished."),
+                CSRField("done", description="The most recent start finished: `crc` is valid."),
+            ],
+            description="At-speed check state.",
+        )
+        self._crc = CSRStatus(
+            32,
+            description=(
+                "zlib CRC-32 of the first N bytes of `uo_out` from the first reset clock,"
+                " valid while `done`."
+            ),
+        )
+        self.comb += [
+            check.clocks.eq(self._clocks.storage),
+            check.start.eq(self._control.fields.start),
+            check.abort.eq(self._control.fields.abort),
+            self._status.fields.busy.eq(check.busy),
+            self._status.fields.done.eq(check.done),
+            self._crc.status.eq(check.crc),
+        ]
+
+
+class InfoCSR(LiteXModule, AutoCSR):
+    def __init__(
+        self, clock_hz: int, achieved: tuple[int, int], fb_size: tuple[int, int], pmods: int
+    ) -> None:
+        num, den = achieved
+        self._clock_hz = CSRStatus(
+            32, reset=clock_hz, description="`clock_hz` of demo.json: the requested clock, Hz."
+        )
+        self._clock_hz_num = CSRStatus(
+            64,
+            reset=num,
+            description="Numerator of the achieved project clock in Hz (0 when stopped).",
+        )
+        self._clock_hz_den = CSRStatus(
+            32, reset=den, description="Denominator of the achieved project clock in Hz."
+        )
+        self._fb_width = CSRStatus(16, reset=fb_size[0], description="Framebuffer width.")
+        self._fb_height = CSRStatus(16, reset=fb_size[1], description="Framebuffer height.")
+        self._pmods = CSRStatus(
+            fields=[
+                CSRField(
+                    name.replace("-", "_"),
+                    reset=(pmods >> i) & 1,
+                    description=f"The project declares the `{name}` Pmod.",
+                )
+                for i, name in enumerate(PMODS)
+            ],
+            description="The project's declared Pmods.",
+        )
+        for csr in (
+            self._clock_hz,
+            self._clock_hz_num,
+            self._clock_hz_den,
+            self._fb_width,
+            self._fb_height,
+        ):
+            self.comb += csr.status.eq(csr.status.reset)
+        self.comb += [
+            getattr(self._pmods.fields, name.replace("-", "_")).eq((pmods >> i) & 1)
+            for i, name in enumerate(PMODS)
+        ]
+
+
+# The SoC -------------------------------------------------------------------------------------
+
+
+class HarnessSoC(SoCCore):
+    """The demo build's SoC; see the module docstring.
+
+    `slot` is built by the caller (board clock, `clock_hz` from `demo.json`); `platform` must
+    provide `serial`, and the caller adds the CRG (`sys` domain). `project_name` is the
+    manifest id `<shuttle>/<macro>`. `pmods`: the project's declared Pmods (`PMODS`).
+    `reference_ui_in`: the reference stimulus' fixed `ui_in`, for the at-speed check.
+    `cpu_type=None` builds the SoC without a CPU and so without the UART (register tests drive
+    the bus instead; the UART's FIFOs also do not run in Migen's simulator);
+    `sevenseg_window_log2` overrides the window chosen from the clock.
+    """
+
+    csr_map: ClassVar[dict[str, int]] = dict(CSR_LOCATIONS)
+
+    def __init__(
+        self,
+        platform,
+        sys_clk_freq: int,
+        slot: ProjectSlot,
+        fb_size: tuple[int, int],
+        demo_json: bytes,
+        project_name: str,
+        with_audio: bool,
+        with_readback: bool,
+        *,
+        pmods: Sequence[str],
+        reference_ui_in: int,
+        cpu_type: str | None = "vexriscv",
+        sevenseg_window_log2: int | None = None,
+        main_ram_size: int = MAIN_RAM_SIZE,
+    ) -> None:
+        shuttle = shuttle_of(project_name)
+        self.demo_entry = entry = demo_entry(demo_json, shuttle)
+        self.demo_json = bytes(demo_json)
+        self.project_name = project_name
+        if slot.clock_hz != entry.clock_hz:
+            raise ValueError(
+                f"demo.json sets clock_hz {entry.clock_hz} but the slot's clock is "
+                f"{slot.clock_hz} Hz"
+            )
+        flags = pmod_flags(pmods)
+        if sevenseg_window_log2 is None:
+            sevenseg_window_log2 = sevenseg_window_log2_for(slot.clock_hz)
+
+        with_cpu = cpu_type is not None
+        SoCCore.__init__(
+            self,
+            platform,
+            sys_clk_freq,
+            cpu_type=cpu_type,
+            cpu_variant="standard",
+            integrated_rom_size=ROM_SIZE if with_cpu else 0,
+            integrated_sram_size=SRAM_SIZE if with_cpu else 0,
+            integrated_main_ram_size=main_ram_size if with_cpu else 0,
+            with_uart=with_cpu,
+            uart_name="serial",
+            uart_baudrate=UART_BAUD,
+            with_timer=True,
+            ident=f"tt-harness-handheld-vga {project_name}",
+            ident_version=False,
+        )
+
+        self.core = core = HarnessCore(
+            slot,
+            fb_size,
+            reference_ui_in=reference_ui_in,
+            with_audio=with_audio,
+            sevenseg_window_log2=sevenseg_window_log2,
+        )
+        self.slot = SlotCSR(slot)
+        self.gamepad = GamepadCSR(slot)
+        self.vga = VgaCSR(core, with_readback)
+        self.sevenseg = SevenSegCSR(core, sevenseg_window_log2)
+        self.atspeed = AtSpeedCSR(core.atspeed)
+        self.info = InfoCSR(entry.clock_hz, achieved_clock(slot), fb_size, flags)
+
+
+__all__ = [
+    "CSR_MODULES",
+    "PMODS",
+    "HarnessCore",
+    "HarnessSoC",
+    "achieved_clock",
+    "demo_entry",
+    "demo_json_header",
+]
