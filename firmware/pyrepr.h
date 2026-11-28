@@ -11,11 +11,10 @@
 // - one character of a string inside repr's quotes.
 //
 // Limits: a number with more than PY_MAX_DIGITS significant digits is not handled (the
-// parser refuses it as a firmware limit first). For characters outside ASCII,
-// py_isprintable knows the non-printable ranges listed in pyrepr.c (control, format,
-// separator, surrogate, private use, noncharacters and the large unassigned planes); a
-// code point unassigned in Python's Unicode database outside them prints as itself where
-// Python would escape it.
+// parser refuses it as a firmware limit first). py_isprintable is str.isprintable() of the
+// Python the firmware was built with (py_printable.h, generated, PY_PRINTABLE_SOURCE): a
+// board validator on a Python with another Unicode version may print a few code points
+// differently.
 
 #ifndef TT_FIRMWARE_PYREPR_H
 #define TT_FIRMWARE_PYREPR_H

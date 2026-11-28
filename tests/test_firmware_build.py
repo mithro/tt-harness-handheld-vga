@@ -7,6 +7,10 @@
 - `test_firmware_is_in_the_rom_and_the_bios_is_not_built` (`toolchain`): the overrides of
   LiteX's `Builder` took effect: no `bios.bin` is built, and the ROM's contents are
   `firmware.bin`, word for word, then zeros.
+- `test_the_rom_holds_the_firmware_and_the_largest_shipped_demo` (`toolchain`): the image
+  with the largest shipped `demo.json` (`tests/data/demo/valid/shipped-*.json`) embedded fits
+  `core.ROM_SIZE` with at least an eighth free, and would not fit half of it (the ROM is the
+  next power of two, not larger).
 """
 
 from __future__ import annotations
@@ -19,11 +23,13 @@ from test_soc import _counter, demo
 
 from tt_harness.soc import core, firmware, sim
 
+SHIPPED = sorted((Path(__file__).parent / "data" / "demo" / "valid").glob("shipped-*.json"))
 
-def _builder(tmp_path: Path) -> firmware.FirmwareBuilder:
+
+def _builder(tmp_path: Path, **kw) -> firmware.FirmwareBuilder:
     soc = sim.build_soc(_counter(), demo())
     return firmware.FirmwareBuilder(
-        soc, output_dir=str(tmp_path / "litex"), compile_gateware=False, build_bundle=False
+        soc, output_dir=str(tmp_path / "litex"), compile_gateware=False, build_bundle=False, **kw
     )
 
 
@@ -54,3 +60,18 @@ def test_firmware_is_in_the_rom_and_the_bios_is_not_built(tmp_path: Path) -> Non
     assert len(rom) == core.ROM_SIZE // 4
     assert rom[: len(words)] == words
     assert not any(rom[len(words) :])
+
+
+@pytest.mark.toolchain
+@pytest.mark.skipif(
+    not (firmware.RISCV_GCC / f"{firmware.GCC_TRIPLE}-gcc").is_file(), reason="no RISC-V GCC"
+)
+def test_the_rom_holds_the_firmware_and_the_largest_shipped_demo(tmp_path: Path) -> None:
+    assert SHIPPED
+    largest = max((p.read_bytes() for p in SHIPPED), key=len)
+    builder = _builder(tmp_path, demo_json=largest)  # embedded as is: only its size matters
+    builder.build(build=False, run=False)
+    size = builder.image.stat().st_size
+    print(f"ROM image with a {len(largest)}-byte demo.json: {size} of {core.ROM_SIZE} bytes")
+    assert size <= core.ROM_SIZE - core.ROM_SIZE // 8
+    assert size > core.ROM_SIZE // 2

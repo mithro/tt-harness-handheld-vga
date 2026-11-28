@@ -214,9 +214,12 @@ model and to the vectors in [`tests/data/demo/`](../tests/data/demo). Where they
    as `firmware_limits.h`, and checked at build time with the same text the firmware prints
    at boot. Messages that do not fit `DEMO_ERRORS_TEXT` bytes are left out and counted in
    a last message; later ones that fit are kept.
-4. Unprintable characters in a printed string: `str.isprintable` comes from a table of the
-   Unicode ranges Python treats as unprintable ([`pyrepr.c`](../firmware/pyrepr.c)); a code
-   point that a later Unicode version assigns may print differently.
+4. Unprintable characters in a printed string: the firmware's `str.isprintable` is a table
+   generated at build time from `str.isprintable()` of every code point in the build's
+   Python (`py_printable.h`, which names that Python and its Unicode version), and
+   [`tests/test_firmware_host.py`](../tests/test_firmware_host.py) compares the two for all
+   of U+0000..U+10FFFF. A board whose Python has another Unicode version may print a code
+   point assigned in one version and not the other differently.
 5. The error display: the board enables its factory-test design to show the pattern on the
    7-segment display; the harness holds the chosen project disabled and in reset and writes
    the pattern to `ui_in` ([`docs/registers.md`](registers.md), "The error pattern").

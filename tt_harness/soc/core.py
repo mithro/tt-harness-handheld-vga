@@ -75,7 +75,10 @@ PMODS: tuple[str, ...] = (
 CSR_MODULES: tuple[str, ...] = ("slot", "gamepad", "vga", "sevenseg", "atspeed", "info")
 CSR_LOCATIONS = {name: 16 + i for i, name in enumerate(CSR_MODULES)}
 UART_BAUD = 115200
-ROM_SIZE = 0x8000  # the BIOS is about 23 KiB; the ROM is this size whatever it holds
+# The ROM holds the firmware (`tt_harness.soc.firmware`), its str.isprintable() table and
+# demo.json: about 41 KiB with the largest shipped demo.json, so the next power of two
+# (`tests/test_firmware_build.py` checks the fit with that file).
+ROM_SIZE = 0x10000
 SRAM_SIZE = 0x2000
 MAIN_RAM_SIZE = 0x10000  # the firmware's data: the parser's 32 KiB of JSON tokens and the rest
 SEVENSEG_FRAME_HZ = 60  # the seven-segment window is about one display frame

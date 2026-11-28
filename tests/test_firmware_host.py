@@ -541,6 +541,9 @@ STRINGS = (
     "\x00",
     "/",
     "\b\f",
+    # unassigned in Unicode: Python escapes them; a hand-written table did not
+    "".join(chr(c) for c in (0x378, 0x380, 0x38B, 0x3A2)),
+    chr(0x0B4D) + chr(0x0B4E) + chr(0x1F8FF) + chr(0xE0080),
 )
 
 
@@ -670,3 +673,35 @@ def test_vga_classify_matches_python_across_the_mode_table(host: Path) -> None:
     rows = sum(len(spec.dividers) for spec in vga.MODES)
     assert matched >= rows * 45, (matched, len(lines))  # the clock sweep and the fits
     assert len(lines) - matched >= rows * 10  # and the refusals
+
+
+def test_isprintable_is_pythons_for_every_code_point(host: Path) -> None:
+    """`py_isprintable` against `str.isprintable()` for all of 0..0x10FFFF."""
+    done = subprocess.run([str(host), "nonprintable"], capture_output=True, check=False)
+    assert done.returncode == 0 and done.stderr == b""
+    got = [tuple(int(x, 16) for x in line.split()) for line in done.stdout.decode().splitlines()]
+    want = []
+    for a, b in firmware.nonprintable_runs():  # merge the split at the plane boundary
+        if want and want[-1][1] + 1 == a:
+            want[-1] = (want[-1][0], b)
+        else:
+            want.append((a, b))
+    assert got == want
+    # and those are Python's runs, computed here without the generator
+    flags = [not chr(cp).isprintable() for cp in range(0x110000)]
+    runs = []
+    for cp, np in enumerate(flags):
+        if np and (cp == 0 or not flags[cp - 1]):
+            start = cp
+        if np and (cp == 0x10FFFF or not flags[cp + 1]):
+            runs.append((start, cp))
+    assert got == runs
+
+
+@pytest.mark.parametrize("text", STRINGS)
+def test_a_string_value_prints_as_pythons_repr(host: Path, text: str) -> None:
+    demo = demo_of({**ONE, "address": text})
+    want = validate.validate(demo, SHUTTLE)
+    assert len(want) == 1
+    raw = json.dumps(demo, ensure_ascii=False).encode("utf-8", errors="surrogatepass")
+    assert parse(host, raw) == ("errors", want)

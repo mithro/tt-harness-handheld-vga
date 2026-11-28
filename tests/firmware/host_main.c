@@ -18,6 +18,7 @@
 
 #include "demo_parse.h"
 #include "hal.h"
+#include "pyrepr.h"
 #include "runner.h"
 #include "text.h"
 #include "vga_mode.h"
@@ -118,6 +119,19 @@ int main(int argc, char **argv) {
             if (now > until) now = until;
             runner_tick(&runner, (uint32_t)now);
             if (now == until) break;
+        }
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "nonprintable") == 0) {
+        // the runs of code points py_isprintable is 0 for, "first last" in hex, one a line
+        long start = -1;
+        for (uint32_t cp = 0; cp <= 0x110000; cp++) {
+            int np = cp <= 0x10ffff && !py_isprintable(cp);
+            if (np && start < 0) start = (long)cp;
+            if (!np && start >= 0) {
+                printf("%lx %lx\n", (unsigned long)start, (unsigned long)(cp - 1));
+                start = -1;
+            }
         }
         return 0;
     }

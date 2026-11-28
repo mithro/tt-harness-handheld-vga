@@ -15,6 +15,8 @@
 
 #include "pyrepr.h"
 
+#include "py_printable.h"
+
 // ---- big integers ---------------------------------------------------------------------------
 
 #define BIG_WORDS 72  // 2304 bits; the largest needed is about 1600 (pyrepr.h limits)
@@ -457,24 +459,23 @@ void py_float(struct text *t, const char *lit, size_t n) {
 
 // ---- strings --------------------------------------------------------------------------------
 
-// Non-printable code points above ASCII (str.isprintable() is False): [first, last].
-static const uint32_t nonprintable[][2] = {
-    {0x80, 0xa0},       {0xad, 0xad},       {0x378, 0x379},     {0x600, 0x605},
-    {0x61c, 0x61c},     {0x6dd, 0x6dd},     {0x70f, 0x70f},     {0x890, 0x891},
-    {0x8e2, 0x8e2},     {0x1680, 0x1680},   {0x180e, 0x180e},   {0x2000, 0x200f},
-    {0x2028, 0x202f},   {0x205f, 0x206f},   {0x3000, 0x3000},   {0xd800, 0xf8ff},
-    {0xfdd0, 0xfdef},   {0xfeff, 0xfeff},   {0xfff0, 0xfffb},   {0xfffe, 0xffff},
-    {0x110bd, 0x110bd}, {0x110cd, 0x110cd}, {0x13430, 0x1343f}, {0x1bca0, 0x1bca3},
-    {0x1d173, 0x1d17a}, {0x1fffe, 0x1ffff}, {0x2fffe, 0x2ffff}, {0x323b0, 0xe00ff},
-    {0xe01f0, 0x10ffff},
-};
+// str.isprintable() of one code point: generated from the build's Python (py_printable.h).
+#define NONPRINTABLE_IN(table, cp)                                                   \
+    do {                                                                             \
+        size_t lo = 0, hi = sizeof table / sizeof table[0];                          \
+        while (lo < hi) {                                                            \
+            size_t mid = lo + (hi - lo) / 2;                                         \
+            if ((cp) < table[mid][0]) hi = mid;                                      \
+            else if ((cp) > table[mid][1]) lo = mid + 1;                             \
+            else return 0;                                                           \
+        }                                                                            \
+        return 1;                                                                    \
+    } while (0)
 
 int py_isprintable(uint32_t cp) {
-    if (cp < 0x80) return cp >= 0x20 && cp < 0x7f;
-    for (size_t i = 0; i < sizeof nonprintable / sizeof nonprintable[0]; i++) {
-        if (cp >= nonprintable[i][0] && cp <= nonprintable[i][1]) return 0;
-    }
-    return 1;
+    if (cp > 0x10ffff) return 0;
+    if (cp <= 0xffff) NONPRINTABLE_IN(py_nonprintable_bmp, cp);
+    NONPRINTABLE_IN(py_nonprintable_astral, cp);
 }
 
 void py_utf8(struct text *t, uint32_t cp) {

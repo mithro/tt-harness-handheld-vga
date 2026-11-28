@@ -69,11 +69,18 @@ builds use it the same way. At boot it
    ([`vga_mode.c`](../firmware/vga_mode.c), the C form of `vga.classify`) and programs the
    capture with it.
 
-| Memory | Holds |
-| --- | --- |
-| `rom` (32 KiB) | code, read-only data, the initial values of data |
-| `main_ram` (64 KiB) | data, bss: the parsed demo, the parser's tokens, the console ring |
-| `sram` (8 KiB) | the stack |
+| Memory | Size | Holds |
+| --- | --- | --- |
+| `rom` | 64 KiB | code |
+| `rom` | 64 KiB | read-only data |
+| `rom` | 64 KiB | `demo.json` |
+| `rom` | 64 KiB | the `str.isprintable` table (`py_printable.h`) |
+| `rom` | 64 KiB | the initial values of data |
+| `main_ram` | 64 KiB | data |
+| `main_ram` | 64 KiB | the parsed demo |
+| `main_ram` | 64 KiB | the parser's JSON tokens |
+| `main_ram` | 64 KiB | the console ring |
+| `sram` | 8 KiB | the stack |
 
 ### Console
 
