@@ -375,7 +375,9 @@ def test_start_at_every_phase_of_the_project_clock_gives_the_same_crc(design: _S
 @pytest.mark.xdist_group("work-sources")  # fetches into the shared work/sources cache
 def test_reset_asserts_with_the_project_clock_stopped_in_verilator(design: _Sim) -> None:
     """The reset cell as Migen emits it: the pin falls at once with no clock, and rises only
-    after the clock restarts (second project edge after it)."""
+    after the clock restarts. The release travels in the control word, behind the word with
+    the release bit 0 that is in flight (`slot.py`, "The control word"): at least 5 project
+    clocks after the restart, about 9 project and 5 system clocks at most."""
     script = [
         "set rst_n 1",
         "run 2000000",
@@ -390,9 +392,11 @@ def test_reset_asserts_with_the_project_clock_stopped_in_verilator(design: _Sim)
         "proj 1",
         "run 30000",  # one edge so far (the first is half a period after the restart)
         "show",
-        "run 40000",
+        "run 80000",  # three or four edges: fewer than the five the release needs
+        "show",
+        "run 2000000",
         "show",
     ]
     out = [ln.split() for ln in design.run(script)]
     pins = [int(o[3]) for o in out]
-    assert pins == [1, 0, 0, 0, 1], pins
+    assert pins == [1, 0, 0, 0, 0, 1], pins
