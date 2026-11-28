@@ -125,6 +125,14 @@ The rest of the line is one message, whole, with `\` and control characters esca
 | other below 0x20 | `\xNN` |
 | 0x7f | `\x7f` |
 
+#### `error source=console`
+
+`error source=console msg=the line above was cut`: the line before it did not fit the
+fixed-size buffer it was built in and was cut short
+([`hal_litex.c`](../firmware/hal_litex.c), `console_text`). The bounds in
+[`firmware.py`](../tt_harness/soc/firmware.py) on the project name and the framebuffer probes
+keep every line within the buffer, so this line means a firmware bug.
+
 #### `error display`
 
 One line, once the project is held off (see "The error pattern"):

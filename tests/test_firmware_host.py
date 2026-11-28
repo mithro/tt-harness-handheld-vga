@@ -22,6 +22,7 @@ import random
 import shutil
 import struct
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -443,6 +444,16 @@ def test_a_limit_fails_at_build_and_at_boot_with_the_same_text(host: Path, entry
     assert raised.value.errors
     assert all(m.startswith(limits.PREFIX) for m in raised.value.errors)
     assert parse(host, text.encode()) == ("errors", raised.value.errors)
+
+
+def test_the_build_check_of_deep_json_leaves_the_recursion_limit_alone() -> None:
+    """`limits.check` walks the JSON without recursion, so it neither needs nor changes
+    Python's recursion limit (a process-wide setting)."""
+    before = sys.getrecursionlimit()
+    deep = "[" * 900 + "]" * 900
+    text = f'{{"version": 1, "shuttle": "{SHUTTLE}", "projects": [], "x": {deep}}}'
+    assert limits.check(text, SHUTTLE) == [limits.DEPTH]
+    assert sys.getrecursionlimit() == before
 
 
 def test_a_number_beyond_32_bits_is_a_loud_error(host: Path) -> None:

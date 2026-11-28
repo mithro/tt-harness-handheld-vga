@@ -17,8 +17,8 @@ the simulation (`tt_harness.soc.sim`) and the board builds use it the same way,
 
 Why the ROM and not main RAM behind the BIOS: the firmware starts at reset, with no BIOS
 memory test or serial-boot wait (seconds of simulated time, and a BIOS that tests main RAM
-would overwrite a preloaded image), and the image is one file. The ROM is 32 KiB
-(`core.ROM_SIZE`); data, bss and the parser's token array live in main RAM.
+would overwrite a preloaded image), and the image is one file. The ROM is `core.ROM_SIZE`
+bytes; data, bss and the parser's token array live in main RAM.
 
 This overrides two private methods of LiteX's `Builder` (`_generate_includes` and
 `_generate_rom_software`) at the LiteX version pinned in `pyproject.toml`.

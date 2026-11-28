@@ -74,4 +74,7 @@ def test_the_rom_holds_the_firmware_and_the_largest_shipped_demo(tmp_path: Path)
     size = builder.image.stat().st_size
     print(f"ROM image with a {len(largest)}-byte demo.json: {size} of {core.ROM_SIZE} bytes")
     assert size <= core.ROM_SIZE - core.ROM_SIZE // 8
-    assert size > core.ROM_SIZE // 2
+    assert size > core.ROM_SIZE // 2, (
+        f"the image ({size} bytes) would fit a ROM of half the size: core.ROM_SIZE is meant to"
+        " be the next power of two above it, not larger (block RAM is scarce on the A7-35T)"
+    )

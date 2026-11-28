@@ -980,11 +980,11 @@ static int get_u32(int entry, int step, int v, const char *field, uint32_t max, 
     struct text *t = msg_begin();
     text_str(t, LIMIT);
     where_step(t, entry, step);
-    text_str(t, ": \"");
+    text_str(t, DEMO_VALUE_FIELD);
     text_str(t, field);
-    text_str(t, "\" is ");
+    text_str(t, DEMO_VALUE_IS);
     value_str(t, v, 1);
-    text_str(t, ", more than ");
+    text_str(t, DEMO_VALUE_MORE);
     text_u32(t, max);
     msg_end();
     return 0;

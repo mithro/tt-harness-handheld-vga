@@ -55,13 +55,22 @@ ENTRY_FIELDS = (
 )
 
 
+# The message for a 32-bit value over its limit, in parts: PREFIX, where, VALUE_FIELD, the
+# field, VALUE_IS, the value, VALUE_MORE, the limit. The firmware builds it from the same
+# parts (`DEMO_VALUE_*` in the header).
+VALUE_FIELD = ': "'
+VALUE_IS = '" is '
+VALUE_MORE = ", more than "
+
+
 def value(where: str, field: str, v: int, limit: int) -> str:
-    return f'{PREFIX}{where}: "{field}" is {v}, more than {limit}'
+    return f"{PREFIX}{where}{VALUE_FIELD}{field}{VALUE_IS}{v}{VALUE_MORE}{limit}"
 
 
 def _c_string(text: str) -> str:
-    assert all(32 <= ord(c) < 127 and c not in '"\\' for c in text), text
-    return f'"{text}"'
+    assert all(32 <= ord(c) < 127 for c in text), text
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def header() -> str:
@@ -86,6 +95,9 @@ def header() -> str:
         ("DEMO_MSG_PROJECTS", PROJECTS),
         ("DEMO_MSG_STEPS", STEPS),
         ("DEMO_MSG_NOT_SHOWN", NOT_SHOWN),
+        ("DEMO_VALUE_FIELD", VALUE_FIELD),
+        ("DEMO_VALUE_IS", VALUE_IS),
+        ("DEMO_VALUE_MORE", VALUE_MORE),
     ]
     lines = [
         "/* SPDX-License-Identifier: Apache-2.0 */",
@@ -129,23 +141,19 @@ def _json_limit(text: str) -> str | None:
         object_pairs_hook=lambda pairs: ("object", pairs),
     )
 
-    def walk(v: Any, depth: int) -> tuple[int, int]:  # (tokens, deepest)
+    # An explicit stack, not recursion: a deep file must not hit Python's recursion limit
+    # (nor change it for the whole process).
+    tokens, deepest = 0, 0
+    stack: list[tuple[Any, int]] = [(tree, 0)]
+    while stack:
+        v, depth = stack.pop()
+        tokens += 1
+        deepest = max(deepest, depth)
         if isinstance(v, tuple) and len(v) == 2 and v[0] == "object":
-            tokens, deepest = 1, depth
-            for _key, item in v[1]:
-                t, d = walk(item, depth + 1)
-                tokens, deepest = tokens + 1 + t, max(deepest, d)  # the key is a token
-            return tokens, deepest
-        if isinstance(v, list):
-            tokens, deepest = 1, depth
-            for item in v:
-                t, d = walk(item, depth + 1)
-                tokens, deepest = tokens + t, max(deepest, d)
-            return tokens, deepest
-        return 1, depth
-
-    sys.setrecursionlimit(max(sys.getrecursionlimit(), 10_000))
-    tokens, deepest = walk(tree, 0)
+            tokens += len(v[1])  # each key is a token
+            stack.extend((item, depth + 1) for _key, item in v[1])
+        elif isinstance(v, list):
+            stack.extend((item, depth + 1) for item in v)
     if tokens > MAX_TOKENS:
         return TOKENS
     if deepest > MAX_DEPTH:
