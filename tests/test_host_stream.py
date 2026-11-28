@@ -11,7 +11,7 @@ from tt_harness.host import run
 
 CHATTY = r"""
 import sys
-sys.stdout.buffer.write(b'ship7ohT\n\x00\x00TTHR listening {"baud": 9600}\n')
+sys.stdout.buffer.write(b'fake-login-banner\n\x00\x00TTHR listening {"baud": 9600}\n')
 sys.stdout.flush()
 print('TTHR received {"bytes": 3}')
 sys.exit(3)
