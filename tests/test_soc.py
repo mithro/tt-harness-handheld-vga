@@ -95,14 +95,16 @@ def test_csr_map_is_documented_and_current() -> None:
         assert reg.description, f"{reg.name} has no description"
         for field in reg.fields:
             assert field.description, f"{reg.name}.{field.name} has no description"
-    # The addresses are LiteX's own, as its csr.csv export gives them.
+    # The addresses and access are LiteX's own, as its csr.csv export gives them.
     text = export.get_csr_csv(
         csr_regions=soc.csr_regions, constants=soc.constants, mem_regions=soc.bus.regions
     )
     rows = [r for r in csv.reader(io.StringIO(text)) if r and r[0] == "csr_register"]
-    litex = {r[1]: (int(r[2], 0), int(r[3])) for r in rows}
-    ours = {r.name: (r.address, r.words) for r in registers.registers(soc)}
+    access = {"ro": "read-only", "rw": "read-write"}
+    litex = {r[1]: (int(r[2], 0), int(r[3]), access[r[4]]) for r in rows}
+    ours = {r.name: (r.address, r.words, r.access) for r in registers.registers(soc)}
     assert ours == litex
+    assert litex["timer0_ev_pending"][2] == "read-write"  # written 1 to clear
 
 
 def test_registers_doc_states_the_firmware_rules() -> None:

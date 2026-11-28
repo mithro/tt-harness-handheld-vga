@@ -73,7 +73,7 @@ Generated from `tt_harness.soc.registers.reference_soc()`. Addresses are byte ad
 | `timer0_update_value` | `0xf000100c` | 1 | 1 | read-write | `0x0` |
 | `timer0_value` | `0xf0001010` | 1 | 32 | read-only | - |
 | `timer0_ev_status` | `0xf0001014` | 1 | 1 | read-only | - |
-| `timer0_ev_pending` | `0xf0001018` | 1 | 1 | read-only | - |
+| `timer0_ev_pending` | `0xf0001018` | 1 | 1 | read-write | - |
 | `timer0_ev_enable` | `0xf000101c` | 1 | 1 | read-write | `0x0` |
 
 ### `uart`
@@ -84,7 +84,7 @@ Generated from `tt_harness.soc.registers.reference_soc()`. Addresses are byte ad
 | `uart_txfull` | `0xf0001804` | 1 | 1 | read-only | - |
 | `uart_rxempty` | `0xf0001808` | 1 | 1 | read-only | - |
 | `uart_ev_status` | `0xf000180c` | 1 | 2 | read-only | - |
-| `uart_ev_pending` | `0xf0001810` | 1 | 2 | read-only | - |
+| `uart_ev_pending` | `0xf0001810` | 1 | 2 | read-write | - |
 | `uart_ev_enable` | `0xf0001814` | 1 | 2 | read-write | `0x0` |
 | `uart_txempty` | `0xf0001818` | 1 | 1 | read-only | - |
 | `uart_rxfull` | `0xf000181c` | 1 | 1 | read-only | - |
@@ -365,7 +365,7 @@ The project's declared Pmods.
 
 ### CSR memories
 
-| Memory | Address | Bytes |
+| Memory | Address | Address span (bytes) |
 |---|---|---|
 | `identifier_mem` | `0xf0000800` | 180 |
 

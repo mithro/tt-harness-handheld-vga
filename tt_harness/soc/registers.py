@@ -58,7 +58,12 @@ class Register:
 
 
 def _access(csr) -> str:
-    if isinstance(csr, CSRStatus):
+    """LiteX's own rule (`export.get_csr_csv`, and `csr.h`'s write accessors): read-only when
+    the CSR says so, or for a `CSRStatus` with no write port. An event manager's `pending` is
+    a `CSRStatus(read_only=False)`, written 1 to clear."""
+    if getattr(csr, "read_only", False):
+        return "read-only"
+    if isinstance(csr, CSRStatus) and not hasattr(csr, "wr_data"):
         return "read-only"
     return "read-write"
 
@@ -77,14 +82,9 @@ def _fields(csr) -> tuple[Field, ...]:
     agg = getattr(csr, "fields", None)
     out = []
     for f in getattr(agg, "fields", []) or []:
-        if f.pulse:
-            access = "write: pulse"
-        elif isinstance(csr, CSRStatus):
-            access = "read-only"
-        else:
-            access = "read-write"
+        access = "write: pulse" if f.pulse else _access(csr)
         desc = " ".join(str(f.description or "").split())
-        reset = None if isinstance(csr, CSRStatus) else f.reset_value
+        reset = None if _reset(csr) is None else f.reset_value
         out.append(Field(f.name, f.offset, f.size, access, reset, desc))
     return tuple(out)
 
@@ -167,10 +167,10 @@ def render(soc) -> str:
                 lines.append("")
     memories = [(n, r) for n, r in soc.csr_regions.items() if isinstance(r.obj, Memory)]
     if memories:
-        lines += ["### CSR memories", "", "| Memory | Address | Bytes |", "|---|---|---|"]
+        lines += ["### CSR memories", "", "| Memory | Address | Address span (bytes) |", "|---|---|---|"]
         for name, region in memories:
-            nbytes = region.obj.depth * 4
-            lines.append(f"| `{name}` | `0x{region.origin:08x}` | {nbytes} |")
+            span = region.obj.depth * region.busword // 8  # one bus word per entry
+            lines.append(f"| `{name}` | `0x{region.origin:08x}` | {span} |")
         lines.append("")
     lines.append(END)
     return "\n".join(lines) + "\n"
