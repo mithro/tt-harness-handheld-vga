@@ -474,7 +474,9 @@ def _counter() -> Sources:
 
 @pytest.mark.toolchain
 @pytest.mark.skipif(tools.find("verilator") is None, reason="verilator not installed")
-@pytest.mark.skipif(tools.find("riscv64-unknown-elf-gcc") is None, reason="no RISC-V GCC")
+@pytest.mark.skipif(
+    not (sim.RISCV_GCC / "riscv64-unknown-elf-gcc").is_file(), reason="no RISC-V GCC"
+)
 def test_bios_boots_and_prints_banner(tmp_path: Path) -> None:
     result = sim.run(
         _counter(),

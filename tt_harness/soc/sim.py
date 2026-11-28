@@ -50,6 +50,7 @@ SYS_CLK_HZ = 50_000_000
 FB_SIZE = (320, 240)
 TOP = "harness_sim"
 HARNESS = Path(__file__).resolve().parent.parent / "sim" / "soc_main.cpp"
+RISCV_GCC = tools.TOOLCHAINS / "riscv-gcc" / "bin"  # `scripts/setup_toolchains.py` puts it here
 RUN_TIMEOUT_S = 1800
 EXIT_CYCLE_LIMIT = 3
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -125,11 +126,13 @@ def build_soc(sources: Sources, demo_json: bytes):
 
 @contextlib.contextmanager
 def _toolchain_path():
-    """The repository's RISC-V GCC on PATH, for the BIOS build (LiteX finds it there)."""
-    gcc = tools.find("riscv64-unknown-elf-gcc")
+    """The repository's RISC-V GCC (`scripts/setup_toolchains.py`) first on PATH, for the
+    BIOS build (LiteX finds it there). No other GCC is used: a missing one is an error."""
+    gcc = RISCV_GCC / "riscv64-unknown-elf-gcc"
+    if not (gcc.is_file() and os.access(gcc, os.X_OK)):
+        raise FileNotFoundError(f"no RISC-V GCC at {gcc}: run scripts/setup_toolchains.py")
     old = os.environ.get("PATH", "")
-    if gcc is not None:
-        os.environ["PATH"] = f"{gcc.parent}{os.pathsep}{old}"
+    os.environ["PATH"] = f"{RISCV_GCC}{os.pathsep}{old}"
     try:
         yield
     finally:
@@ -192,7 +195,7 @@ def run(
     except verilate.ToolError as e:
         raise SimError(e.message, log) from e
 
-    clock_hz = core.demo_entry(demo_json, sources.project.shuttle).clock_hz
+    clock_hz = soc.demo_entry.clock_hz
     cmd = [
         str(binary),
         "--sys-hz",
